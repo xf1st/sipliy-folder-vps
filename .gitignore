@@ -1,0 +1,18 @@
+# Зависимости
+node_modules/
+
+# Конфиденциальные данные — НЕ коммитить
+info_about_vps.txt
+deploy.config.js
+
+# Сгенерированные артефакты
+sipliyfolder-extension-*.zip
+app/public/
+
+# Сессии пользователей (хранятся на сервере)
+sessions/
+
+# Системное
+.DS_Store
+Thumbs.db
+*.log

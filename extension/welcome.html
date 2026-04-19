@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Sipliy Folder VPS — Добро пожаловать!</title>
+<link rel="icon" href="icons/icon-128.png"/>
+<style>
+  *,*::before,*::after { margin:0; padding:0; box-sizing:border-box; }
+  :root {
+    --p:#6b509a; --p2:#a083d1; --bg:#faf9fe; --surf:#ffffff;
+    --txt:#1a1c1f; --muted:#6b6573; --line:#ece9f3;
+    --ok:#16a34a; --err:#dc2626;
+  }
+  body {
+    font-family:'Segoe UI', system-ui, -apple-system, sans-serif;
+    background:linear-gradient(180deg, #f5f1fb 0%, #faf9fe 60%);
+    color:var(--txt); min-height:100vh; padding:40px 20px;
+  }
+  .wrap { max-width:780px; margin:0 auto; }
+
+  .hero {
+    background:linear-gradient(135deg, #6b509a 0%, #a083d1 100%);
+    border-radius:24px; padding:40px; color:#fff;
+    box-shadow:0 20px 60px rgba(107,80,154,0.25);
+    display:flex; align-items:center; gap:24px;
+    margin-bottom:32px;
+  }
+  .hero .logo {
+    width:80px; height:80px; border-radius:20px;
+    background:rgba(255,255,255,0.15);
+    display:flex; align-items:center; justify-content:center;
+    font-size:42px; font-weight:800;
+    flex-shrink:0; box-shadow:0 4px 14px rgba(0,0,0,0.15);
+  }
+  .hero h1 { font-size:1.8rem; font-weight:800; margin-bottom:6px; letter-spacing:-0.01em; }
+  .hero p { font-size:1rem; opacity:0.9; line-height:1.5; }
+  .badge {
+    display:inline-block; background:rgba(255,255,255,0.2);
+    padding:3px 10px; border-radius:999px; font-size:0.7rem; font-weight:700;
+    text-transform:uppercase; letter-spacing:0.05em; margin-bottom:8px;
+  }
+
+  .card {
+    background:var(--surf); border-radius:20px; padding:28px;
+    box-shadow:0 4px 24px rgba(0,0,0,0.04);
+    margin-bottom:20px; border:1px solid var(--line);
+  }
+  .card h2 {
+    font-size:1.15rem; font-weight:700; margin-bottom:16px;
+    display:flex; align-items:center; gap:10px;
+  }
+  .card h2 .num {
+    width:28px; height:28px; border-radius:50%;
+    background:linear-gradient(135deg, #6b509a, #a083d1);
+    color:#fff; display:flex; align-items:center; justify-content:center;
+    font-size:0.85rem; font-weight:800; flex-shrink:0;
+  }
+  .card p { color:var(--muted); line-height:1.6; margin-bottom:12px; font-size:0.92rem; }
+  .card ul { margin-left:38px; margin-top:8px; color:var(--muted); font-size:0.92rem; line-height:1.7; }
+  .card ul li { margin-bottom:4px; }
+  .card .body { padding-left:38px; }
+
+  .kbd {
+    display:inline-block; padding:2px 8px; background:var(--line);
+    border-radius:5px; font-family:'Consolas','Monaco',monospace;
+    font-size:0.85em; color:var(--txt); border-bottom:2px solid #d8d3e3;
+  }
+
+  .step-img {
+    margin:14px 0; padding:14px 18px; border-radius:12px;
+    background:#f4f3f8; border:1px dashed #d8d3e3;
+    font-size:0.88rem; color:var(--muted); line-height:1.6;
+  }
+  .step-img code {
+    background:#fff; padding:1px 6px; border-radius:4px;
+    color:var(--p); font-family:'Consolas','Monaco',monospace; font-size:0.9em;
+  }
+
+  .cta-row {
+    display:flex; gap:12px; margin-top:18px; flex-wrap:wrap;
+  }
+  .btn {
+    display:inline-flex; align-items:center; gap:8px;
+    padding:12px 22px; border-radius:12px; font-size:0.92rem; font-weight:700;
+    text-decoration:none; cursor:pointer; border:none;
+    transition:transform 0.05s, opacity 0.15s;
+  }
+  .btn:active { transform:scale(0.98); }
+  .btn-primary {
+    background:linear-gradient(135deg, #6b509a, #a083d1); color:#fff;
+    box-shadow:0 4px 14px rgba(107,80,154,0.25);
+  }
+  .btn-primary:hover { opacity:0.92; }
+  .btn-secondary {
+    background:var(--surf); color:var(--txt); border:1px solid var(--line);
+  }
+  .btn-secondary:hover { background:var(--line); }
+
+  .check-list { list-style:none; padding:0; margin-top:14px; }
+  .check-list li {
+    padding:10px 0; border-bottom:1px solid var(--line);
+    display:flex; align-items:flex-start; gap:10px;
+    font-size:0.92rem; color:var(--txt);
+  }
+  .check-list li:last-child { border-bottom:none; }
+  .check-list .ok { color:var(--ok); font-weight:700; flex-shrink:0; }
+
+  .browser-tag {
+    display:inline-block; padding:3px 10px; border-radius:6px;
+    background:var(--line); color:var(--muted);
+    font-size:0.72rem; font-weight:600; margin-right:6px;
+  }
+
+  .footer {
+    text-align:center; padding:32px 0 16px; color:var(--muted); font-size:0.82rem;
+  }
+
+  @media (max-width:600px) {
+    .hero { flex-direction:column; text-align:center; padding:28px; }
+    .hero h1 { font-size:1.5rem; }
+    .card { padding:20px; }
+    .card .body, .card ul { padding-left:0; margin-left:0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="logo">S</div>
+    <div>
+      <span class="badge">Расширение установлено!</span>
+      <h1>Добро пожаловать в Sipliy Folder VPS</h1>
+      <p>Скачивайте файлы с любых сайтов прямо на ваш VPS — правым кликом по ссылке. Файлы потом загружаются с сервера на максимальной скорости 1 Гбит/с.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="num">1</span> Получите токен на сайте</h2>
+    <div class="body">
+      <p>Войдите в веб-интерфейс Sipliy Folder VPS и получите личный токен:</p>
+      <div class="step-img">
+        Откройте <code id="site-link-inline">https://sipliyfolder.ru</code> → войдите → нажмите ⚙ <b>Настройки</b> в меню справа сверху → раздел <b>Токен для расширения</b> → нажмите кнопку <b>Показать</b> → скопируйте токен.
+      </div>
+      <div class="cta-row">
+        <a href="https://sipliyfolder.ru" target="_blank" class="btn btn-primary">
+          🌐 Открыть сайт
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="num">2</span> Введите данные в расширение</h2>
+    <div class="body">
+      <p>Кликните на иконку <b>Sipliy Folder VPS</b> в правом верхнем углу браузера (рядом со строкой адреса) и заполните два поля:</p>
+      <ul>
+        <li><b>URL сервера</b> — например <code>https://sipliyfolder.ru</code></li>
+        <li><b>Токен</b> — тот, что вы скопировали на шаге 1</li>
+      </ul>
+      <p style="margin-top:12px">Нажмите <b>Проверить</b>, чтобы убедиться, что всё работает, затем <b>Сохранить</b>.</p>
+      <div class="step-img">
+        💡 <b>Не видите иконку?</b> Кликните на значок 🧩 (пазл) в браузере → найдите «Sipliy Folder VPS» → нажмите 📌 (булавку), чтобы закрепить.
+      </div>
+      <div class="cta-row">
+        <button id="open-popup-hint" class="btn btn-secondary">📌 Как закрепить иконку</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="num">3</span> Используйте</h2>
+    <div class="body">
+      <p>Найдите ссылку на любой странице, кликните по ней <b>правой кнопкой мыши</b> и выберите один из пунктов:</p>
+      <ul>
+        <li><b>Скачать ссылку на VPS</b> — для обычных <code>&lt;a href&gt;</code> ссылок</li>
+        <li><b>Скачать изображение на VPS</b> — на любой картинке</li>
+        <li><b>Скачать видео на VPS</b> — на встроенном видео или аудио</li>
+        <li><b>Скачать эту страницу как файл на VPS</b> — клик по пустому месту страницы</li>
+        <li><b>Скачать выделенный URL на VPS</b> — выделите URL текстом и кликните правой кнопкой</li>
+      </ul>
+      <div class="step-img">
+        После клика появится уведомление, а на иконке расширения мигнёт зелёная галочка ✓ — значит загрузка добавлена. Откройте сайт, чтобы посмотреть прогресс и забрать готовый файл.
+      </div>
+      <div class="cta-row">
+        <a href="https://sipliyfolder.ru" target="_blank" class="btn btn-primary">📂 Открыть мои загрузки</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="num">✓</span> Совместимость</h2>
+    <div class="body">
+      <span class="browser-tag">Google Chrome 100+</span>
+      <span class="browser-tag">Microsoft Edge 100+</span>
+      <span class="browser-tag">Brave</span>
+      <span class="browser-tag">Opera</span>
+      <span class="browser-tag">Vivaldi</span>
+      <ul class="check-list">
+        <li><span class="ok">✓</span> <span>Manifest V3 — последний стандарт расширений</span></li>
+        <li><span class="ok">✓</span> <span>Поддержка магнет-ссылок (magnet:) и HTTP/HTTPS</span></li>
+        <li><span class="ok">✓</span> <span>Уведомления о статусе загрузки</span></li>
+        <li><span class="ok">✓</span> <span>Индикация на иконке: <b>!</b> — не настроено, <b>✓</b> — добавлено, <b>!</b> — ошибка</span></li>
+        <li><span class="ok">✓</span> <span>Таймаут 10 секунд — никогда не зависнет</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="footer">
+    Sipliy Folder VPS Extension v2.0.0 · Сделано с ❤
+  </div>
+
+</div>
+
+<script>
+  document.getElementById('open-popup-hint').addEventListener('click', () => {
+    alert('Чтобы закрепить иконку расширения:\n\n1. Кликните на значок 🧩 (пазл) справа от адресной строки\n2. Найдите в списке «Sipliy Folder VPS»\n3. Нажмите на 📌 (булавку) рядом с ним\n\nГотово — иконка теперь всегда на виду!');
+  });
+</script>
+</body>
+</html>
