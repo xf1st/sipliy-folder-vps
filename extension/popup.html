@@ -12,35 +12,68 @@
   }
   body { font-family:'Segoe UI',system-ui,sans-serif; width:380px; background:var(--bg); color:var(--txt); }
 
-  .header { background:linear-gradient(135deg,#6b509a,#a083d1); padding:13px 16px;
+  /* ── Header ── */
+  .header { background:linear-gradient(135deg,#6b509a,#a083d1); padding:12px 16px;
     display:flex; align-items:center; gap:10px; color:#fff; }
-  .logo { width:34px; height:34px; border-radius:9px; background:rgba(255,255,255,0.18);
-    display:flex; align-items:center; justify-content:center; font-size:17px; font-weight:800; flex-shrink:0; }
-  .hd h1 { font-size:0.9rem; font-weight:700; }
-  .hd p  { font-size:0.67rem; opacity:0.8; margin-top:1px; }
+  .logo { width:32px; height:32px; border-radius:9px; background:rgba(255,255,255,0.18);
+    display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:800; flex-shrink:0; }
+  .hd h1 { font-size:0.88rem; font-weight:700; }
+  .hd p  { font-size:0.65rem; opacity:0.8; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:260px; }
 
+  /* ── Tabs ── */
   .tabs { display:flex; border-bottom:1px solid var(--line); background:var(--surf); }
   .tab-btn { flex:1; padding:9px 6px; border:none; background:none; cursor:pointer;
     font-size:0.74rem; font-weight:600; color:var(--muted);
     display:flex; align-items:center; justify-content:center; gap:4px;
-    border-bottom:2px solid transparent; transition:color 0.15s, border-color 0.15s; }
+    border-bottom:2px solid transparent; transition:color 0.15s,border-color 0.15s; }
   .tab-btn.active { color:var(--p); border-bottom-color:var(--p); }
   .count { background:var(--p); color:#fff; border-radius:9px; padding:1px 5px;
     font-size:0.62rem; font-weight:700; display:none; }
   .count.show { display:inline; }
 
+  /* ── Panels ── */
   .panel { display:none; padding:13px 15px 15px; }
   .panel.active { display:block; }
 
-  /* ── Status card ── */
-  .status-card { background:var(--surf); border:1px solid var(--line); border-radius:10px;
-    padding:9px 12px; display:flex; align-items:center; gap:9px; margin-bottom:11px; }
-  .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
-  .dot.ok   { background:var(--ok);   box-shadow:0 0 0 3px rgba(22,163,74,.15); }
-  .dot.err  { background:var(--err);  box-shadow:0 0 0 3px rgba(220,38,38,.15); }
-  .dot.warn { background:var(--warn); box-shadow:0 0 0 3px rgba(217,119,6,.15); }
-  .st-text strong { font-size:0.8rem; display:block; }
-  .st-text span   { font-size:0.69rem; color:var(--muted); }
+  /* ── Account cards ── */
+  .account-card { background:var(--surf); border:1.5px solid var(--line); border-radius:10px;
+    padding:9px 11px; margin-bottom:6px; display:flex; align-items:center; gap:9px;
+    cursor:pointer; transition:border-color .15s,background .15s; }
+  .account-card:hover { border-color:var(--p2); }
+  .account-card.active { border-color:var(--p); background:rgba(107,80,154,.06); }
+  .acc-avatar { width:30px; height:30px; border-radius:7px;
+    background:linear-gradient(135deg,#6b509a,#a083d1); color:#fff;
+    display:flex; align-items:center; justify-content:center;
+    font-size:13px; font-weight:800; flex-shrink:0; }
+  .acc-info { flex:1; min-width:0; }
+  .acc-name-row { font-size:.8rem; font-weight:700; display:flex; align-items:center; gap:5px;
+    white-space:nowrap; overflow:hidden; }
+  .acc-name-text { overflow:hidden; text-overflow:ellipsis; }
+  .acc-url  { font-size:.64rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px; }
+  .acc-actions { display:flex; gap:4px; flex-shrink:0; }
+  .acc-btn { background:none; border:1px solid var(--line); border-radius:6px; cursor:pointer;
+    padding:3px 7px; font-size:.7rem; color:var(--muted); transition:background .12s,border-color .12s; }
+  .acc-btn:hover { background:var(--line); color:var(--txt); }
+  .acc-btn.danger:hover { background:#fee2e2; border-color:#fca5a5; color:var(--err); }
+  .active-badge { background:var(--p); color:#fff; font-size:.57rem; font-weight:700;
+    padding:1px 5px; border-radius:4px; flex-shrink:0; white-space:nowrap; }
+  .acc-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; background:#ccc; transition:background .3s; }
+  .acc-dot.ok  { background:var(--ok); }
+  .acc-dot.err { background:var(--err); }
+
+  /* ── Account switcher (downloads tab) ── */
+  .switcher { display:flex; gap:5px; flex-wrap:wrap; margin-bottom:10px; }
+  .sw-pill { padding:4px 10px; border-radius:7px; font-size:.7rem; font-weight:600; cursor:pointer;
+    border:1px solid var(--line); background:var(--surf); color:var(--muted);
+    transition:all .15s; white-space:nowrap; }
+  .sw-pill.active { background:var(--p); border-color:var(--p); color:#fff; }
+  .sw-pill:hover:not(.active) { border-color:var(--p2); color:var(--p); }
+
+  /* ── Form back button ── */
+  .form-back { display:flex; align-items:center; gap:5px; background:none; border:none;
+    cursor:pointer; color:var(--p); font-size:.77rem; font-weight:600; padding:0 0 10px;
+    transition:opacity .15s; }
+  .form-back:hover { opacity:.7; }
 
   /* ── Permissions warning ── */
   .perm-warn { display:none; background:#fff7ed; border:1px solid #fed7aa; border-radius:10px;
@@ -48,7 +81,7 @@
   .perm-warn .pw-icon { font-size:1.2rem; flex-shrink:0; margin-top:1px; }
   .perm-warn .pw-txt { flex:1; }
   .perm-warn .pw-txt strong { font-size:0.8rem; color:#92400e; display:block; margin-bottom:3px; }
-  .perm-warn .pw-txt p { font-size:0.7rem; color:#a16207; line-height:1.5; margin-bottom:6px; }
+  .perm-warn .pw-txt p  { font-size:0.7rem; color:#a16207; line-height:1.5; margin-bottom:6px; }
   .perm-warn .pw-txt ol { font-size:0.7rem; color:#a16207; margin-left:14px; line-height:1.7; }
 
   /* ── Form ── */
@@ -89,17 +122,17 @@
     display:flex; align-items:center; justify-content:center; gap:5px; }
   .btn:active { transform:scale(.97); }
   .btn:disabled { opacity:.5; cursor:not-allowed; }
-  .btn-primary { background:linear-gradient(135deg,#6b509a,#a083d1); color:#fff; }
+  .btn-primary   { background:linear-gradient(135deg,#6b509a,#a083d1); color:#fff; }
   .btn-primary:hover:not(:disabled) { opacity:.9; }
   .btn-secondary { background:var(--surf); color:var(--txt); border:1px solid var(--line); }
   .btn-secondary:hover:not(:disabled) { background:var(--line); }
-  .btn-warn { background:#fff7ed; color:#92400e; border:1px solid #fed7aa; font-size:0.75rem; padding:7px 10px; }
-  .btn-warn:hover { background:#ffedd5; }
 
-  .toast { margin-top:8px; text-align:center; font-size:0.74rem; min-height:15px; transition:color .15s; }
-  .toast.ok  { color:var(--ok); }
-  .toast.err { color:var(--err); }
-  .toast.info{ color:var(--muted); }
+  .toast { margin-top:8px; text-align:center; font-size:0.74rem; min-height:15px; }
+  .toast.ok   { color:var(--ok); }
+  .toast.err  { color:var(--err); }
+  .toast.info { color:var(--muted); }
+
+  .settings-sep { border:none; border-top:1px solid var(--line); margin:12px -15px; }
 
   .footer { margin-top:11px; padding-top:10px; border-top:1px solid var(--line);
     display:flex; justify-content:space-between; font-size:0.67rem; color:var(--muted); }
@@ -112,9 +145,8 @@
   .sec-label:first-child { margin-top:0; }
   .sec-label::after { content:''; flex:1; height:1px; background:var(--line); }
 
-  /* Готово к скачиванию */
   #ready-section { display:none; }
-  .ready-banner { background:linear-gradient(135deg, #dcfce7, #f0fdf4); border:1px solid #86efac;
+  .ready-banner { background:linear-gradient(135deg,#dcfce7,#f0fdf4); border:1px solid #86efac;
     border-radius:12px; padding:10px 12px; margin-bottom:10px; }
   .ready-banner-title { font-size:0.75rem; font-weight:700; color:#15803d; margin-bottom:7px;
     display:flex; align-items:center; gap:5px; }
@@ -132,13 +164,11 @@
   .btn-pc:hover { opacity:.88; }
   .btn-pc:disabled { opacity:.5; cursor:not-allowed; }
 
-  /* Активные загрузки */
   .dl-item { background:var(--surf); border:1px solid var(--line); border-radius:10px;
     padding:9px 11px; margin-bottom:7px; }
   .dl-item:last-child { margin-bottom:0; }
   .dl-top { display:flex; align-items:flex-start; gap:7px; margin-bottom:5px; }
-  .dl-name { font-size:0.78rem; font-weight:600; color:var(--txt);
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .dl-name { font-size:0.78rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .dl-meta { font-size:0.67rem; color:var(--muted); margin-top:2px; }
   .dl-badge { font-size:0.61rem; font-weight:700; padding:2px 7px; border-radius:6px; white-space:nowrap; flex-shrink:0; }
   .dl-badge.active  { background:#ede9f7; color:var(--p); }
@@ -148,11 +178,10 @@
   .progress-bar { height:3px; background:var(--line); border-radius:4px; overflow:hidden; }
   .progress-fill { height:100%; border-radius:4px; background:linear-gradient(90deg,#6b509a,#a083d1); transition:width .4s; }
 
-  /* Все файлы */
   .file-item { background:var(--surf); border:1px solid var(--line); border-radius:10px;
     padding:9px 11px; margin-bottom:7px; display:flex; align-items:center; gap:9px; }
   .file-item:last-child { margin-bottom:0; }
-  .file-ico { font-size:1.3rem; flex-shrink:0; }
+  .file-ico  { font-size:1.3rem; flex-shrink:0; }
   .file-info { flex:1; min-width:0; }
   .file-name { font-size:0.78rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .file-meta { font-size:0.67rem; color:var(--muted); margin-top:2px; }
@@ -164,7 +193,6 @@
 
   .empty-state { text-align:center; padding:22px 12px; color:var(--muted); font-size:0.8rem; }
   .empty-state .icon { font-size:2rem; margin-bottom:6px; opacity:.5; }
-
   .refresh-btn { background:none; border:none; cursor:pointer; color:var(--muted);
     padding:2px 6px; font-size:0.69rem; border-radius:5px; margin-left:auto; }
   .refresh-btn:hover { background:var(--line); color:var(--txt); }
@@ -176,7 +204,7 @@
   <div class="logo">S</div>
   <div class="hd">
     <h1>Sipliy Folder VPS</h1>
-    <p>Скачивание правым кликом по ссылке</p>
+    <p id="hd-sub">Скачивание правым кликом по ссылке</p>
   </div>
 </div>
 
@@ -188,61 +216,79 @@
 <!-- ── Настройки ──────────────────────────────────────────── -->
 <div class="panel active" id="panel-settings">
 
-  <div class="status-card">
-    <div class="dot warn" id="status-dot"></div>
-    <div class="st-text">
-      <strong id="status-title">Проверка…</strong>
-      <span id="status-sub">…</span>
+  <!-- View: Account list -->
+  <div id="accounts-view">
+
+    <div style="font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:8px">Аккаунты</div>
+    <div id="accounts-list">
+      <div class="empty-state" style="padding:16px 0"><div class="icon">🔐</div>Нет аккаунтов. Добавьте первый!</div>
+    </div>
+    <button class="btn btn-secondary" id="add-account-btn" style="width:100%;margin-top:5px;font-size:.78rem">＋ Добавить аккаунт</button>
+
+    <hr class="settings-sep" style="margin-top:13px">
+
+    <!-- Global settings -->
+    <div class="perm-warn" id="perm-warn" style="display:none">
+      <div class="pw-icon">⚠️</div>
+      <div class="pw-txt">
+        <strong>Авто-скачивание не работает</strong>
+        <div id="perm-instructions" style="font-size:.7rem;color:#a16207;line-height:1.6;margin-top:4px"></div>
+      </div>
+    </div>
+
+    <div class="toggle-row" style="margin-top:0">
+      <div class="tl">
+        <strong>Авто-скачать на ПК</strong>
+        <span>Когда VPS закачал — сразу загружать на ПК</span>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="auto-dl" checked/>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div style="margin-top:7px">
+      <button class="btn btn-secondary" id="test-dl-btn" style="width:100%;font-size:.76rem;padding:8px">🧪 Тест авто-загрузки на ПК</button>
+    </div>
+
+    <div class="footer">
+      <span>v2.3.0</span>
+      <a href="#" id="open-help">Инструкция</a>
     </div>
   </div>
 
-  <!-- Предупреждение: показывается только после неудачного теста -->
-  <div class="perm-warn" id="perm-warn" style="display:none">
-    <div class="pw-icon">⚠️</div>
-    <div class="pw-txt">
-      <strong>Авто-скачивание не работает</strong>
-      <div id="perm-instructions" style="font-size:.7rem;color:#a16207;line-height:1.6;margin-top:4px"></div>
+  <!-- View: Add / Edit account form -->
+  <div id="account-form-view" style="display:none">
+    <button class="form-back" id="form-back-btn">← Назад к аккаунтам</button>
+    <div id="form-title" style="font-weight:700;font-size:.9rem;margin-bottom:13px">Добавить аккаунт</div>
+
+    <label for="acc-name-inp">Название</label>
+    <input id="acc-name-inp" type="text" placeholder="Мой VPS" autocomplete="off"/>
+
+    <label for="acc-url-inp">URL сервера</label>
+    <input id="acc-url-inp" type="url" placeholder="https://sipliyfolder.ru" autocomplete="off"/>
+
+    <label for="acc-token-inp">Токен расширения</label>
+    <div class="input-wrap">
+      <input id="acc-token-inp" type="password" placeholder="Из ⚙ Настройки → Токен" autocomplete="off"/>
+      <button class="eye" id="acc-eye">👁</button>
+    </div>
+    <p class="hint">Откройте <a href="#" id="open-site-form">сайт</a> → ⚙ Настройки → «Токен для расширения» → Показать → скопируйте.</p>
+
+    <div id="form-status" style="min-height:16px;font-size:.74rem;margin-top:6px;text-align:center"></div>
+
+    <div class="btn-row">
+      <button class="btn btn-secondary" id="form-test-btn">🔌 Проверить</button>
+      <button class="btn btn-primary"   id="form-save-btn">💾 Сохранить</button>
     </div>
   </div>
 
-  <label for="serverUrl">URL сервера</label>
-  <input id="serverUrl" type="url" placeholder="https://sipliyfolder.ru" autocomplete="off"/>
-
-  <label for="token">Токен расширения</label>
-  <div class="input-wrap">
-    <input id="token" type="password" placeholder="Из ⚙ Настройки → Токен" autocomplete="off"/>
-    <button class="eye" id="eye">👁</button>
-  </div>
-  <p class="hint">Откройте <a href="#" id="open-site">сайт</a> → ⚙ Настройки → «Токен для расширения» → Показать → скопируйте.</p>
-
-  <div class="toggle-row">
-    <div class="tl">
-      <strong>Авто-скачать на ПК</strong>
-      <span>Когда VPS закачал — сразу загружать на ПК</span>
-    </div>
-    <label class="switch">
-      <input type="checkbox" id="auto-dl" checked/>
-      <span class="slider"></span>
-    </label>
-  </div>
-  <div style="margin-top:7px">
-    <button class="btn btn-secondary" id="test-dl-btn" style="width:100%;font-size:.76rem;padding:8px">🧪 Тест авто-загрузки на ПК</button>
-  </div>
-
-  <div class="btn-row">
-    <button class="btn btn-secondary" id="test-btn">🔌 Проверить</button>
-    <button class="btn btn-primary"   id="save-btn">💾 Сохранить</button>
-  </div>
-  <p class="toast info" id="toast"></p>
-
-  <div class="footer">
-    <span>v2.2.0</span>
-    <a href="#" id="open-help">Инструкция</a>
-  </div>
 </div>
 
 <!-- ── Загрузки ───────────────────────────────────────────── -->
 <div class="panel" id="panel-downloads">
+
+  <!-- Account switcher (hidden if 1 account) -->
+  <div id="account-switcher" style="display:none"></div>
 
   <!-- Готово — скачать на ПК -->
   <div id="ready-section">

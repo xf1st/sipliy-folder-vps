@@ -1,162 +1,15 @@
-// Sipliy Folder VPS — popup script v2.3
+// Sipliy Folder VPS — popup script v2.3 (multi-account)
 
 const $ = id => document.getElementById(id);
 
-// ─── Tab switching ────────────────────────────────────────
-function switchTab(tabName) {
-  document.querySelectorAll('.tab-btn, .panel').forEach(el => el.classList.remove('active'));
-  document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
-  $('panel-' + tabName).classList.add('active');
-  if (tabName === 'downloads') loadDownloadsTab();
+// ─── Utilities ────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
-
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-});
-
-// ─── Settings tab ─────────────────────────────────────────
-const urlEl   = $('serverUrl');
-const tokenEl = $('token');
-const toast   = $('toast');
-const autoDl  = $('auto-dl');
-
-function setStatus(level, title, sub) {
-  $('status-dot').className = 'dot ' + level;
-  $('status-title').textContent = title;
-  $('status-sub').textContent = sub;
-}
-function setToast(level, msg) { toast.className = 'toast ' + level; toast.textContent = msg; }
-function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function normalizeUrl(u) {
   u = (u || '').trim().replace(/\/+$/, '');
   if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
   return u;
-}
-
-// Загрузка настроек + автопереход на вкладку Загрузки
-chrome.storage.sync.get(['serverUrl', 'token'], cfg => {
-  if (cfg.serverUrl) urlEl.value = cfg.serverUrl;
-  if (cfg.token)     tokenEl.value = cfg.token;
-  refreshStatus();
-  // Если расширение настроено — сразу открыть вкладку Загрузки
-  if (cfg.serverUrl && cfg.token) {
-    switchTab('downloads');
-  }
-});
-chrome.storage.local.get('autoDownload', d => {
-  autoDl.checked = d.autoDownload !== false;
-});
-
-async function refreshStatus() {
-  const url = normalizeUrl(urlEl.value), token = (tokenEl.value || '').trim();
-  if (!url || !token) { setStatus('warn', 'Не настроено', 'Введите URL и токен'); return; }
-  setStatus('warn', 'Проверка…', url);
-  const r = await testConn(url, token);
-  r.ok ? setStatus('ok', 'Подключено', url) : setStatus('err', 'Ошибка: ' + r.error, url);
-}
-
-async function testConn(url, token) {
-  try {
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 8000);
-    const res = await fetch(url + '/api/add-ext', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'url=', signal: ctrl.signal,
-    });
-    if (res.status === 401 || res.status === 403) return { ok: false, error: 'Неверный токен' };
-    if (res.status === 400 || res.ok) return { ok: true };
-    return { ok: false, error: 'HTTP ' + res.status };
-  } catch (e) { return { ok: false, error: e.name === 'AbortError' ? 'Таймаут' : e.message }; }
-}
-
-$('eye').addEventListener('click', () => { tokenEl.type = tokenEl.type === 'password' ? 'text' : 'password'; });
-
-$('test-btn').addEventListener('click', async () => {
-  const url = normalizeUrl(urlEl.value), token = (tokenEl.value || '').trim();
-  if (!url || !token) { setToast('err', 'Введите URL и токен'); return; }
-  $('test-btn').disabled = true; setToast('info', 'Проверяем…');
-  const r = await testConn(url, token);
-  $('test-btn').disabled = false;
-  r.ok ? (setToast('ok', '✓ Соединение работает'), setStatus('ok', 'Подключено', url))
-       : (setToast('err', '✕ ' + r.error), setStatus('err', 'Ошибка', r.error));
-});
-
-$('save-btn').addEventListener('click', () => {
-  const url = normalizeUrl(urlEl.value), token = (tokenEl.value || '').trim();
-  if (!url || !token) { setToast('err', 'Заполните оба поля'); return; }
-  chrome.storage.sync.set({ serverUrl: url, token }, () => {
-    urlEl.value = url;
-    setToast('ok', '✓ Сохранено!');
-    refreshStatus();
-    setTimeout(() => setToast('info', ''), 2500);
-  });
-});
-
-$('test-dl-btn').addEventListener('click', async () => {
-  const btn = $('test-dl-btn');
-  btn.disabled = true; btn.textContent = 'Проверяем…';
-  const warn = $('perm-warn');
-  const inst = $('perm-instructions');
-
-  let errorType = null, errorMsg = '';
-  if (typeof chrome.downloads === 'undefined') {
-    errorType = 'no-permission';
-  } else {
-    try {
-      const blob = new Blob(['sipliy-test'], { type: 'text/plain' });
-      const blobUrl = URL.createObjectURL(blob);
-      const id = await chrome.downloads.download({ url: blobUrl, filename: 'sipliy-test.txt', saveAs: false });
-      URL.revokeObjectURL(blobUrl);
-      setTimeout(() => chrome.downloads.cancel(id, () => chrome.downloads.erase({ id })), 500);
-      errorType = null;
-    } catch (e) { errorMsg = e.message || ''; errorType = 'blocked'; }
-  }
-
-  if (!errorType) {
-    warn.style.display = 'none';
-    setToast('ok', '✓ Авто-скачивание работает!');
-  } else {
-    warn.style.display = 'flex';
-    const isEdge = navigator.userAgent.includes('Edg/');
-    const browserName = isEdge ? 'Edge' : 'Chrome';
-    if (errorType === 'no-permission') {
-      inst.innerHTML = `<b>Причина:</b> расширению не выдано разрешение на загрузку файлов.<br>
-        <b>Решение — перезагрузить расширение:</b>
-        <ol><li>Откройте <b>${isEdge ? 'edge' : 'chrome'}://extensions</b></li>
-        <li>Найдите <b>Sipliy Folder VPS</b></li>
-        <li>Нажмите кнопку <b>↻ обновить</b></li>
-        <li>Снова нажмите «Тест авто-загрузки»</li></ol>`;
-    } else {
-      inst.innerHTML = `<b>Причина:</b> браузер заблокировал автоматическую загрузку.<br>
-        <b>Решение:</b>
-        <ol><li>Откройте настройки ${browserName}: <b>⋯</b> → <b>Настройки</b></li>
-        <li>Перейдите в <b>Конфиденциальность и безопасность</b></li>
-        <li>Откройте <b>Настройки сайтов</b></li>
-        <li>Найдите <b>Автоматическая загрузка файлов</b></li>
-        <li>Добавьте <b>${normalizeUrl(urlEl.value) || 'адрес вашего сервера'}</b> в список разрешённых</li>
-        <li>Снова нажмите «Тест авто-загрузки»</li></ol>
-        ${errorMsg ? '<span style="font-size:.67rem;color:#92400e;margin-top:4px;display:block">Ошибка: ' + escHtml(errorMsg) + '</span>' : ''}`;
-    }
-    setToast('err', '✕ Авто-скачивание заблокировано');
-  }
-
-  btn.textContent = 'Тест авто-загрузки';
-  setTimeout(() => { btn.disabled = false; }, 1500);
-});
-
-autoDl.addEventListener('change', () => chrome.storage.local.set({ autoDownload: autoDl.checked }));
-$('open-site').addEventListener('click', e => { e.preventDefault(); chrome.tabs.create({ url: normalizeUrl(urlEl.value) || 'https://sipliyfolder.ru' }); });
-$('open-help').addEventListener('click', e => { e.preventDefault(); chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') }); });
-[urlEl, tokenEl].forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter') $('save-btn').click(); }));
-
-// ─── Downloads tab ────────────────────────────────────────
-let pollTimer = null;
-
-function getConfig() {
-  return new Promise(r => chrome.storage.sync.get(['serverUrl', 'token'], cfg =>
-    r({ serverUrl: (cfg.serverUrl || '').replace(/\/+$/, ''), token: cfg.token || '' })
-  ));
 }
 function fmt(b) {
   if (!b || b < 0) return '—';
@@ -174,62 +27,429 @@ function fileEmoji(name) {
            zip:'📦',rar:'📦','7z':'📦',tar:'📦',gz:'📦',exe:'💿',msi:'💿',iso:'💿',
            dmg:'🍎',apk:'📱',pdf:'📄',jpg:'🖼',jpeg:'🖼',png:'🖼',gif:'🖼',webp:'🖼' }[ext] || '📁';
 }
+function genId() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+// ─── Account storage ──────────────────────────────────────
+async function loadAccountsData() {
+  const d = await new Promise(r =>
+    chrome.storage.sync.get(['accounts', 'activeAccountId', 'serverUrl', 'token'], r)
+  );
+  let accounts = Array.isArray(d.accounts) ? d.accounts : [];
+  let activeAccountId = d.activeAccountId || null;
+
+  // Migration: old single-account format → accounts array
+  if (!accounts.length && d.serverUrl && d.token) {
+    const id = genId();
+    accounts = [{ id, name: 'Мой VPS', url: d.serverUrl.replace(/\/+$/, ''), token: d.token }];
+    activeAccountId = id;
+    await new Promise(r => chrome.storage.sync.set({ accounts, activeAccountId }, r));
+  }
+
+  if (!activeAccountId && accounts.length) activeAccountId = accounts[0].id;
+  return { accounts, activeAccountId };
+}
+
+async function saveAccountsData(accounts, activeAccountId) {
+  return new Promise(r => chrome.storage.sync.set({ accounts, activeAccountId }, r));
+}
+
+function getActiveAccount(accounts, activeAccountId) {
+  return accounts.find(a => a.id === activeAccountId) || accounts[0] || null;
+}
+
+// ─── Config for downloads (active account) ────────────────
+async function getConfig() {
+  const { accounts, activeAccountId } = await loadAccountsData();
+  const acc = getActiveAccount(accounts, activeAccountId);
+  if (!acc) return { serverUrl: '', token: '', accountId: null };
+  return { serverUrl: acc.url.replace(/\/+$/, ''), token: acc.token, accountId: acc.id };
+}
+
+// ─── Tab switching ────────────────────────────────────────
+function switchTab(tabName) {
+  document.querySelectorAll('.tab-btn, .panel').forEach(el => el.classList.remove('active'));
+  document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+  $('panel-' + tabName).classList.add('active');
+  if (tabName === 'downloads') loadDownloadsTab();
+}
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+// ─── Settings: Render accounts list ───────────────────────
+const dotsCache = {};
+
+function renderAccountsList(accounts, activeAccountId) {
+  const el = $('accounts-list');
+  if (!accounts.length) {
+    el.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="icon">🔐</div>Нет аккаунтов. Добавьте первый!</div>';
+    return;
+  }
+  el.innerHTML = accounts.map(a => {
+    const isActive = a.id === activeAccountId;
+    const dot = dotsCache[a.id];
+    const dotClass = dot === true ? 'ok' : dot === false ? 'err' : '';
+    return `<div class="account-card${isActive ? ' active' : ''}" data-id="${escHtml(a.id)}">
+      <div class="acc-avatar">${escHtml((a.name || a.url || '?')[0].toUpperCase())}</div>
+      <div class="acc-info">
+        <div class="acc-name-row">
+          <span class="acc-name-text">${escHtml(a.name || a.url)}</span>
+          ${isActive ? '<span class="active-badge">Активный</span>' : ''}
+          <span class="acc-dot ${dotClass}" data-dot-id="${escHtml(a.id)}"></span>
+        </div>
+        <div class="acc-url">${escHtml(a.url)}</div>
+      </div>
+      <div class="acc-actions">
+        <button class="acc-btn" data-action="edit" data-id="${escHtml(a.id)}">✏</button>
+        ${!isActive ? `<button class="acc-btn" data-action="switch" data-id="${escHtml(a.id)}">Войти</button>` : ''}
+        <button class="acc-btn danger" data-action="delete" data-id="${escHtml(a.id)}">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+$('accounts-list').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-action]');
+  if (btn) {
+    const { action, id } = btn.dataset;
+    if      (action === 'edit')   openAccountForm(id);
+    else if (action === 'switch') await switchToAccount(id);
+    else if (action === 'delete') await deleteAccount(id);
+    return;
+  }
+  const card = e.target.closest('.account-card[data-id]');
+  if (card) await switchToAccount(card.dataset.id);
+});
+
+// ─── Settings: Account switcher in downloads tab ──────────
+function renderAccountSwitcher(accounts, activeAccountId) {
+  const el = $('account-switcher');
+  if (accounts.length <= 1) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = '<div class="switcher">' +
+    accounts.map(a =>
+      `<div class="sw-pill${a.id === activeAccountId ? ' active' : ''}" data-switch-id="${escHtml(a.id)}">${escHtml(a.name || a.url)}</div>`
+    ).join('') + '</div>';
+}
+
+$('account-switcher').addEventListener('click', async e => {
+  const pill = e.target.closest('[data-switch-id]');
+  if (!pill) return;
+  await switchToAccount(pill.dataset.switchId);
+});
+
+// ─── Settings: Header subtitle ────────────────────────────
+function updateHeaderSub(accounts, activeAccountId) {
+  const acc = getActiveAccount(accounts, activeAccountId);
+  $('hd-sub').textContent = !acc
+    ? 'Скачивание правым кликом по ссылке'
+    : accounts.length > 1 ? (acc.name || acc.url) : (acc.url || 'Скачивание правым кликом по ссылке');
+}
+
+// ─── Settings: Init & connection dots ─────────────────────
+async function initSettings() {
+  const { accounts, activeAccountId } = await loadAccountsData();
+  renderAccountsList(accounts, activeAccountId);
+  renderAccountSwitcher(accounts, activeAccountId);
+  updateHeaderSub(accounts, activeAccountId);
+  checkAndUpdateDots(accounts);
+  return { accounts, activeAccountId };
+}
+
+async function checkAndUpdateDots(accounts) {
+  for (const acc of accounts) {
+    testConn(acc.url, acc.token).then(r => {
+      dotsCache[acc.id] = r.ok;
+      const dot = document.querySelector(`[data-dot-id="${CSS.escape(acc.id)}"]`);
+      if (dot) dot.className = 'acc-dot ' + (r.ok ? 'ok' : 'err');
+    });
+  }
+}
+
+// ─── Settings: switchToAccount ────────────────────────────
+async function switchToAccount(id) {
+  const { accounts, activeAccountId } = await loadAccountsData();
+  if (id === activeAccountId) return;
+  await saveAccountsData(accounts, id);
+  await initSettings();
+  if ($('panel-downloads').classList.contains('active')) {
+    clearTimeout(pollTimer);
+    loadDownloadsTab();
+  }
+}
+
+// ─── Settings: deleteAccount ──────────────────────────────
+async function deleteAccount(id) {
+  const { accounts, activeAccountId } = await loadAccountsData();
+  const acc = accounts.find(a => a.id === id);
+  if (!acc) return;
+  if (!confirm(`Удалить аккаунт «${acc.name || acc.url}»?`)) return;
+
+  const newAccounts = accounts.filter(a => a.id !== id);
+  const newActiveId = activeAccountId === id
+    ? (newAccounts[0]?.id || null)
+    : activeAccountId;
+  await saveAccountsData(newAccounts, newActiveId);
+
+  delete dotsCache[id];
+
+  // Remove readyFiles belonging to this account
+  const { readyFiles: rf = [] } = await new Promise(r => chrome.storage.local.get('readyFiles', r));
+  await new Promise(r => chrome.storage.local.set(
+    { readyFiles: rf.filter(f => f.accountId !== id) }, r
+  ));
+
+  await initSettings();
+
+  // Reload downloads if open
+  if ($('panel-downloads').classList.contains('active')) {
+    clearTimeout(pollTimer);
+    loadDownloadsTab();
+  }
+}
+
+// ─── Account form: open / close / save ────────────────────
+let editingAccountId = null;
+
+function openAccountForm(accountId = null) {
+  editingAccountId = accountId;
+  $('accounts-view').style.display = 'none';
+  $('account-form-view').style.display = 'block';
+  $('form-title').textContent = accountId ? 'Изменить аккаунт' : 'Добавить аккаунт';
+  setFormStatus('', '');
+
+  if (accountId) {
+    loadAccountsData().then(({ accounts }) => {
+      const a = accounts.find(x => x.id === accountId);
+      if (a) {
+        $('acc-name-inp').value  = a.name  || '';
+        $('acc-url-inp').value   = a.url   || '';
+        $('acc-token-inp').value = a.token || '';
+      }
+    });
+  } else {
+    $('acc-name-inp').value  = '';
+    $('acc-url-inp').value   = '';
+    $('acc-token-inp').value = '';
+  }
+}
+
+function closeAccountForm() {
+  editingAccountId = null;
+  $('account-form-view').style.display = 'none';
+  $('accounts-view').style.display = 'block';
+}
+
+function setFormStatus(cls, msg) {
+  const el = $('form-status');
+  el.className = cls ? 'toast ' + cls : '';
+  el.textContent = msg;
+}
+
+$('form-back-btn').addEventListener('click', closeAccountForm);
+
+$('acc-eye').addEventListener('click', () => {
+  const inp = $('acc-token-inp');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+});
+
+$('open-site-form').addEventListener('click', e => {
+  e.preventDefault();
+  chrome.tabs.create({ url: normalizeUrl($('acc-url-inp').value) || 'https://sipliyfolder.ru' });
+});
+
+$('add-account-btn').addEventListener('click', () => openAccountForm(null));
+
+$('form-test-btn').addEventListener('click', async () => {
+  const url   = normalizeUrl($('acc-url-inp').value);
+  const token = $('acc-token-inp').value.trim();
+  if (!url || !token) { setFormStatus('err', '✕ Введите URL и токен'); return; }
+  $('form-test-btn').disabled = true;
+  setFormStatus('info', 'Проверяем…');
+  const r = await testConn(url, token);
+  $('form-test-btn').disabled = false;
+  r.ok ? setFormStatus('ok', '✓ Соединение работает') : setFormStatus('err', '✕ ' + r.error);
+});
+
+$('form-save-btn').addEventListener('click', async () => {
+  const name  = $('acc-name-inp').value.trim();
+  const url   = normalizeUrl($('acc-url-inp').value);
+  const token = $('acc-token-inp').value.trim();
+  if (!url || !token) { setFormStatus('err', '✕ Заполните URL и токен'); return; }
+
+  const { accounts, activeAccountId } = await loadAccountsData();
+
+  if (editingAccountId) {
+    const idx = accounts.findIndex(a => a.id === editingAccountId);
+    if (idx >= 0) accounts[idx] = { ...accounts[idx], name: name || url, url, token };
+    await saveAccountsData(accounts, activeAccountId);
+  } else {
+    const newAcc = { id: genId(), name: name || url, url, token };
+    accounts.push(newAcc);
+    // First ever account → make it active
+    await saveAccountsData(accounts, accounts.length === 1 ? newAcc.id : activeAccountId);
+  }
+
+  closeAccountForm();
+  await initSettings();
+});
+
+// ─── Shared: testConn ─────────────────────────────────────
+async function testConn(url, token) {
+  try {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch(url + '/api/add-ext', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'url=',
+      signal: ctrl.signal,
+    });
+    if (res.status === 401 || res.status === 403) return { ok: false, error: 'Неверный токен' };
+    if (res.status === 400 || res.ok) return { ok: true };
+    return { ok: false, error: 'HTTP ' + res.status };
+  } catch (e) {
+    return { ok: false, error: e.name === 'AbortError' ? 'Таймаут' : e.message };
+  }
+}
+
+// ─── Global settings ──────────────────────────────────────
+chrome.storage.local.get('autoDownload', d => {
+  $('auto-dl').checked = d.autoDownload !== false;
+});
+$('auto-dl').addEventListener('change', () =>
+  chrome.storage.local.set({ autoDownload: $('auto-dl').checked })
+);
+
+$('test-dl-btn').addEventListener('click', async () => {
+  const btn = $('test-dl-btn');
+  btn.disabled = true; btn.textContent = 'Проверяем…';
+  const warn = $('perm-warn');
+  const inst = $('perm-instructions');
+
+  let errorType = null, errorMsg = '';
+  if (typeof chrome.downloads === 'undefined') {
+    errorType = 'no-permission';
+  } else {
+    try {
+      const blob = new Blob(['sipliy-test'], { type: 'text/plain' });
+      const blobUrl = URL.createObjectURL(blob);
+      const id = await chrome.downloads.download({ url: blobUrl, filename: 'sipliy-test.txt', saveAs: false });
+      URL.revokeObjectURL(blobUrl);
+      setTimeout(() => chrome.downloads.cancel(id, () => chrome.downloads.erase({ id })), 500);
+    } catch (e) { errorMsg = e.message || ''; errorType = 'blocked'; }
+  }
+
+  if (!errorType) {
+    warn.style.display = 'none';
+  } else {
+    warn.style.display = 'flex';
+    const isEdge = navigator.userAgent.includes('Edg/');
+    const { accounts, activeAccountId } = await loadAccountsData();
+    const acc = getActiveAccount(accounts, activeAccountId);
+    const serverUrl = acc ? escHtml(acc.url) : 'адрес вашего сервера';
+    const browserName = isEdge ? 'Edge' : 'Chrome';
+    if (errorType === 'no-permission') {
+      inst.innerHTML = `<b>Причина:</b> расширению не выдано разрешение на загрузку файлов.<br>
+        <b>Решение — перезагрузить расширение:</b>
+        <ol><li>Откройте <b>${isEdge ? 'edge' : 'chrome'}://extensions</b></li>
+        <li>Найдите <b>Sipliy Folder VPS</b></li>
+        <li>Нажмите кнопку <b>↻ обновить</b></li>
+        <li>Снова нажмите «Тест»</li></ol>`;
+    } else {
+      inst.innerHTML = `<b>Причина:</b> браузер заблокировал автозагрузку.<br>
+        <b>Решение:</b>
+        <ol><li>Откройте настройки ${browserName}: <b>⋯</b> → <b>Настройки</b></li>
+        <li>Перейдите в <b>Конфиденциальность и безопасность</b></li>
+        <li>Откройте <b>Настройки сайтов</b></li>
+        <li>Найдите <b>Автоматическая загрузка файлов</b></li>
+        <li>Добавьте <b>${serverUrl}</b> в список разрешённых</li>
+        <li>Снова нажмите «Тест»</li></ol>
+        ${errorMsg ? '<span style="font-size:.67rem;color:#92400e;margin-top:4px;display:block">Ошибка: ' + escHtml(errorMsg) + '</span>' : ''}`;
+    }
+  }
+
+  btn.textContent = '🧪 Тест авто-загрузки на ПК';
+  setTimeout(() => { btn.disabled = false; }, 1500);
+});
+
+$('open-help').addEventListener('click', e => {
+  e.preventDefault();
+  chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
+});
+
+// ─── Initialization ───────────────────────────────────────
+(async () => {
+  const { accounts } = await initSettings();
+  if (accounts.length > 0) switchTab('downloads');
+})();
+
+// ─── Downloads tab ────────────────────────────────────────
+let pollTimer = null;
 const SL = { active:'Скачивается', waiting:'В очереди', paused:'Пауза', complete:'Готово', error:'Ошибка' };
 
 async function loadDownloadsTab() {
   clearTimeout(pollTimer);
   await renderDownloads();
-  pollTimer = setTimeout(loadDownloadsTab, 2000); // обновляем каждые 2 секунды
+  pollTimer = setTimeout(loadDownloadsTab, 2000);
 }
 
 async function renderDownloads() {
   const cfg = await getConfig();
+  const { accounts, activeAccountId } = await loadAccountsData();
+  const activeAcc = getActiveAccount(accounts, activeAccountId);
+
+  // Update switcher
+  renderAccountSwitcher(accounts, activeAccountId);
+
   if (!cfg.serverUrl || !cfg.token) {
     $('ready-section').style.display = 'none';
-    $('active-list').innerHTML = '<div class="empty-state"><div class="icon">⚙️</div>Сначала настройте расширение</div>';
+    $('active-list').innerHTML = '<div class="empty-state"><div class="icon">⚙️</div>Добавьте аккаунт в настройках</div>';
     $('file-list').innerHTML = '';
     return;
   }
 
-  // Параллельно запрашиваем загрузки и файлы
+  // Parallel fetch: downloads + files
   const [dlRes, filesRes] = await Promise.all([
     fetch(cfg.serverUrl + '/api/downloads-ext', { headers: { 'Authorization': 'Bearer ' + cfg.token } }).catch(() => null),
     fetch(cfg.serverUrl + '/api/files-ext',     { headers: { 'Authorization': 'Bearer ' + cfg.token } }).catch(() => null),
   ]);
 
-  // Получаем текущие файлы на VPS
   let vpsFiles = [];
-  if (filesRes && filesRes.ok) {
-    vpsFiles = await filesRes.json().catch(() => []);
-  }
+  if (filesRes && filesRes.ok) vpsFiles = await filesRes.json().catch(() => []);
   const vpsFileNames = new Set(vpsFiles.map(f => f.name));
 
-  // ── Чистим readyFiles: удаляем те, которых больше нет на VPS ──
+  // Clean readyFiles: remove deleted VPS files (only for current account), keep other accounts' files
   const { readyFiles: rawReady = [] } = await new Promise(r => chrome.storage.local.get('readyFiles', r));
-  const readyFiles = rawReady.filter(f => vpsFileNames.has(f.name));
-  if (readyFiles.length !== rawReady.length) {
-    await new Promise(r => chrome.storage.local.set({ readyFiles }, r));
+  const cleaned = rawReady.filter(f => {
+    const isThisAcc = !f.accountId || f.accountId === activeAcc?.id;
+    return !isThisAcc || vpsFileNames.has(f.name);
+  });
+  if (cleaned.length !== rawReady.length) {
+    await new Promise(r => chrome.storage.local.set({ readyFiles: cleaned }, r));
   }
+  // Show only current account's ready files
+  const readyFiles = cleaned.filter(f => !f.accountId || f.accountId === activeAcc?.id);
 
-  // ── Секция "Готово — скачать на ПК" ──
-  const readySection = $('ready-section');
-  const readyList    = $('ready-list');
+  // ── Ready-to-download section ──
   if (readyFiles.length > 0) {
-    readySection.style.display = 'block';
-    readyList.innerHTML = readyFiles.map(f => `
-      <div class="ready-item" id="ready-${encodeURIComponent(f.name)}">
+    $('ready-section').style.display = 'block';
+    $('ready-list').innerHTML = readyFiles.map(f => `
+      <div class="ready-item" id="ri-${escHtml(encodeURIComponent(f.name))}">
         <div class="ready-icon">${fileEmoji(f.name)}</div>
         <div class="ready-info">
           <div class="ready-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
           <div class="ready-meta">${fmt(f.size)} · готово ${fmtDate(f.readyAt)}</div>
         </div>
-        <button class="btn-pc" data-url="${encodeURIComponent(f.dlUrl)}" data-name="${encodeURIComponent(f.name)}" onclick="doDownload(this)">⬇ На ПК</button>
+        <button class="btn-pc" data-url="${escHtml(encodeURIComponent(f.dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}">⬇ На ПК</button>
       </div>`).join('');
   } else {
-    readySection.style.display = 'none';
+    $('ready-section').style.display = 'none';
   }
 
-  // ── Активные загрузки VPS ──
+  // ── Active downloads ──
   const activeEl = $('active-list');
   if (!dlRes || !dlRes.ok) {
     activeEl.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div>Нет соединения с сервером</div>';
@@ -237,51 +457,51 @@ async function renderDownloads() {
     const dls = await dlRes.json().catch(() => []);
     const ongoing = dls.filter(d => d.status !== 'complete');
     const countEl = $('dl-count');
-    ongoing.length > 0 ? (countEl.textContent = ongoing.length, countEl.classList.add('show')) : countEl.classList.remove('show');
-    if (!ongoing.length) {
-      activeEl.innerHTML = '<div class="empty-state"><div class="icon">🎯</div>Нет активных загрузок</div>';
-    } else {
-      activeEl.innerHTML = ongoing.map(d => {
-        const speed = d.speed ? ' · ' + fmt(d.speed) + '/с' : '';
-        return `<div class="dl-item">
-          <div class="dl-top">
-            <div style="min-width:0;flex:1">
-              <div class="dl-name" title="${escHtml(d.name)}">${escHtml(d.name)}</div>
-              <div class="dl-meta">${fmt(d.downloaded)} / ${fmt(d.size)}${speed}</div>
+    ongoing.length > 0
+      ? (countEl.textContent = ongoing.length, countEl.classList.add('show'))
+      : countEl.classList.remove('show');
+    activeEl.innerHTML = ongoing.length
+      ? ongoing.map(d => {
+          const speed = d.speed ? ' · ' + fmt(d.speed) + '/с' : '';
+          return `<div class="dl-item">
+            <div class="dl-top">
+              <div style="min-width:0;flex:1">
+                <div class="dl-name" title="${escHtml(d.name)}">${escHtml(d.name)}</div>
+                <div class="dl-meta">${fmt(d.downloaded)} / ${fmt(d.size)}${speed}</div>
+              </div>
+              <span class="dl-badge ${d.status}">${SL[d.status]||d.status}${d.progress > 0 ? ' '+d.progress+'%' : ''}</span>
             </div>
-            <span class="dl-badge ${d.status}">${SL[d.status]||d.status}${d.progress > 0 ? ' '+d.progress+'%' : ''}</span>
-          </div>
-          <div class="progress-bar"><div class="progress-fill" style="width:${d.progress}%"></div></div>
-        </div>`;
-      }).join('');
-    }
+            <div class="progress-bar"><div class="progress-fill" style="width:${d.progress}%"></div></div>
+          </div>`;
+        }).join('')
+      : '<div class="empty-state"><div class="icon">🎯</div>Нет активных загрузок</div>';
   }
 
-  // ── Все файлы на VPS ──
+  // ── All VPS files ──
   const fileEl = $('file-list');
   if (!filesRes || !filesRes.ok) {
     fileEl.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div>Нет соединения с сервером</div>';
     return;
   }
-  if (!vpsFiles.length) {
-    fileEl.innerHTML = '<div class="empty-state"><div class="icon">📂</div>Файлов нет</div>';
-  } else {
-    const token = cfg.token, server = cfg.serverUrl;
-    fileEl.innerHTML = vpsFiles.map(f => {
-      const dlUrl = server + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(token);
-      return `<div class="file-item">
-        <div class="file-ico">${fileEmoji(f.name)}</div>
-        <div class="file-info">
-          <div class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
-          <div class="file-meta">${fmt(f.size)} · ${fmtDate(new Date(f.mtime).getTime())}</div>
-        </div>
-        <button class="btn-sm btn-dl" data-url="${encodeURIComponent(dlUrl)}" data-name="${encodeURIComponent(f.name)}" onclick="doDownload(this)">⬇ На ПК</button>
-      </div>`;
-    }).join('');
-  }
+  fileEl.innerHTML = vpsFiles.length
+    ? vpsFiles.map(f => {
+        const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(cfg.token);
+        return `<div class="file-item">
+          <div class="file-ico">${fileEmoji(f.name)}</div>
+          <div class="file-info">
+            <div class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
+            <div class="file-meta">${fmt(f.size)} · ${fmtDate(new Date(f.mtime).getTime())}</div>
+          </div>
+          <button class="btn-sm btn-dl" data-url="${escHtml(encodeURIComponent(dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}">⬇ На ПК</button>
+        </div>`;
+      }).join('')
+    : '<div class="empty-state"><div class="icon">📂</div>Файлов нет</div>';
 }
 
-async function doDownload(btn) {
+// ─── Download button handler (event delegation, CSP-safe) ─
+document.addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-url][data-name]');
+  if (!btn) return;
   const url  = decodeURIComponent(btn.dataset.url);
   const name = decodeURIComponent(btn.dataset.name);
   const orig = btn.textContent;
@@ -289,18 +509,18 @@ async function doDownload(btn) {
   try {
     await chrome.downloads.download({ url, filename: name, saveAs: false });
     btn.textContent = '✓ Начато';
-    // Убрать из readyFiles
+    // Remove from readyFiles
     const { readyFiles = [] } = await new Promise(r => chrome.storage.local.get('readyFiles', r));
     await new Promise(r => chrome.storage.local.set({ readyFiles: readyFiles.filter(f => f.name !== name) }, r));
-    const card = $('ready-' + encodeURIComponent(name));
+    const card = document.getElementById('ri-' + encodeURIComponent(name));
     if (card) card.remove();
-    if ($('ready-list') && $('ready-list').children.length === 0) $('ready-section').style.display = 'none';
+    if ($('ready-list') && !$('ready-list').children.length) $('ready-section').style.display = 'none';
   } catch (e) {
     chrome.tabs.create({ url });
     btn.textContent = '↗ Открыто';
   }
   setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
-}
+});
 
 $('refresh-btn').addEventListener('click', () => { clearTimeout(pollTimer); loadDownloadsTab(); });
 window.addEventListener('unload', () => clearTimeout(pollTimer));
