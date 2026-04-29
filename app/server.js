@@ -6,11 +6,13 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const FormData = require('form-data');
-const { exec, execFile } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 const multer = require('multer');
 
 const VT_API_KEY = '93c0c934a298f0f35b0f95be051de5b4e4ea7340fa3c7bb8fd5c1f572a13c2b8';
 const SHARES_FILE = '/opt/vps-downloader/shares.json';
+const MEDIA_JOBS_FILE = '/opt/vps-downloader/media-jobs.json';
+const mediaProcesses = new Map();
 
 function loadShares() {
   try { return JSON.parse(fs.readFileSync(SHARES_FILE, 'utf8')); }
@@ -110,6 +112,173 @@ async function aria2(method, params = []) {
     params: [`token:${ARIA2_TOKEN}`, ...params],
   });
   return res.data.result;
+}
+
+function loadMediaJobs() {
+  try { return JSON.parse(fs.readFileSync(MEDIA_JOBS_FILE, 'utf8')); }
+  catch { return {}; }
+}
+
+function saveMediaJobs(jobs) {
+  fs.writeFileSync(MEDIA_JOBS_FILE, JSON.stringify(jobs, null, 2));
+}
+
+function mediaJobPublic(job) {
+  return {
+    id: job.id,
+    url: job.url,
+    mode: job.mode,
+    status: job.status,
+    progress: job.progress || 0,
+    speed: job.speed || '',
+    eta: job.eta || '',
+    name: job.name || 'Media download',
+    file: job.file || '',
+    folder: job.folder || '',
+    error: job.error || '',
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  };
+}
+
+function ytDlpAvailable(cb) {
+  execFile('yt-dlp', ['--version'], { timeout: 5000 }, (err, stdout) => {
+    cb(!err, (stdout || '').trim());
+  });
+}
+
+function parseYtDlpLine(job, line) {
+  const clean = String(line || '').trim();
+  if (!clean) return false;
+  let changed = false;
+  const dest = clean.match(/Destination:\s+(.+)$/i) || clean.match(/Merging formats into\s+"(.+)"$/i);
+  if (dest && dest[1]) {
+    job.file = path.basename(dest[1].replace(/^"|"$/g, ''));
+    job.name = job.file;
+    changed = true;
+  }
+  const pct = clean.match(/\[download\]\s+([0-9.]+)%/);
+  if (pct) {
+    job.progress = Math.max(0, Math.min(100, parseFloat(pct[1])));
+    changed = true;
+  }
+  const speed = clean.match(/\bat\s+([^\s]+\/s)/);
+  if (speed) {
+    job.speed = speed[1];
+    changed = true;
+  }
+  const eta = clean.match(/\bETA\s+([^\s]+)/);
+  if (eta) {
+    job.eta = eta[1];
+    changed = true;
+  }
+  if (clean.includes('[ExtractAudio]') || clean.includes('[Merger]')) {
+    job.status = 'processing';
+    changed = true;
+  }
+  return changed;
+}
+
+function startMediaJob({ username, url, dir, relPath, mode, filename }) {
+  const jobs = loadMediaJobs();
+  const id = crypto.randomUUID();
+  const safeBase = (filename || '').trim().replace(/[/\\:*?"<>|]/g, '_');
+  const output = safeBase ? (safeBase + '.%(ext)s') : '%(title).180B [%(id)s].%(ext)s';
+  const args = [
+    '--newline',
+    '--no-part',
+    '--restrict-filenames',
+    '-o', output,
+  ];
+  if (mode === 'audio') args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
+  else if (mode === 'video') args.push('-f', 'bv*+ba/b');
+  args.push(url);
+
+  const job = {
+    id,
+    user: username,
+    url,
+    mode,
+    status: 'starting',
+    progress: 0,
+    speed: '',
+    eta: '',
+    name: safeBase || 'Media download',
+    file: '',
+    folder: relPath || '',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    error: '',
+  };
+  jobs[id] = job;
+  saveMediaJobs(jobs);
+
+  const child = spawn('yt-dlp', args, { cwd: dir });
+  mediaProcesses.set(id, child);
+  child.stdout.on('data', chunk => {
+    const current = loadMediaJobs();
+    const j = current[id];
+    if (!j) return;
+    j.status = j.status === 'starting' ? 'active' : j.status;
+    String(chunk).split(/\r?\n/).forEach(line => parseYtDlpLine(j, line));
+    j.updatedAt = new Date().toISOString();
+    current[id] = j;
+    saveMediaJobs(current);
+  });
+  child.stderr.on('data', chunk => {
+    const current = loadMediaJobs();
+    const j = current[id];
+    if (!j) return;
+    const lines = String(chunk).trim().split(/\r?\n/).filter(Boolean);
+    if (lines.length) j.error = lines.slice(-2).join(' ');
+    j.updatedAt = new Date().toISOString();
+    current[id] = j;
+    saveMediaJobs(current);
+  });
+  child.on('error', err => {
+    const current = loadMediaJobs();
+    const j = current[id];
+    if (j) {
+      j.status = 'error';
+      j.error = err.message;
+      j.updatedAt = new Date().toISOString();
+      current[id] = j;
+      saveMediaJobs(current);
+    }
+    mediaProcesses.delete(id);
+  });
+  child.on('close', code => {
+    const current = loadMediaJobs();
+    const j = current[id];
+    if (j) {
+      if (j.status !== 'cancelled') {
+        j.status = code === 0 ? 'complete' : 'error';
+        if (code === 0) {
+          j.progress = 100;
+          j.error = '';
+          if (!j.file) {
+            try {
+              const newest = fs.readdirSync(dir)
+                .map(name => ({ name, full: path.join(dir, name), stat: fs.statSync(path.join(dir, name)) }))
+                .filter(x => x.stat.isFile())
+                .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs)[0];
+              if (newest) {
+                j.file = newest.name;
+                j.name = newest.name;
+              }
+            } catch {}
+          }
+        } else if (!j.error) {
+          j.error = 'yt-dlp exited with code ' + code;
+        }
+      }
+      j.updatedAt = new Date().toISOString();
+      current[id] = j;
+      saveMediaJobs(current);
+    }
+    mediaProcesses.delete(id);
+  });
+  return job;
 }
 
 // ─── Routes ─────────────────────────────────────────────────────
@@ -819,6 +988,55 @@ app.post('/api/fm/add-url', auth, async (req, res) => {
     const gid = await aria2('aria2.addUri', [[dlUrl], opts]);
     res.json({ ok: true, gid });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/media/capabilities', auth, (req, res) => {
+  ytDlpAvailable((available, version) => res.json({ ok: true, available, version }));
+});
+
+app.post('/api/fm/media', auth, (req, res) => {
+  const dlUrl = (req.body.url || '').trim();
+  const relPath = req.body.path || '';
+  const mode = ['video', 'audio', 'best'].includes(req.body.mode) ? req.body.mode : 'video';
+  const filename = (req.body.filename || '').trim();
+  if (!dlUrl) return res.status(400).json({ error: 'URL empty' });
+  const dir = fmResolve(req.session.user, relPath);
+  if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return res.status(403).json({ error: 'Invalid path' });
+  ytDlpAvailable((available) => {
+    if (!available) return res.status(500).json({ error: 'yt-dlp is not installed on server' });
+    try {
+      const job = startMediaJob({ username: req.session.user, url: dlUrl, dir, relPath, mode, filename });
+      res.json({ ok: true, job: mediaJobPublic(job) });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+});
+
+app.get('/api/fm/media-jobs', auth, (req, res) => {
+  const jobs = loadMediaJobs();
+  const mine = Object.values(jobs)
+    .filter(j => j.user === req.session.user)
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt))
+    .slice(0, 30)
+    .map(mediaJobPublic);
+  res.json(mine);
+});
+
+app.delete('/api/fm/media-jobs/:id', auth, (req, res) => {
+  const jobs = loadMediaJobs();
+  const job = jobs[req.params.id];
+  if (!job || job.user !== req.session.user) return res.status(404).json({ error: 'Not found' });
+  const child = mediaProcesses.get(req.params.id);
+  if (child) {
+    try { child.kill('SIGTERM'); } catch {}
+    mediaProcesses.delete(req.params.id);
+  }
+  job.status = 'cancelled';
+  job.updatedAt = new Date().toISOString();
+  jobs[req.params.id] = job;
+  saveMediaJobs(jobs);
+  res.json({ ok: true });
 });
 
 // POST /api/fm/zip  body: { items, name }
@@ -1995,6 +2213,19 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.preview-media-wrap{width:100%;min-height:260px;display:flex;align-items:center;justify-content:center}' +
   '.preview-media-wrap:fullscreen{background:#050506;padding:24px}' +
   '.preview-media-wrap:fullscreen .preview-media{max-width:100vw;max-height:100vh}' +
+  '.media-viewer{position:fixed;inset:0;z-index:900;background:rgba(5,5,7,.96);display:none;flex-direction:column;color:#fff}' +
+  '.media-viewer.open{display:flex}' +
+  '.mv-top{height:64px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(20,20,24,.72);backdrop-filter:blur(18px)}' +
+  '.mv-title{flex:1;min-width:0;font-size:15px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+  '.mv-icon{width:42px;height:42px;border-radius:9999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer}' +
+  '.mv-icon:hover{background:rgba(160,120,255,.22);border-color:#a078ff}' +
+  '.mv-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:18px;overflow:hidden}' +
+  '.mv-stage img,.mv-stage video{max-width:100%;max-height:100%;object-fit:contain;border-radius:14px;box-shadow:0 24px 90px rgba(0,0,0,.55)}' +
+  '.mv-stage audio{width:min(720px,92vw)}' +
+  '.mv-bottom{min-height:72px;display:flex;align-items:center;gap:12px;padding:12px 18px;border-top:1px solid rgba(255,255,255,.08);background:rgba(20,20,24,.72);backdrop-filter:blur(18px)}' +
+  '.mv-seek{flex:1;accent-color:#a078ff}' +
+  '.mv-time{font-size:12px;color:#cbc3d7;min-width:96px;text-align:center}' +
+  '.mv-range{width:100px;accent-color:#a078ff}' +
   '#preview-info{padding:14px 16px;border-top:1px solid #1f1f22;flex-shrink:0;max-height:260px;overflow-y:auto;background:#121215}' +
   '.meta-row{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #252528;font-size:12px}' +
   '.meta-row:last-child{border-bottom:none}' +
@@ -2126,6 +2357,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '#upload-panel{left:20px!important;right:20px!important;bottom:104px!important;width:auto!important;border-radius:18px!important}' +
   '#toast{left:20px!important;right:20px!important;top:76px!important;width:auto!important}' +
   '.preview-panel{position:fixed!important;left:0;right:0;bottom:0;z-index:70;width:100%!important;max-width:none!important;max-height:72dvh;border-left:0;border-top:1px solid #353437;border-radius:22px 22px 0 0;background:#1b1b1d}' +
+  '.media-viewer{z-index:950}' +
+  '.mv-top{height:58px;padding:0 12px}' +
+  '.mv-bottom{flex-wrap:wrap;gap:8px;padding:10px 12px}' +
+  '.mv-seek{flex-basis:100%;order:-1}' +
+  '.mv-stage{padding:10px}' +
   '.modal-backdrop{align-items:flex-end!important;padding:20px}' +
   '.modal{min-width:0!important;width:100%!important;padding:22px!important;border-radius:22px!important}' +
   '}' +
@@ -2221,6 +2457,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</aside>' +
 
   /* ── CONTEXT MENU ── */
+  '<div id="media-viewer" class="media-viewer">' +
+  '<div class="mv-top"><div id="mv-title" class="mv-title">Media</div><button class="mv-icon" data-action="mv-download" title="Скачать"><span class="material-symbols-outlined">download</span></button><button class="mv-icon" data-action="mv-share" title="Публичная ссылка"><span class="material-symbols-outlined">link</span></button><button class="mv-icon" data-action="mv-close" title="Закрыть"><span class="material-symbols-outlined">close</span></button></div>' +
+  '<div id="mv-stage" class="mv-stage"></div>' +
+  '<div id="mv-bottom" class="mv-bottom"></div>' +
+  '</div>' +
   '<div id="ctx-menu"></div>' +
   '<div id="toast"><div id="toast-title" style="font-weight:700;font-size:13px;margin-bottom:6px"></div><div id="toast-body" style="font-size:12px;color:#cbc3d7;word-break:break-all"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn-ghost" data-action="copy-toast" style="padding:4px 9px">Копировать</button><button class="btn-ghost" data-action="hide-toast" style="padding:4px 9px">x</button></div></div>' +
 
@@ -2269,6 +2510,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div style="font-weight:700;font-size:18px;margin-bottom:6px">Загрузить по URL</div>' +
   '<div style="font-size:12px;color:#958ea0;margin-bottom:14px">Файл попадёт в текущую папку CloudSpace</div>' +
   '<input id="url-dl-inp" class="inp" placeholder="https://example.com/file.zip" style="margin-bottom:10px">' +
+  '<select id="url-mode-inp" class="inp" style="margin-bottom:10px"><option value="file">Обычный файл</option><option value="video">Медиа: видео</option><option value="audio">Медиа: MP3 audio</option><option value="best">Медиа: лучший доступный файл</option></select>' +
   '<input id="url-name-inp" class="inp" placeholder="Имя файла, если нужно" style="margin-bottom:14px">' +
   '<div id="url-status" style="font-size:12px;color:#958ea0;min-height:16px;margin-bottom:12px"></div>' +
   '<div style="display:flex;gap:10px;justify-content:flex-end">' +
@@ -2299,7 +2541,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'var ctxFp="",ctxName="",ctxIsDir=false;' +
   'var dragFp=null,dragName=null,dragIsDir=false,dragEl=null;' +
   'var selectedItems={},lastEntries=[],lastBase="";' +
-  'var previewFp="",previewName="";' +
+  'var previewFp="",previewName="",previewKind="",previewSrc="",mvZoom=1;' +
   'var toastUrl="";' +
   'var pendingShare=null;' +
 
@@ -2492,13 +2734,18 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
 
   /* ── DELETE ── */
-  'function openUrlModal(){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value="";document.getElementById("url-name-inp").value="";document.getElementById("url-status").textContent="";setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
+  'function openUrlModal(){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value="";document.getElementById("url-name-inp").value="";document.getElementById("url-mode-inp").value="file";document.getElementById("url-status").textContent="";setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
   'function closeUrlModal(){document.getElementById("modal-url").style.display="none";}' +
-  'function addUrlDownload(){var url=document.getElementById("url-dl-inp").value.trim();var name=document.getElementById("url-name-inp").value.trim();var st=document.getElementById("url-status");if(!url){st.textContent="Вставь URL";return;}st.textContent="Добавляю загрузку...";fetch("/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:activePath()})}).then(function(r){return r.json();}).then(function(d){if(d.ok){st.textContent="Загрузка добавлена";closeUrlModal();loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
-  'function closePreview(){document.getElementById("preview-panel").classList.remove("open");document.getElementById("preview-body").classList.remove("media-preview");document.getElementById("preview-body").innerHTML="";document.getElementById("preview-info").innerHTML="";}' +
+  'function addUrlDownload(){var url=document.getElementById("url-dl-inp").value.trim();var name=document.getElementById("url-name-inp").value.trim();var mode=document.getElementById("url-mode-inp").value;var st=document.getElementById("url-status");if(!url){st.textContent="Вставь URL";return;}var media=mode!=="file";st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:activePath(),mode:mode})}).then(function(r){return r.json();}).then(function(d){if(d.ok){st.textContent=media?"Медиа-загрузка запущена":"Загрузка добавлена";closeUrlModal();loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
+  'function closePreview(){document.getElementById("preview-panel").classList.remove("open");document.getElementById("preview-body").classList.remove("media-preview");document.getElementById("preview-body").innerHTML="";document.getElementById("preview-info").innerHTML="";previewKind="";previewSrc="";}' +
   'function metaRow(label,value){return \'<div class="meta-row"><div class="meta-lbl">\'+H(label)+\'</div><div class="meta-val">\'+(value||"—")+\'</div></div>\';}' +
   'function renderPreviewInfo(fp,name){var info=document.getElementById("preview-info");info.innerHTML=\'<div style="font-size:12px;color:#958ea0">Загрузка информации...</div>\';fetch("/api/fm/meta?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(m){if(m.error){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);return;}var links=m.publicLinks||[];var linkHtml=links.length?links.map(function(x){return \'<a href="\'+H(x.url)+\'" target="_blank" style="color:#d2bbff">\'+H(window.location.origin+x.url)+\'</a>\';}).join("<br>"):"Нет";var h="";h+=metaRow("Имя",m.name||name);h+=metaRow("Путь",m.path||fp);h+=metaRow("Размер",fmtSize(m.size));h+=metaRow("Тип",m.ext?m.ext.slice(1).toUpperCase():"Файл");h+=metaRow("Загружен",fmtDateTime(m.created));h+=metaRow("Изменён",fmtDateTime(m.mtime));h+=metaRow("Публичная ссылка",linkHtml);info.innerHTML=h;}).catch(function(){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);});}' +
-  'function openPreview(fp,name,isDir){if(isDir){navigateTo(fp);return;}previewFp=fp;previewName=name;var panel=document.getElementById("preview-panel");var body=document.getElementById("preview-body");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");body.innerHTML="";renderPreviewInfo(fp,name);var ext=(name.split(".").pop()||"").toLowerCase();var src="/api/fm/preview?path="+encodeURIComponent(fp);if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext)){body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(["mp4","webm","ogg","mov"].includes(ext)){body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video class="preview-media" controls src="${src}"></video></div>`;return;}if(["mp3","wav","m4a","flac","aac","oga"].includes(ext)){body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><audio controls src="${src}" style="width:100%"></audio></div>`;return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
+  'function openPreview(fp,name,isDir){if(isDir){navigateTo(fp);return;}previewFp=fp;previewName=name;previewKind="";previewSrc="";var panel=document.getElementById("preview-panel");var body=document.getElementById("preview-body");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");body.innerHTML="";renderPreviewInfo(fp,name);var ext=(name.split(".").pop()||"").toLowerCase();var src="/api/fm/preview?path="+encodeURIComponent(fp);if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext)){previewKind="image";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(["mp4","webm","ogg","mov","mkv"].includes(ext)){previewKind="video";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video class="preview-media" src="${src}" muted></video></div>`;return;}if(["mp3","wav","m4a","flac","aac","oga"].includes(ext)){previewKind="audio";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><span class="material-symbols-outlined" style="font-size:72px;color:#d2bbff">graphic_eq</span></div>`;return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
+  'function closeMediaViewer(){var v=document.getElementById("media-viewer");var media=document.getElementById("mv-media");if(media&&media.pause)media.pause();v.classList.remove("open");document.getElementById("mv-stage").innerHTML="";document.getElementById("mv-bottom").innerHTML="";}' +
+  'function mvTime(n){if(!isFinite(n))return"0:00";n=Math.max(0,Math.floor(n));return Math.floor(n/60)+":"+String(n%60).padStart(2,"0");}' +
+  'function openMediaViewer(){if(!previewSrc||!previewKind)return;mvZoom=1;document.getElementById("mv-title").textContent=previewName||"Media";var v=document.getElementById("media-viewer"),stage=document.getElementById("mv-stage"),bottom=document.getElementById("mv-bottom");if(previewKind==="image"){stage.innerHTML=`<img id="mv-media" src="${previewSrc}" alt="${H(previewName)}">`;bottom.innerHTML=\'<button class="mv-icon" data-action="mv-zoom-out"><span class="material-symbols-outlined">zoom_out</span></button><button class="mv-icon" data-action="mv-fit"><span class="material-symbols-outlined">fit_screen</span></button><button class="mv-icon" data-action="mv-zoom-in"><span class="material-symbols-outlined">zoom_in</span></button><div style="flex:1"></div><div class="mv-time">Image viewer</div>\';}else{stage.innerHTML=`<${previewKind==="audio"?"audio":"video"} id="mv-media" src="${previewSrc}"></${previewKind==="audio"?"audio":"video"}>`;bottom.innerHTML=\'<button class="mv-icon" data-action="mv-play"><span id="mv-play-icon" class="material-symbols-outlined">play_arrow</span></button><input id="mv-seek" class="mv-seek" type="range" min="0" max="1000" value="0"><div id="mv-time" class="mv-time">0:00 / 0:00</div><span class="material-symbols-outlined" style="color:#cbc3d7">volume_up</span><input id="mv-volume" class="mv-range" type="range" min="0" max="1" step="0.01" value="1">\';setTimeout(bindMediaControls,0);}v.classList.add("open");}' +
+  'function bindMediaControls(){var m=document.getElementById("mv-media"),seek=document.getElementById("mv-seek"),vol=document.getElementById("mv-volume"),time=document.getElementById("mv-time"),ico=document.getElementById("mv-play-icon");if(!m)return;m.addEventListener("timeupdate",function(){if(m.duration&&seek)seek.value=Math.round(m.currentTime/m.duration*1000);if(time)time.textContent=mvTime(m.currentTime)+" / "+mvTime(m.duration||0);});m.addEventListener("play",function(){if(ico)ico.textContent="pause";});m.addEventListener("pause",function(){if(ico)ico.textContent="play_arrow";});if(seek)seek.addEventListener("input",function(){if(m.duration)m.currentTime=(parseInt(seek.value,10)||0)/1000*m.duration;});if(vol)vol.addEventListener("input",function(){m.volume=parseFloat(vol.value)||0;});}' +
+  'function mediaViewerAction(action){var m=document.getElementById("mv-media");if(action==="mv-close")return closeMediaViewer();if(action==="mv-download"&&previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);if(action==="mv-share"&&previewFp)shareOne(previewFp);if(action==="mv-play"&&m){if(m.paused)m.play();else m.pause();}if(action==="mv-zoom-in"&&m){mvZoom=Math.min(4,mvZoom+.25);m.style.transform="scale("+mvZoom+")";}if(action==="mv-zoom-out"&&m){mvZoom=Math.max(.25,mvZoom-.25);m.style.transform="scale("+mvZoom+")";}if(action==="mv-fit"&&m){mvZoom=1;m.style.transform="scale(1)";}}' +
   'function deleteItem(fp,name,isDir){' +
   '  if(!confirm("Удалить " + name + "?"))return;' +
   '  fetch("/api/fm/delete",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:fp,isDir:isDir})})' +
@@ -2566,10 +2813,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
 
   /* ── TRANSFERS ── */
   'function loadTransfers(){' +
-  '  fetch("/api/downloads").then(function(r){return r.json();})' +
-  '  .then(function(d){' +
-  '    var items=Array.isArray(d)?d:[];' +
-  '    if(!items.length){document.getElementById("transfers-list").innerHTML=\'<div style="color:#494454;font-size:13px">Нет активных загрузок</div>\';return;}' +
+  '  Promise.all([fetch("/api/downloads").then(function(r){return r.json();}).catch(function(){return[];}),fetch("/api/fm/media-jobs").then(function(r){return r.json();}).catch(function(){return[];})])' +
+  '  .then(function(all){' +
+  '    var items=Array.isArray(all[0])?all[0]:[],media=Array.isArray(all[1])?all[1]:[];' +
+  '    if(!items.length&&!media.length){document.getElementById("transfers-list").innerHTML=\'<div style="color:#494454;font-size:13px">Нет активных загрузок</div>\';return;}' +
   '    var h="";' +
   '    for(var i=0;i<items.length;i++){' +
   '      var t=items[i],pct=t.progress||0,name=t.name||t.gid||"Загрузка",left=Math.max(0,(t.size||0)-(t.downloaded||0));' +
@@ -2583,6 +2830,18 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '      if(t.status==="active")h+=\'<button class="btn-ghost" data-action="transfer-pause" data-gid="\'+H(t.gid)+\'"><span class="material-symbols-outlined">pause</span> Пауза</button>\';' +
   '      if(t.status==="paused"||t.status==="waiting")h+=\'<button class="btn-ghost" data-action="transfer-resume" data-gid="\'+H(t.gid)+\'"><span class="material-symbols-outlined">play_arrow</span> Продолжить</button>\';' +
   '      h+=\'<button class="btn-ghost" data-action="transfer-remove" data-gid="\'+H(t.gid)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> Убрать</button>\';' +
+  '      h+=\'</div></div>\';' +
+  '    }' +
+  '    for(var j=0;j<media.length;j++){' +
+  '      var mt=media[j],mp=Math.round(mt.progress||0),done=mt.status==="complete";' +
+  '      h+=\'<div class="transfer-card">\';' +
+  '      h+=\'<div class="transfer-top"><div class="transfer-name">\'+H(mt.name||mt.file||"Media download")+\'</div><div class="transfer-status">\'+H((mt.mode||"media")+" / "+(mt.status||"unknown"))+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+mp+\'%</div></div>\';' +
+  '      h+=\'<div class="progress-track" style="height:8px"><div class="progress-fill\'+(done?" done":"")+\'" style="width:\'+mp+\'%"></div></div>\';' +
+  '      h+=\'<div class="transfer-meta"><div>Источник: media</div><div>Скорость: \'+H(mt.speed||"—")+\'</div><div>ETA: \'+H(mt.eta||"—")+\'</div><div>Папка: \'+H(mt.folder||"Мои файлы")+\'</div></div>\';' +
+  '      if(mt.error)h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(mt.error)+\'</div>\';' +
+  '      h+=\'<div class="transfer-controls">\';' +
+  '      if(mt.status==="active"||mt.status==="starting"||mt.status==="processing")h+=\'<button class="btn-ghost" data-action="media-cancel" data-job="\'+H(mt.id)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> Отмена</button>\';' +
+  '      if(done)h+=\'<button class="btn-ghost" data-action="navigate" data-fp="\'+H(mt.folder||"")+\'"><span class="material-symbols-outlined">folder_open</span> Открыть папку</button>\';' +
   '      h+=\'</div></div>\';' +
   '    }' +
   '    document.getElementById("transfers-list").innerHTML=h;' +
@@ -2625,6 +2884,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  var el=e.target.closest("[data-action]");' +
   '  if(!el)return;' +
   '  var action=el.dataset.action;' +
+  '  if(action.indexOf("mv-")===0){mediaViewerAction(action);return;}' +
   '  if(action==="focus-search"){var si=document.getElementById("search-inp");if(si){si.focus();si.scrollIntoView({block:"center",behavior:"smooth"});}return;}' +
   '  if(action==="item-menu"){e.preventDefault();e.stopPropagation();var r=el.getBoundingClientRect();showCtxMenu(r.right-190,r.bottom+6,el.dataset.fp,el.dataset.name,el.dataset.dir==="true");return;}' +
   '  if(el.classList&&el.classList.contains("bottom-nav-item")){document.querySelectorAll(".bottom-nav-item").forEach(function(x){x.classList.remove("active");});el.classList.add("active");}' +
@@ -2649,12 +2909,13 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="close-share-modal"){closeShareModal();}' +
   '  else if(action==="confirm-share"){confirmShare();}' +
   '  else if(action==="close-preview"){closePreview();}' +
-  '  else if(action==="fullscreen-preview"){var w=document.getElementById("preview-media-wrap")||document.getElementById("preview-body");if(w&&w.requestFullscreen)w.requestFullscreen();}' +
+  '  else if(action==="fullscreen-preview"){openMediaViewer();}' +
   '  else if(action==="download-preview"){if(previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);}' +
   '  else if(action==="share-preview"){if(previewFp)shareOne(previewFp);}' +
   '  else if(action==="transfer-pause"){fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid)+"/pause",{method:"POST"}).then(loadTransfers);}' +
   '  else if(action==="transfer-resume"){fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid)+"/resume",{method:"POST"}).then(loadTransfers);}' +
   '  else if(action==="transfer-remove"){if(confirm("Убрать загрузку?"))fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid),{method:"DELETE"}).then(loadTransfers);}' +
+  '  else if(action==="media-cancel"){if(confirm("Отменить медиа-загрузку?"))fetch("/api/fm/media-jobs/"+encodeURIComponent(el.dataset.job),{method:"DELETE"}).then(loadTransfers);}' +
   '  else if(action==="nav-home"){document.querySelectorAll(".nav-item").forEach(function(x){x.classList.remove("active");});el.classList.add("active");navigateTo("");}' +
   '  else if(action==="nav-recent"){document.querySelectorAll(".nav-item").forEach(function(x){x.classList.remove("active");});el.classList.add("active");loadRecent();}' +
   '  else if(action==="view-list"){setView("list");}' +
@@ -2770,7 +3031,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
 
   /* ── KEYBOARD ── */
   'document.addEventListener("keydown",function(e){' +
-  '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeUrlModal();closeShareModal();closePreview();}' +
+  '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeUrlModal();closeShareModal();closeMediaViewer();closePreview();}' +
   '  if(e.key==="Enter"){' +
   '    if(document.getElementById("modal-mkdir").style.display!=="none")createFolder();' +
   '    else if(document.getElementById("modal-rename").style.display!=="none")doRename();' +
