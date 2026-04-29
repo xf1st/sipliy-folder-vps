@@ -514,6 +514,78 @@ async function renderDownloads() {
     : '<div class="empty-state"><div class="icon">📂</div>Файлов нет</div>';
 }
 
+// ─── Manual URL -> VPS ───────────────────────────────────────────
+function guessUrlName(url) {
+  try {
+    if (/^magnet:/i.test(url)) return 'magnet-download';
+    const u = new URL(url);
+    const last = decodeURIComponent((u.pathname || '').split('/').filter(Boolean).pop() || '');
+    return last || 'url-download';
+  } catch (_) {
+    return 'url-download';
+  }
+}
+
+function setManualUrlStatus(kind, text) {
+  const el = $('manual-url-status');
+  el.className = 'url-status ' + (kind || '');
+  el.textContent = text || '';
+}
+
+async function addManualUrlDownload() {
+  const cfg = await getConfig();
+  const btn = $('manual-url-btn');
+  const url = $('manual-url-inp').value.trim();
+  const filename = $('manual-name-inp').value.trim();
+
+  if (!cfg.serverUrl || !cfg.token) {
+    setManualUrlStatus('err', 'Добавьте аккаунт');
+    switchTab('settings');
+    return;
+  }
+  if (!/^https?:\/\//i.test(url) && !/^magnet:/i.test(url)) {
+    setManualUrlStatus('err', 'Нужна http(s) или magnet ссылка');
+    return;
+  }
+
+  btn.disabled = true;
+  setManualUrlStatus('', 'Отправляю...');
+  try {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 12000);
+    const body = new URLSearchParams();
+    body.set('url', url);
+    if (filename) body.set('filename', filename);
+
+    const res = await fetch(cfg.serverUrl + '/api/add-ext', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + cfg.token,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: body.toString(),
+      signal: ctrl.signal
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+
+    const name = filename || guessUrlName(url);
+    const { pendingGids = {} } = await new Promise(r => chrome.storage.local.get('pendingGids', r));
+    pendingGids[data.gid] = { gid: data.gid, name, origName: name, status: 'active', addedAt: Date.now(), progress: 0, accountId: cfg.accountId };
+    await new Promise(r => chrome.storage.local.set({ pendingGids }, r));
+
+    $('manual-url-inp').value = '';
+    $('manual-name-inp').value = '';
+    setManualUrlStatus('ok', 'Добавлено на VPS');
+    clearTimeout(pollTimer);
+    loadDownloadsTab();
+  } catch (e) {
+    setManualUrlStatus('err', e.name === 'AbortError' ? 'Сервер не ответил' : (e.message || 'Ошибка'));
+  } finally {
+    setTimeout(() => { btn.disabled = false; }, 700);
+  }
+}
+
 // ─── Download button handler (event delegation, CSP-safe) ─
 document.addEventListener('click', async e => {
   const btn = e.target.closest('button[data-url][data-name]');
@@ -540,4 +612,7 @@ document.addEventListener('click', async e => {
 });
 
 $('refresh-btn').addEventListener('click', () => { clearTimeout(pollTimer); loadDownloadsTab(); });
+$('manual-url-btn').addEventListener('click', addManualUrlDownload);
+$('manual-url-inp').addEventListener('keydown', e => { if (e.key === 'Enter') addManualUrlDownload(); });
+$('manual-name-inp').addEventListener('keydown', e => { if (e.key === 'Enter') addManualUrlDownload(); });
 window.addEventListener('unload', () => clearTimeout(pollTimer));

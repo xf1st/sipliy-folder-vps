@@ -29,6 +29,7 @@ function shareOptionsFromBody(body = {}) {
     downloads: 0,
     maxDownloads: Number.isFinite(maxDownloadsRaw) && maxDownloadsRaw > 0 ? maxDownloadsRaw : null,
     expiresAt: null,
+    preview: !!body.preview,
   };
   if (Number.isFinite(expiresInRaw) && expiresInRaw > 0) {
     out.expiresAt = new Date(Date.now() + expiresInRaw * 60 * 60 * 1000).toISOString();
@@ -124,6 +125,8 @@ function saveMediaJobs(jobs) {
 }
 
 function mediaJobPublic(job) {
+  const rawError = job.error || '';
+  const isWarningOnly = /^WARNING:/i.test(rawError) && ['active', 'processing', 'complete'].includes(job.status);
   return {
     id: job.id,
     url: job.url,
@@ -135,7 +138,8 @@ function mediaJobPublic(job) {
     name: job.name || 'Media download',
     file: job.file || '',
     folder: job.folder || '',
-    error: job.error || '',
+    error: isWarningOnly ? '' : rawError,
+    warning: job.warning || (isWarningOnly ? rawError : ''),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
   };
@@ -151,6 +155,11 @@ function parseYtDlpLine(job, line) {
   const clean = String(line || '').trim();
   if (!clean) return false;
   let changed = false;
+  if ((clean.startsWith('/') || /^[A-Za-z]:[\\/]/.test(clean)) && fs.existsSync(clean)) {
+    job.file = path.basename(clean);
+    job.name = job.file;
+    changed = true;
+  }
   const dest = clean.match(/Destination:\s+(.+)$/i) || clean.match(/Merging formats into\s+"(.+)"$/i);
   if (dest && dest[1]) {
     job.file = path.basename(dest[1].replace(/^"|"$/g, ''));
@@ -179,19 +188,82 @@ function parseYtDlpLine(job, line) {
   return changed;
 }
 
+function newestMediaFile(dir, startedAtMs) {
+  try {
+    return fs.readdirSync(dir)
+      .map(name => {
+        const full = path.join(dir, name);
+        const stat = fs.statSync(full);
+        return { name, full, stat };
+      })
+      .filter(x => x.stat.isFile() && x.stat.mtimeMs >= startedAtMs - 2000)
+      .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs)[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+function mediaExtOk(mode, file) {
+  const ext = path.extname(file || '').toLowerCase();
+  if (mode === 'audio') return ['.mp3', '.m4a', '.opus', '.ogg', '.wav', '.flac', '.aac'].includes(ext);
+  return ['.mp4', '.webm', '.mkv', '.mov', '.m4v'].includes(ext);
+}
+
+function stripKnownMediaExt(name) {
+  const clean = (name || '').trim().replace(/[/\\:*?"<>|]/g, '_');
+  const ext = path.extname(clean).toLowerCase();
+  if (['.mp4', '.webm', '.mkv', '.mov', '.m4v', '.mp3', '.m4a', '.opus', '.ogg', '.wav', '.flac', '.aac'].includes(ext)) {
+    return clean.slice(0, -ext.length);
+  }
+  return clean;
+}
+
+function ensureMediaExtension(mode, fullPath) {
+  if (!fullPath || !fs.existsSync(fullPath) || path.extname(fullPath)) return fullPath;
+  const ext = mode === 'audio' ? '.mp3' : '.mp4';
+  const next = fullPath + ext;
+  try {
+    fs.renameSync(fullPath, next);
+    return next;
+  } catch {
+    return fullPath;
+  }
+}
+
+function validateMediaFile(mode, fullPath, cb) {
+  fs.stat(fullPath, (statErr, stat) => {
+    if (statErr) return cb(new Error('Downloaded file was not created'));
+    if (!stat.isFile() || stat.size < 64 * 1024) return cb(new Error('Downloaded file is too small or empty'));
+    if (!mediaExtOk(mode, fullPath)) return cb(new Error('Downloaded file has no valid media extension: ' + path.basename(fullPath)));
+    execFile('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', fullPath], { timeout: 15000 }, (err, stdout) => {
+      if (err) return cb(new Error('Downloaded file is not a valid media file'));
+      const streams = String(stdout || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+      if (mode === 'audio' && !streams.includes('audio')) return cb(new Error('Downloaded file has no audio stream'));
+      if (mode !== 'audio' && !streams.includes('video')) return cb(new Error('Downloaded file has no video stream'));
+      cb(null);
+    });
+  });
+}
+
 function startMediaJob({ username, url, dir, relPath, mode, filename }) {
   const jobs = loadMediaJobs();
   const id = crypto.randomUUID();
-  const safeBase = (filename || '').trim().replace(/[/\\:*?"<>|]/g, '_');
+  const safeBase = stripKnownMediaExt(filename);
   const output = safeBase ? (safeBase + '.%(ext)s') : '%(title).180B [%(id)s].%(ext)s';
+  const startedAtMs = Date.now();
   const args = [
     '--newline',
     '--no-part',
+    '--no-playlist',
+    '--windows-filenames',
     '--restrict-filenames',
+    '--no-mtime',
+    '--print', 'after_move:filepath',
     '-o', output,
   ];
   if (mode === 'audio') args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
-  else if (mode === 'video') args.push('-f', 'bv*+ba/b');
+  else if (mode === 'video') args.push('-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b', '--merge-output-format', 'mp4');
+  else args.push('-f', 'b/bv*+ba/b', '--merge-output-format', 'mp4');
   args.push(url);
 
   const job = {
@@ -208,6 +280,7 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
     folder: relPath || '',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    startedAtMs,
     error: '',
   };
   jobs[id] = job;
@@ -230,7 +303,9 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
     const j = current[id];
     if (!j) return;
     const lines = String(chunk).trim().split(/\r?\n/).filter(Boolean);
-    if (lines.length) j.error = lines.slice(-2).join(' ');
+    const realErrors = lines.filter(line => /^ERROR:/i.test(line));
+    if (realErrors.length) j.error = realErrors.slice(-2).join(' ');
+    else if (lines.length) j.warning = lines.slice(-2).join(' ');
     j.updatedAt = new Date().toISOString();
     current[id] = j;
     saveMediaJobs(current);
@@ -252,23 +327,41 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
     const j = current[id];
     if (j) {
       if (j.status !== 'cancelled') {
-        j.status = code === 0 ? 'complete' : 'error';
         if (code === 0) {
-          j.progress = 100;
-          j.error = '';
-          if (!j.file) {
-            try {
-              const newest = fs.readdirSync(dir)
-                .map(name => ({ name, full: path.join(dir, name), stat: fs.statSync(path.join(dir, name)) }))
-                .filter(x => x.stat.isFile())
-                .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs)[0];
-              if (newest) {
-                j.file = newest.name;
-                j.name = newest.name;
-              }
-            } catch {}
+          let full = j.file ? path.join(dir, j.file) : '';
+          if (!full || !fs.existsSync(full)) {
+            const newest = newestMediaFile(dir, j.startedAtMs || Date.now());
+            if (newest) {
+              full = newest.full;
+              j.file = newest.name;
+              j.name = newest.name;
+            }
           }
+          full = ensureMediaExtension(j.mode, full);
+          if (full && fs.existsSync(full)) {
+            j.file = path.basename(full);
+            j.name = j.file;
+          }
+          validateMediaFile(j.mode, full, validationErr => {
+            const latest = loadMediaJobs();
+            const doneJob = latest[id];
+            if (!doneJob) return;
+            if (validationErr) {
+              doneJob.status = 'error';
+              doneJob.error = validationErr.message;
+            } else {
+              doneJob.status = 'complete';
+              doneJob.progress = 100;
+              doneJob.error = '';
+              doneJob.file = path.basename(full);
+              doneJob.name = doneJob.file;
+            }
+            doneJob.updatedAt = new Date().toISOString();
+            latest[id] = doneJob;
+            saveMediaJobs(latest);
+          });
         } else if (!j.error) {
+          j.status = 'error';
           j.error = 'yt-dlp exited with code ' + code;
         }
       }
@@ -377,6 +470,19 @@ app.get('/api/downloads', auth, async (req, res) => {
         dir: d.dir || '',
         progress: d.totalLength > 0 ? Math.round(d.completedLength / d.totalLength * 100) : 0,
       }));
+    const jobs = loadMediaJobs();
+    let changed = false;
+    mine.forEach(d => {
+      const j = jobs[d.gid];
+      if (j) {
+        if (d.name && d.name !== '...') { j.file = d.name; j.name = d.name; }
+        if (d.status === 'complete' && j.status !== 'complete') { j.status = 'complete'; j.progress = 100; changed = true; }
+        else if (d.status === 'error' && j.status !== 'error') { j.status = 'error'; j.error = d.errorMessage; changed = true; }
+        else if (d.status === 'active' || d.status === 'waiting' || d.status === 'paused') { j.status = d.status; j.progress = d.progress; j.speed = fmtBytes(d.speed) + '/s'; changed = true; }
+        if (changed) j.updatedAt = new Date().toISOString();
+      }
+    });
+    if (changed) saveMediaJobs(jobs);
     res.json(mine);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -399,6 +505,12 @@ app.delete('/api/downloads/:gid', auth, async (req, res) => {
     await aria2('aria2.remove', [req.params.gid]).catch(() =>
       aria2('aria2.removeDownloadResult', [req.params.gid])
     );
+    const jobs = loadMediaJobs();
+    if (jobs[req.params.gid] && jobs[req.params.gid].user === req.session.user) {
+      jobs[req.params.gid].status = 'cancelled';
+      jobs[req.params.gid].updatedAt = new Date().toISOString();
+      saveMediaJobs(jobs);
+    }
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -533,6 +645,13 @@ app.get('/share/:token', (req, res) => {
   }
   const file = s.path ? fmResolve(s.user, s.path) : path.join(userDir(s.user), path.basename(s.file));
   if (!fs.existsSync(file)) return res.status(404).send(shareNotFoundPage());
+  
+  if (s.preview && !req.query.dl) {
+    const sizeBytes = fs.statSync(file).size;
+    const sizeStr = sizeBytes > 1024*1024*1024 ? (sizeBytes/(1024*1024*1024)).toFixed(2)+' GB' : sizeBytes > 1024*1024 ? (sizeBytes/(1024*1024)).toFixed(2)+' MB' : sizeBytes > 1024 ? (sizeBytes/1024).toFixed(2)+' KB' : sizeBytes+' B';
+    return res.send(sharePreviewPage(s, req.params.token, s.downloadName || path.basename(file), sizeStr));
+  }
+
   s.downloads = (s.downloads || 0) + 1;
   saveShares(shares);
   res.download(file, s.downloadName || path.basename(file), { dotfiles: 'allow' });
@@ -556,10 +675,13 @@ app.options('/api/files-ext',     (req, res) => res.set(EXT_CORS).sendStatus(204
 
 app.post('/api/add-ext', extCors, authToken, async (req, res) => {
   const dlUrl = (req.body.url || '').trim();
+  const outName = filenameWithUrlExtension(dlUrl, req.body.filename || '');
   if (!dlUrl) return res.status(400).json({ error: 'URL пустой' });
   const dir = userDir(req.tokenUser);
   try {
-    const gid = await aria2('aria2.addUri', [[dlUrl], { dir }]);
+    const opts = { dir };
+    if (outName) opts.out = outName;
+    const gid = await aria2('aria2.addUri', [[dlUrl], opts]);
     res.json({ ok: true, gid });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -931,6 +1053,51 @@ app.get('/api/fm/preview', auth, (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
   if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).send('Not found');
   const ext = path.extname(full).toLowerCase();
+
+  if (ext === '.exe') {
+    const { exec } = require('child_process');
+    const tmpFile = '/tmp/icon-' + Date.now() + '-' + Math.random().toString(36).substring(7) + '.ico';
+    const safeFull = full.replace(/"/g, '\\"');
+    const cmd = `NAME=$(wrestool -l -t 14 "${safeFull}" 2>/dev/null | head -n 1 | sed -E 's/.*--name=([^ ]+).*/\\1/'); if [ -n "$NAME" ]; then wrestool -x -t 14 --name="$NAME" "${safeFull}" > "${tmpFile}" 2>/dev/null; fi`;
+    exec(cmd, (err) => {
+      if (!fs.existsSync(tmpFile) || fs.statSync(tmpFile).size === 0) {
+        if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+        return res.status(404).send('Icon not found');
+      }
+      res.sendFile(tmpFile, { headers: { 'Content-Type': 'image/x-icon' } }, () => {
+        fs.unlinkSync(tmpFile);
+      });
+    });
+    return;
+  }
+
+  const mediaExt = new Set(['.mp4','.webm','.ogg','.mov','.mkv','.m4v','.avi','.flv', '.jpg','.jpeg','.png','.webp','.bmp']);
+  if (mediaExt.has(ext) && req.query.thumb === '1') {
+    const crypto = require('crypto');
+    const os = require('os');
+    const hash = crypto.createHash('md5').update(full).digest('hex');
+    const thumbPath = path.join(os.tmpdir(), `vps_thumb_${hash}.jpg`);
+    if (fs.existsSync(thumbPath)) return res.sendFile(thumbPath, { headers: { 'Content-Type': 'image/jpeg' } });
+    
+    const isVideo = ['.mp4','.webm','.ogg','.mov','.mkv','.m4v','.avi','.flv'].includes(ext);
+    if (!isVideo && fs.statSync(full).size < 1024 * 500) return res.sendFile(full);
+    
+    const { exec } = require('child_process');
+    const safeFull = full.replace(/"/g, '\\"');
+    const ssArgs = isVideo ? '-ss 00:00:02 ' : '';
+    const cmd = `ffmpeg -y ${ssArgs}-i "${safeFull}" -vframes 1 -vf "scale=320:-1" -q:v 5 "${thumbPath}" 2>/dev/null || ffmpeg -y -i "${safeFull}" -vframes 1 -vf "scale=320:-1" -q:v 5 "${thumbPath}" 2>/dev/null`;
+    
+    exec(cmd, (err) => {
+      if (fs.existsSync(thumbPath)) {
+        res.sendFile(thumbPath, { headers: { 'Content-Type': 'image/jpeg' } });
+      } else {
+        if (isVideo) res.status(404).send('Thumb failed');
+        else res.sendFile(full);
+      }
+    });
+    return;
+  }
+
   const textExt = new Set(['.txt','.log','.md','.json','.csv','.js','.css','.html','.xml','.yml','.yaml','.ini','.conf']);
   if (textExt.has(ext)) {
     const max = 1024 * 1024;
@@ -986,6 +1153,25 @@ app.post('/api/fm/add-url', auth, async (req, res) => {
     const opts = { dir };
     if (outName) opts.out = outName;
     const gid = await aria2('aria2.addUri', [[dlUrl], opts]);
+    const jobs = loadMediaJobs();
+    jobs[gid] = {
+      id: gid,
+      user: req.session.user,
+      url: dlUrl,
+      mode: 'file',
+      status: 'active',
+      progress: 0,
+      speed: '',
+      eta: '',
+      name: outName || dlUrl.split(/[?#]/)[0].split('/').pop() || 'File download',
+      file: '',
+      folder: relPath || '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      startedAtMs: Date.now(),
+      error: '',
+    };
+    saveMediaJobs(jobs);
     res.json({ ok: true, gid });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1015,10 +1201,13 @@ app.post('/api/fm/media', auth, (req, res) => {
 
 app.get('/api/fm/media-jobs', auth, (req, res) => {
   const jobs = loadMediaJobs();
+  const activeStatuses = new Set(['starting', 'active', 'processing']);
+  const scope = req.query.scope || 'all';
   const mine = Object.values(jobs)
     .filter(j => j.user === req.session.user)
+    .filter(j => scope === 'active' ? (j.mode !== 'file' && activeStatuses.has(j.status)) : true)
     .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt))
-    .slice(0, 30)
+    .slice(0, scope === 'active' ? 20 : 100)
     .map(mediaJobPublic);
   res.json(mine);
 });
@@ -1119,6 +1308,68 @@ function shareNotFoundPage() {
 }
 
 // ─── HTML ────────────────────────────────────────────────────────
+function sharePreviewPage(s, token, filename, sizeStr) {
+  const isVideo = ['.mp4','.webm','.ogg','.mov','.mkv'].includes(path.extname(filename).toLowerCase());
+  const isImg = ['.png','.jpg','.jpeg','.gif','.webp','.svg','.bmp'].includes(path.extname(filename).toLowerCase());
+  const isAudio = ['.mp3','.wav','.ogg','.m4a','.aac'].includes(path.extname(filename).toLowerCase());
+  const dlUrl = '/share/' + token + '?dl=1';
+  let previewHtml = '';
+  let plyrInit = '';
+
+  if (isVideo) {
+    previewHtml = `<video id="plyr-player" src="${dlUrl}" playsinline controls style="max-width:100%; max-height:70vh; border-radius:8px;"></video>`;
+    plyrInit = `<script>
+      (function(){
+        try {
+          const player = new Plyr('#plyr-player', {
+            controls: ['play-large', 'play', 'progress', 'current-time', 'duration', 'mute', 'volume', 'captions', 'settings', 'pip', 'airplay', 'fullscreen'],
+            settings: ['captions', 'quality', 'speed', 'loop']
+          });
+          const key = "plyr_time_" + encodeURIComponent("${filename}");
+          player.on('ready', () => { const t = localStorage.getItem(key); if(t) player.currentTime = parseFloat(t); });
+          player.on('timeupdate', () => { localStorage.setItem(key, player.currentTime); });
+        } catch(e) { console.error("Plyr error:", e); }
+      })();
+    </script>`;
+  } else if (isImg) {
+    previewHtml = `<img src="${dlUrl}" style="max-width:100%; max-height:70vh; border-radius:8px; object-fit:contain; background:#1e1a25;">`;
+  } else if (isAudio) {
+    previewHtml = `<div style="padding:40px; background:#1e1a25; border-radius:8px; text-align:center; width:100%; box-sizing:border-box;"><span class="material-symbols-outlined" style="font-size:64px; color:#a078ff;">audio_file</span><br><br><audio id="plyr-player" src="${dlUrl}" controls playsinline></audio></div>`;
+    plyrInit = `<script>
+      (function(){
+        try {
+          const player = new Plyr('#plyr-player', {
+            controls: ['play', 'progress', 'current-time', 'duration', 'mute', 'volume']
+          });
+          const key = "plyr_time_" + encodeURIComponent("${filename}");
+          player.on('ready', () => { const t = localStorage.getItem(key); if(t) player.currentTime = parseFloat(t); });
+          player.on('timeupdate', () => { localStorage.setItem(key, player.currentTime); });
+        } catch(e) { console.error("Plyr audio error:", e); }
+      })();
+    </script>`;
+  } else {
+    previewHtml = `<div style="padding:60px 40px; background:#1e1a25; border-radius:8px; text-align:center; width:100%;"><span class="material-symbols-outlined" style="font-size:64px; color:#a078ff;">insert_drive_file</span><div style="margin-top:15px; color:#cbc3d7; font-size:16px;">Предпросмотр недоступен для этого формата файла</div></div>`;
+  }
+  
+  const escFn = (str) => String(str).replace(/[&<>'"]/g, match => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[match]));
+
+  return '<!DOCTYPE html><html lang="ru"><head><title>' + escFn(filename) + '</title>' + HEAD + '</head>' +
+  '<body style="background:#15121b; color:#fff; font-family:sans-serif; margin:0; display:flex; flex-direction:column; align-items:center; min-height:100vh;">' +
+  '<div style="max-width:1000px; width:100%; padding:20px 20px 40px; box-sizing:border-box;">' +
+    '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:15px; padding-top:20px;">' +
+      '<div style="flex:1; min-width:200px;">' +
+        '<div style="font-size:24px; font-weight:bold; color:#fff; word-break:break-all;">' + escFn(filename) + '</div>' +
+        '<div style="color:#958ea0; font-size:15px; margin-top:6px;">' + sizeStr + ' • ' + (s.downloads||0) + ' скачиваний</div>' +
+      '</div>' +
+      '<a href="' + dlUrl + '" style="background:#a078ff; color:#fff; padding:12px 24px; border-radius:8px; text-decoration:none; font-weight:bold; display:inline-flex; align-items:center; gap:8px; transition:background 0.2s;" onmouseover="this.style.background=\'#b291ff\'" onmouseout="this.style.background=\'#a078ff\'">Скачать файл <span class="material-symbols-outlined">download</span></a>' +
+    '</div>' +
+    '<div style="display:flex; justify-content:center; align-items:center; background:#1e1a25; border-radius:12px; padding:20px; box-shadow:0 10px 30px rgba(0,0,0,0.3);">' +
+      previewHtml +
+    '</div>' +
+  '</div>' + plyrInit +
+  '</body></html>';
+}
+
 const HEAD = `<meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <link rel="icon" type="image/x-icon" href="/favicon.ico"/>
@@ -1130,6 +1381,13 @@ const HEAD = `<meta charset="UTF-8"/>
 <script>if(localStorage.theme==='dark'||(!localStorage.theme&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.classList.add('dark')</script>
 <script src="https://cdn.tailwindcss.com?plugins=forms"></script>
 <script src="https://cdn.jsdelivr.net/npm/motion@10.18.0/dist/motion.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/plyr@3.7.8/dist/plyr.css" />
+<script src="https://cdn.jsdelivr.net/npm/plyr@3.7.8/dist/plyr.polyfilled.js"></script>
+<style>
+:root { --plyr-color-main: #a078ff; }
+.media-viewer .plyr { height: 100%; width: 100%; border-radius: 14px; box-shadow: 0 24px 90px rgba(0,0,0,.55); background: #000; }
+.media-viewer .plyr video, .media-viewer .plyr audio { max-height: 100%; width: 100%; object-fit: contain; }
+</style>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
 <script>
@@ -1893,7 +2151,7 @@ function mainPage(username) {
   '  var s = document.getElementById("notif-status");\n' +
   '  var b = document.getElementById("notif-btn");\n' +
   '  if (!("Notification" in window)) {\n' +
-  '    s.textContent = "Не Р С—Р С•Р Т‘Р Т‘Р ВµРЎР‚Р В¶Р С‘вается браузером";\n' +
+  '    s.textContent = "Не поддерживается браузером";\n' +
   '    b.style.display = "none"; return;\n' +
   '  }\n' +
   '  var p = Notification.permission;\n' +
@@ -1912,7 +2170,7 @@ function mainPage(username) {
   '}\n' +
   '\n' +
   'function requestNotifPerm() {\n' +
-  '  if (!("Notification" in window)) { toast("Браузер не поддерживает РЎС“Р Р†Р ВµР Т‘Р С•Р СР В»Р ВµР Р…Р С‘я"); return; }\n' +
+  '  if (!("Notification" in window)) { toast("Браузер не поддерживает уведомления"); return; }\n' +
   '  Notification.requestPermission().then(function() { updateNotifStatus(); });\n' +
   '}\n' +
   '\n' +
@@ -2197,15 +2455,29 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.transfer-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;font-size:12px;color:#958ea0}' +
   '.transfer-controls{display:flex;gap:8px;flex-wrap:wrap}' +
   '.transfer-controls .btn-ghost{min-height:32px;padding:4px 10px;font-size:12px}' +
-  '.progress-track{background:#2a2a2d;border-radius:9999px;height:6px;overflow:hidden;flex:1}' +
+  '.progress-track{background:#2a2a2d;border:1px solid rgba(208,188,255,.14);border-radius:9999px;height:10px;overflow:hidden;flex:1;box-shadow:inset 0 0 0 1px rgba(0,0,0,.18)}' +
   '.progress-fill{height:100%;border-radius:9999px;background:linear-gradient(90deg,#a078ff,#6d3bd7);transition:width .4s}' +
   '.progress-fill.done{background:#10B981;box-shadow:0 0 8px rgba(16,185,129,.5)}' +
+  '.transfer-card.is-error{border-color:#93000a;background:rgba(147,0,10,.06);padding-left:12px;padding-right:12px;border-radius:12px}' +
+  '.transfer-card.is-active{border-color:#6d3bd7;background:rgba(109,59,215,.06);padding-left:12px;padding-right:12px;border-radius:12px}' +
+  '.transfer-section-title{font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;color:#958ea0;margin:4px 0}' +
+  '#transfers-card{display:none;position:fixed;right:24px;bottom:24px;z-index:520;width:min(560px,calc(100vw - 48px));max-height:min(62vh,620px);overflow:auto;margin:0!important;padding:16px!important;box-shadow:0 18px 70px rgba(0,0,0,.5)}' +
+  '#transfers-card.minimized{display:none!important}' +
+  '#transfers-chip{display:none;position:fixed;right:24px;bottom:24px;z-index:521;align-items:center;gap:10px;background:#1f1f22;border:1px solid #6d3bd7;border-radius:9999px;padding:10px 14px;color:#e4e1e6;box-shadow:0 14px 46px rgba(0,0,0,.45);cursor:pointer}' +
+  '#transfers-chip.active{display:flex}' +
+  '.new-badge{display:inline-flex;align-items:center;margin-left:8px;border:1px solid rgba(16,185,129,.42);background:rgba(16,185,129,.14);color:#86efac;border-radius:9999px;padding:2px 7px;font-size:10px;font-weight:900;text-transform:uppercase}' +
+  '.file-row.is-new,.file-grid-item.is-new{outline:2px solid rgba(16,185,129,.65)!important;outline-offset:-2px}' +
+  '.history-row{display:grid;grid-template-columns:1fr 120px 90px 150px;gap:12px;align-items:center;padding:12px 14px;border-bottom:1px solid #1f1f22;background:#17171a}' +
+  '.history-row:first-child{border-radius:12px 12px 0 0}' +
+  '.history-row:last-child{border-bottom:none;border-radius:0 0 12px 12px}' +
+  '.history-name{min-width:0;font-size:13px;font-weight:800;color:#e4e1e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+  '.history-meta{font-size:12px;color:#958ea0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
   '.select-check{width:16px;height:16px;accent-color:#a078ff;cursor:pointer;flex:0 0 auto}' +
   '#selection-bar{display:none;align-items:center;gap:10px;padding:10px 24px;border-bottom:1px solid #1f1f22;background:#17171a;flex-shrink:0}' +
   '#upload-panel{display:none;position:fixed;right:24px;bottom:24px;z-index:350;width:min(420px,calc(100vw - 48px));background:#1f1f22;border:1px solid #494454;border-radius:14px;padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.55);animation:slideUp .22s ease both}' +
   '#toast{display:none;position:fixed;right:24px;top:24px;z-index:650;width:min(420px,calc(100vw - 48px));background:#1f1f22;border:1px solid #6d3bd7;border-radius:14px;padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.55);animation:slideUp .2s ease both}' +
-  '.preview-panel{display:none;width:380px;max-width:38vw;border-left:1px solid #1f1f22;background:#151518;flex-shrink:0;flex-direction:column;overflow:hidden}' +
-  '.preview-panel.open{display:flex}' +
+  '.preview-panel{display:none;width:380px;max-width:38vw;border-left:1px solid #1f1f22;background:#151518;flex-shrink:0;flex-direction:column;overflow:hidden;transform-origin:right center}' +
+  '.preview-panel.open{display:flex;animation:panelIn .22s cubic-bezier(.2,.8,.2,1) both}' +
   '.preview-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid #1f1f22;flex-shrink:0}' +
   '.preview-body{padding:14px;overflow:auto;flex:1;min-height:0}' +
   '.preview-body.media-preview{display:flex;align-items:center;justify-content:center;background:#0e0e10}' +
@@ -2214,18 +2486,25 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.preview-media-wrap:fullscreen{background:#050506;padding:24px}' +
   '.preview-media-wrap:fullscreen .preview-media{max-width:100vw;max-height:100vh}' +
   '.media-viewer{position:fixed;inset:0;z-index:900;background:rgba(5,5,7,.96);display:none;flex-direction:column;color:#fff}' +
-  '.media-viewer.open{display:flex}' +
+  '.media-viewer.open{display:flex;animation:viewerIn .2s cubic-bezier(.2,.8,.2,1) both}' +
   '.mv-top{height:64px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(20,20,24,.72);backdrop-filter:blur(18px)}' +
   '.mv-title{flex:1;min-width:0;font-size:15px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
   '.mv-icon{width:42px;height:42px;border-radius:9999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer}' +
   '.mv-icon:hover{background:rgba(160,120,255,.22);border-color:#a078ff}' +
-  '.mv-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:18px;overflow:hidden}' +
+  '.mv-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:18px;overflow:hidden;position:relative;background:radial-gradient(circle at 50% 50%,rgba(160,120,255,.08),transparent 42%)}' +
   '.mv-stage img,.mv-stage video{max-width:100%;max-height:100%;object-fit:contain;border-radius:14px;box-shadow:0 24px 90px rgba(0,0,0,.55)}' +
   '.mv-stage audio{width:min(720px,92vw)}' +
   '.mv-bottom{min-height:72px;display:flex;align-items:center;gap:12px;padding:12px 18px;border-top:1px solid rgba(255,255,255,.08);background:rgba(20,20,24,.72);backdrop-filter:blur(18px)}' +
   '.mv-seek{flex:1;accent-color:#a078ff}' +
   '.mv-time{font-size:12px;color:#cbc3d7;min-width:96px;text-align:center}' +
   '.mv-range{width:100px;accent-color:#a078ff}' +
+  '.mv-center-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) scale(.94);width:86px;height:86px;border-radius:9999px;border:1px solid rgba(255,255,255,.28);background:rgba(20,20,24,.62);backdrop-filter:blur(18px);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 18px 60px rgba(0,0,0,.42);transition:opacity .18s,transform .18s}' +
+  '.mv-center-play.hidden{opacity:0;pointer-events:none;transform:translate(-50%,-50%) scale(.82)}' +
+  '.mv-center-play .material-symbols-outlined{font-size:48px}' +
+  '.mv-select{height:38px;border-radius:9999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#fff;padding:0 10px;font:700 12px Manrope,sans-serif;outline:none}' +
+  '.mv-select option{background:#16161a;color:#fff}' +
+  '.mv-hint{position:absolute;left:50%;top:18px;transform:translateX(-50%);background:rgba(20,20,24,.72);border:1px solid rgba(255,255,255,.14);border-radius:9999px;padding:7px 12px;color:#cbc3d7;font-size:12px;opacity:0;pointer-events:none;transition:opacity .18s}' +
+  '.mv-hint.show{opacity:1}' +
   '#preview-info{padding:14px 16px;border-top:1px solid #1f1f22;flex-shrink:0;max-height:260px;overflow-y:auto;background:#121215}' +
   '.meta-row{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #252528;font-size:12px}' +
   '.meta-row:last-child{border-bottom:none}' +
@@ -2260,6 +2539,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'body.light .transfer-status{background:#ede5ff;color:#6d3bd7}' +
   'body.light .transfer-meta{color:#7b6f93}' +
   'body.light .progress-track{background:#e2d9f3}' +
+  'body.light #transfers-card,body.light #transfers-chip{background:#fff;border-color:#a078ff;color:#17151c}' +
+  'body.light .history-row{background:#fff;border-bottom-color:#e2d9f3}' +
+  'body.light .history-name{color:#17151c}' +
+  'body.light .history-meta{color:#7b6f93}' +
   'body.light .file-row{background:#fff!important;border-color:#d8cdec!important;border-bottom-color:#ede5ff;color:#17151c}' +
   'body.light .file-row:hover{background:#f7f2ff!important}' +
   'body.light .file-row.selected{background:#e0d5ff}' +
@@ -2300,7 +2583,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'body.light .ctx-sep{background:#e8e0f4!important}' +
   'body.light #file-area{color:#17151c}' +
   /* context menu */
-  '#ctx-menu{position:fixed;z-index:500;background:#1f1f22;border:1px solid #494454;border-radius:10px;padding:4px;min-width:190px;box-shadow:0 12px 40px rgba(0,0,0,.7);display:none}' +
+  '#ctx-menu{position:fixed;z-index:500;background:#1f1f22;border:1px solid #494454;border-radius:10px;padding:4px;min-width:190px;box-shadow:0 12px 40px rgba(0,0,0,.7);display:none;transform-origin:top left}' +
+  '#ctx-menu.open{animation:menuIn .14s cubic-bezier(.2,.8,.2,1) both}' +
   '.ctx-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;color:#e4e1e6;transition:background .12s}' +
   '.ctx-item:hover{background:rgba(208,188,255,.15);color:#d0bcff}' +
   '.ctx-item.danger{color:#ffb4ab}' +
@@ -2311,6 +2595,9 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '#drop-zone.active{display:flex}' +
   '@keyframes popIn{from{opacity:0;transform:scale(.98) translateY(6px)}to{opacity:1;transform:scale(1) translateY(0)}}' +
   '@keyframes slideUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}' +
+  '@keyframes panelIn{from{opacity:0;transform:translateX(18px) scale(.985)}to{opacity:1;transform:translateX(0) scale(1)}}' +
+  '@keyframes menuIn{from{opacity:0;transform:translateY(-4px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}' +
+  '@keyframes viewerIn{from{opacity:0;transform:scale(.992)}to{opacity:1;transform:scale(1)}}' +
   '@media (max-width:768px){' +
   'body{display:block!important;min-height:100dvh;overflow-x:hidden;padding:0 0 96px;background:#131315}' +
   '.mobile-topbar{display:flex;position:sticky;top:0;z-index:60;height:64px;align-items:center;justify-content:space-between;padding:0 20px;background:rgba(14,14,16,.86);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-bottom:1px solid rgba(53,52,55,.65)}' +
@@ -2321,14 +2608,19 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.sidebar{display:none!important}' +
   '#main-area{min-height:calc(100dvh - 64px);display:block!important}' +
   '.desktop-toolbar{display:none!important}' +
-  '.mobile-toolbar{display:flex!important;padding:44px 20px 28px!important;gap:14px!important;align-items:center!important;border-bottom:0!important;background:transparent!important}' +
-  '.mobile-toolbar>button:not([data-action="upload-btn"]){display:none!important}' +
-  '.mobile-toolbar #breadcrumb{display:none!important}' +
+  '.mobile-toolbar{display:flex!important;padding:44px 20px 14px!important;gap:14px!important;align-items:center!important;border-bottom:0!important;background:transparent!important;flex-wrap:wrap!important;height:auto!important}' +
+  '.mobile-toolbar>button:not([data-action="upload-btn"]):not([data-action="go-back"]){display:none!important}' +
+  '.mobile-toolbar>button[data-action="view-list"],.mobile-toolbar>button[data-action="view-grid"],.mobile-toolbar>button[data-action="toggle-theme"],.mobile-toolbar>button[data-action="go-back"]{display:flex!important}' +
+  '.mobile-toolbar #breadcrumb{display:flex!important;width:100%!important;order:10!important;margin-top:4px!important;padding:8px 0!important;border-top:1px solid #1f1f22!important;overflow-x:auto!important;white-space:nowrap!important;scrollbar-width:none!important}' +
+  '.mobile-toolbar #breadcrumb::-webkit-scrollbar{display:none}' +
   '.mobile-toolbar>div[style*="position:relative"]{display:block!important;flex:1;min-width:0}' +
   '#search-inp{width:100%!important;height:58px;border-radius:9999px!important;background:#2a2a2c!important;border:1px solid #4a4455!important;color:#e5e1e4!important;font-size:16px!important;padding-left:54px!important}' +
   '#search-inp::placeholder{color:#ccc3d8}' +
   '.mobile-toolbar>div[style*="position:relative"] span{left:20px!important;color:#ccc3d8!important}' +
-  '.mobile-toolbar [data-action="upload-btn"]{display:flex!important;width:64px!important;height:64px!important;padding:0!important;align-items:center;justify-content:center;box-shadow:0 18px 30px rgba(124,58,237,.28);font-size:0}' +
+  '.mobile-toolbar [data-action="upload-btn"]{display:flex!important;width:64px!important;height:64px!important;padding:0!important;align-items:center;justify-content:center;box-shadow:0 18px 30px rgba(124,58,237,.28);font-size:0;flex:0 0 auto}' +
+  '.mobile-toolbar [data-action="view-list"],.mobile-toolbar [data-action="view-grid"],.mobile-toolbar [data-action="toggle-theme"]{width:48px!important;height:48px!important;min-height:48px!important;padding:0!important;align-items:center;justify-content:center;flex:0 0 auto}' +
+  '.mobile-toolbar [data-action="toggle-theme"]{font-size:0!important}' +
+  '.mobile-toolbar [data-action="toggle-theme"]::before{content:"contrast";font-family:"Material Symbols Outlined";font-size:26px}' +
   '.mobile-toolbar [data-action="upload-btn"]::before{content:"upload";font-family:"Material Symbols Outlined";font-size:34px;font-variation-settings:"FILL" 1,"wght" 700,"GRAD" 0,"opsz" 32}' +
   '.mobile-actions{display:flex!important;padding:0 20px 28px!important;gap:10px!important;overflow-x:auto;border-bottom:0!important;background:transparent!important}' +
   '.mobile-actions button{white-space:nowrap;min-height:44px;background:#201f21;border-color:#353437;color:#e5e1e4}' +
@@ -2356,6 +2648,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.bottom-nav-item .material-symbols-outlined{font-size:30px}' +
   '#upload-panel{left:20px!important;right:20px!important;bottom:104px!important;width:auto!important;border-radius:18px!important}' +
   '#toast{left:20px!important;right:20px!important;top:76px!important;width:auto!important}' +
+  '#transfers-card{left:20px!important;right:20px!important;bottom:104px!important;width:auto!important;max-height:50vh}' +
+  '#transfers-chip{right:20px!important;bottom:104px!important}' +
   '.preview-panel{position:fixed!important;left:0;right:0;bottom:0;z-index:70;width:100%!important;max-width:none!important;max-height:72dvh;border-left:0;border-top:1px solid #353437;border-radius:22px 22px 0 0;background:#1b1b1d}' +
   '.media-viewer{z-index:950}' +
   '.mv-top{height:58px;padding:0 12px}' +
@@ -2386,6 +2680,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div style="font-size:11px;font-weight:600;letter-spacing:.05em;color:#494454;text-transform:uppercase;padding:8px 4px 4px">Навигация</div>' +
   '<div class="nav-item active" data-action="nav-home"><span class="material-symbols-outlined">folder</span><span>Мои файлы</span></div>' +
   '<div class="nav-item" data-action="nav-recent"><span class="material-symbols-outlined">schedule</span><span>Недавние</span></div>' +
+  '<div class="nav-item" data-action="nav-url-history"><span class="material-symbols-outlined">history</span><span>История URL</span></div>' +
   '<div style="flex:1"></div>' +
   '<div style="padding:8px 4px">' +
   '<div style="font-size:12px;color:#958ea0;margin-bottom:6px">Диск</div>' +
@@ -2419,8 +2714,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<input type="file" id="upload-input" multiple style="display:none">' +
   '<button class="btn-ghost" data-action="open-url-modal"><span class="material-symbols-outlined">link</span> URL</button>' +
   '<button class="btn-ghost" data-action="mkdir"><span class="material-symbols-outlined">create_new_folder</span> Новая папка</button>' +
-  '<button class="btn-ghost" data-action="view-list"><span class="material-symbols-outlined">view_list</span></button>' +
-  '<button class="btn-ghost" data-action="view-grid"><span class="material-symbols-outlined">grid_view</span></button>' +
   '</div>' +
   '<div id="selection-bar">' +
   '<div id="selection-count" style="font-size:13px;font-weight:600;color:#d0bcff;flex:1">0 selected</div>' +
@@ -2433,15 +2726,17 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="file-scroll" style="flex:1;overflow-y:auto;padding:16px 24px">' +
   '<div id="file-area"><div style="color:#958ea0;padding:40px;text-align:center">Загрузка...</div></div>' +
   '</div>' +
-  '<div class="card" style="margin:0 24px 16px;padding:16px">' +
-  '<div style="font-size:13px;font-weight:600;color:#cbc3d7;margin-bottom:10px">Активные загрузки</div>' +
+  '<div id="transfers-card" class="card">' +
+  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><div style="font-size:13px;font-weight:700;color:#cbc3d7;flex:1">Активные загрузки</div><button class="btn-ghost" data-action="minimize-transfers" style="padding:4px 8px" title="Свернуть"><span class="material-symbols-outlined">remove</span></button></div>' +
   '<div id="transfers-list"><div style="color:#494454;font-size:13px">Нет активных загрузок</div></div>' +
   '</div>' +
+  '<div id="transfers-chip" data-action="restore-transfers"><span class="material-symbols-outlined">downloading</span><span id="transfers-chip-text">Загрузка...</span></div>' +
   '</main>' +
   '<nav class="mobile-bottom-nav">' +
   '<button class="bottom-nav-item" data-action="nav-home"><span class="material-symbols-outlined">home</span><span>Home</span></button>' +
   '<button class="bottom-nav-item active" data-action="nav-home"><span class="material-symbols-outlined">folder</span><span>Files</span></button>' +
   '<button class="bottom-nav-item" data-action="nav-recent"><span class="material-symbols-outlined">schedule</span><span>Recent</span></button>' +
+  '<button class="bottom-nav-item" data-action="nav-url-history"><span class="material-symbols-outlined">history</span><span>URL</span></button>' +
   '<button class="bottom-nav-item" data-action="upload-btn"><span class="material-symbols-outlined">upload</span><span>Upload</span></button>' +
   '</nav>' +
   '<aside id="preview-panel" class="preview-panel">' +
@@ -2511,7 +2806,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div style="font-size:12px;color:#958ea0;margin-bottom:14px">Файл попадёт в текущую папку CloudSpace</div>' +
   '<input id="url-dl-inp" class="inp" placeholder="https://example.com/file.zip" style="margin-bottom:10px">' +
   '<select id="url-mode-inp" class="inp" style="margin-bottom:10px"><option value="file">Обычный файл</option><option value="video">Медиа: видео</option><option value="audio">Медиа: MP3 audio</option><option value="best">Медиа: лучший доступный файл</option></select>' +
-  '<input id="url-name-inp" class="inp" placeholder="Имя файла, если нужно" style="margin-bottom:14px">' +
+  '<input id="url-name-inp" class="inp" placeholder="Имя без расширения, если нужно" style="margin-bottom:6px">' +
+  '<div id="url-name-hint" style="font-size:11px;color:#958ea0;margin-bottom:12px">Для медиа расширение добавится автоматически: .mp4 или .mp3</div>' +
   '<div id="url-status" style="font-size:12px;color:#958ea0;min-height:16px;margin-bottom:12px"></div>' +
   '<div style="display:flex;gap:10px;justify-content:flex-end">' +
   '<button class="btn-ghost" data-action="close-url-modal">Отмена</button>' +
@@ -2528,6 +2824,9 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</select>' +
   '<label style="display:block;font-size:12px;color:#958ea0;margin-bottom:6px">Количество скачиваний</label>' +
   '<input id="share-max-inp" class="inp" type="number" min="0" step="1" placeholder="0 = без ограничения" style="margin-bottom:12px">' +
+  '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#958ea0;margin-bottom:12px;cursor:pointer">' +
+  '<input type="checkbox" id="share-preview-chk" checked style="cursor:pointer"> Создать страницу предпросмотра (вместо авто-скачивания)' +
+  '</label>' +
   '<div id="share-status" style="font-size:12px;color:#958ea0;min-height:16px;margin-bottom:12px"></div>' +
   '<div style="display:flex;gap:10px;justify-content:flex-end">' +
   '<button class="btn-ghost" data-action="close-share-modal">Отмена</button>' +
@@ -2544,6 +2843,9 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'var previewFp="",previewName="",previewKind="",previewSrc="",mvZoom=1;' +
   'var toastUrl="";' +
   'var pendingShare=null;' +
+  'var transfersMinimized=localStorage.getItem("transfers-minimized")==="1";' +
+  'var knownMediaStatuses={};' +
+  'var recentNewFiles={};' +
 
   /* ── UTILS ── */
   'function H(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
@@ -2551,16 +2853,16 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function fmtSpeed(b){return fmtSize(b||0)+"/s";}' +
   'function fmtDate(ts){if(!ts)return "";return new Date(ts).toLocaleDateString("ru-RU",{day:"2-digit",month:"short",year:"numeric"});}' +
   'function fmtDateTime(ts){if(!ts)return "";return new Date(ts).toLocaleString("ru-RU",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"});}' +
-  'function activePath(){return currentPath==="__recent__"?"":currentPath;}' +
+  'function activePath(){return (currentPath==="__recent__"||currentPath==="__url_history__")?"":currentPath;}' +
   'function parentPath(p){var parts=(p||"").split("/").filter(Boolean);parts.pop();return parts.join("/");}' +
   'function splitExt(name,isDir){if(isDir)return {base:name,ext:""};var dot=name.lastIndexOf(".");if(dot<=0)return {base:name,ext:""};return {base:name.slice(0,dot),ext:name.slice(dot)};}' +
-  'function setView(v){currentView=v==="grid"?"grid":"list";localStorage.setItem("fm-view",currentView);if(currentPath!=="__recent__")loadDir();}' +
+  'function setView(v){currentView=v==="grid"?"grid":"list";localStorage.setItem("fm-view",currentView);if(currentPath!=="__recent__"&&currentPath!=="__url_history__")loadDir();}' +
   'function selectedList(){return Object.keys(selectedItems).map(function(k){return selectedItems[k];});}' +
   'function updateSelectionBar(){var n=selectedList().length;document.getElementById("selection-count").textContent="Выбрано: "+n;document.getElementById("selection-bar").style.display=n?"flex":"none";}' +
   'function clearSelection(refresh){selectedItems={};updateSelectionBar();if(refresh)renderContent(lastEntries,lastBase);}' +
   'function toggleSelect(fp,name,isDir,checked){if(checked)selectedItems[fp]={fp:fp,name:name,isDir:isDir};else delete selectedItems[fp];updateSelectionBar();renderContent(lastEntries,lastBase);}' +
   'function selectAllVisible(checked){selectedItems={};if(checked){for(var i=0;i<lastEntries.length;i++){var f=lastEntries[i];var fp=lastBase?(lastBase+"/"+f.name):f.name;selectedItems[fp]={fp:fp,name:f.name,isDir:!!f.isDir};}}updateSelectionBar();renderContent(lastEntries,lastBase);}' +
-  'function refreshCurrent(){if(currentPath==="__recent__")loadRecent();else loadDir();}' +
+  'function refreshCurrent(){if(currentPath==="__recent__")loadRecent();else if(currentPath==="__url_history__")loadUrlHistory();else loadDir();}' +
   'function goBackPath(){var p=activePath();if(!p)return;navigateTo(parentPath(p));}' +
   'function allVisibleSelected(files,base){if(!files.length)return false;for(var i=0;i<files.length;i++){var fp=base?(base+"/"+files[i].name):files[i].name;if(!selectedItems[fp])return false;}return true;}' +
   'function selectedPayload(){return selectedList().map(function(x){return {path:x.fp,isDir:x.isDir};});}' +
@@ -2570,16 +2872,22 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function hideToast(){document.getElementById("toast").style.display="none";}' +
   'function copyToast(){if(toastUrl&&navigator.clipboard)navigator.clipboard.writeText(toastUrl).then(function(){showToast("Скопировано",toastUrl,toastUrl);});}' +
   'function copyOrShowLink(url){var full=window.location.origin+url;showToast("Публичная ссылка готова",full,full);}' +
+  'function playDoneSound(){try{var ac=new (window.AudioContext||window.webkitAudioContext)();var o=ac.createOscillator(),g=ac.createGain();o.type="sine";o.frequency.setValueAtTime(660,ac.currentTime);o.frequency.setValueAtTime(880,ac.currentTime+.12);g.gain.setValueAtTime(.0001,ac.currentTime);g.gain.exponentialRampToValueAtTime(.08,ac.currentTime+.02);g.gain.exponentialRampToValueAtTime(.0001,ac.currentTime+.34);o.connect(g);g.connect(ac.destination);o.start();o.stop(ac.currentTime+.36);}catch(e){}}' +
+  'function notifyDone(name){playDoneSound();showToast("Загрузка завершена",name||"Файл готов","");if("Notification" in window){if(Notification.permission==="granted")new Notification("CloudSpace: загрузка завершена",{body:name||"Файл готов"});else if(Notification.permission==="default")Notification.requestPermission().then(function(p){if(p==="granted")new Notification("CloudSpace: загрузка завершена",{body:name||"Файл готов"});});}}' +
+  'function notifyFail(name,error){showToast("Загрузка не удалась",(name||"Media download")+(error?": "+error:""),"");if("Notification" in window){if(Notification.permission==="granted")new Notification("CloudSpace: загрузка не удалась",{body:(name||"Media download")+(error?": "+error:"")});else if(Notification.permission==="default")Notification.requestPermission().then(function(p){if(p==="granted")new Notification("CloudSpace: загрузка не удалась",{body:(name||"Media download")+(error?": "+error:"")});});}}' +
+  'function rememberNewFile(job){if(!job||!job.file)return;var ts=new Date(job.updatedAt||job.createdAt||Date.now()).getTime();if(Date.now()-ts>30*60*1000)return;var fp=(job.folder?job.folder+"/":"")+job.file;recentNewFiles[fp]=ts+30*60*1000;}' +
+  'function isNewFile(fp){var until=recentNewFiles[fp]||0;if(until<Date.now()){delete recentNewFiles[fp];return false;}return true;}' +
+  'function setTransfersUi(count){var card=document.getElementById("transfers-card"),chip=document.getElementById("transfers-chip"),txt=document.getElementById("transfers-chip-text");if(!card||!chip)return;if(count>0){txt.textContent=count+" активн.";if(transfersMinimized){card.style.display="none";chip.classList.add("active");}else{card.style.display="block";chip.classList.remove("active");}}else{card.style.display="none";chip.classList.remove("active");}}' +
   'function applyTheme(){var light=localStorage.getItem("fm-theme")==="light";document.body.classList.toggle("light",light);}' +
   'function toggleTheme(){localStorage.setItem("fm-theme",document.body.classList.contains("light")?"dark":"light");applyTheme();}' +
   'function fileKind(name){var ext=(name.split(".").pop()||"").toLowerCase();if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext))return"image";if(["mp4","webm","ogg","mov","mkv"].includes(ext))return"video";if(["mp3","wav","m4a","flac","aac","oga"].includes(ext))return"audio";if(ext==="pdf")return"pdf";if(["zip","rar","7z","tar","gz"].includes(ext))return"archive";if(["exe","msi","apk","deb"].includes(ext))return"app";if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf"].includes(ext))return"text";return"file";}' +
-  'function fileThumb(name,fp,isDir){if(isDir)return \'<div class="file-thumb"><span class="material-symbols-outlined">folder</span></div>\';var k=fileKind(name);if(k==="image")return \'<div class="file-thumb"><img src="/api/fm/preview?path=\'+encodeURIComponent(fp)+\'"></div>\';var icons={video:"movie",audio:"audio_file",pdf:"picture_as_pdf",archive:"folder_zip",app:"deployed_code",text:"article",file:"draft"};return \'<div class="file-thumb"><span class="material-symbols-outlined">\'+(icons[k]||"draft")+\'</span></div>\';}' +
+  'function fileThumb(name,fp,isDir){if(isDir)return \'<div class="file-thumb"><span class="material-symbols-outlined">folder</span></div>\';var k=fileKind(name);var ext=(name.split(".").pop()||"").toLowerCase();if(k==="image"||ext==="exe"||k==="video"){var fb=ext==="exe"?"deployed_code":k==="video"?"movie":"image";return \'<div class="file-thumb"><img src="/api/fm/preview?path=\'+encodeURIComponent(fp)+\'&thumb=1" onerror="this.outerHTML=\'+String.fromCharCode(39)+\'<span class=material-symbols-outlined>\'+fb+\'</span>\'+String.fromCharCode(39)+\'"></div>\';}var icons={video:"movie",audio:"audio_file",pdf:"picture_as_pdf",archive:"folder_zip",app:"deployed_code",text:"article",file:"draft"};return \'<div class="file-thumb"><span class="material-symbols-outlined">\'+(icons[k]||"draft")+\'</span></div>\';}' +
   'function makeZip(items,name,startDownload){return fetch("/api/fm/zip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:items,name:name||"cloudspace.zip"})}).then(function(r){return r.json();}).then(function(d){if(!d.ok)throw new Error(d.error||"Ошибка архива");if(startDownload)window.location.href=d.url;return d;});}' +
   'function downloadSelected(){var items=selectedList();if(!items.length)return;if(items.some(function(x){return x.isDir;})||items.length>5){zipSelected();return;}items.forEach(function(it,i){setTimeout(function(){var a=document.createElement("a");a.href="/api/fm/download?path="+encodeURIComponent(it.fp);a.download=it.name;document.body.appendChild(a);a.click();a.remove();},i*350);});}' +
   'function zipSelected(){var items=selectedPayload();if(!items.length)return;makeZip(items,"cloudspace.zip",true).catch(function(e){alert(e.message);});}' +
-  'function openShareModal(payload,label){pendingShare=payload;document.getElementById("share-target-label").textContent=label||"Настройки доступа";document.getElementById("share-expire-inp").value="0";document.getElementById("share-max-inp").value="";document.getElementById("share-status").textContent="";document.getElementById("modal-share").style.display="flex";}' +
+  'function openShareModal(payload,label){pendingShare=payload;document.getElementById("share-target-label").textContent=label||"Настройки доступа";document.getElementById("share-expire-inp").value="0";document.getElementById("share-max-inp").value="";document.getElementById("share-preview-chk").checked=true;document.getElementById("share-status").textContent="";document.getElementById("modal-share").style.display="flex";}' +
   'function closeShareModal(){document.getElementById("modal-share").style.display="none";pendingShare=null;}' +
-  'function confirmShare(){if(!pendingShare)return;var body=Object.assign({},pendingShare);body.expiresIn=parseInt(document.getElementById("share-expire-inp").value||"0",10);body.maxDownloads=parseInt(document.getElementById("share-max-inp").value||"0",10);var st=document.getElementById("share-status");st.textContent="Создаю ссылку...";fetch("/api/fm/share",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){if(d.ok){closeShareModal();copyOrShowLink(d.url);if(previewFp)renderPreviewInfo(previewFp,previewName);}else st.textContent=d.error||"Ошибка ссылки";}).catch(function(){st.textContent="Ошибка ссылки";});}' +
+  'function confirmShare(){if(!pendingShare)return;var body=Object.assign({},pendingShare);body.expiresIn=parseInt(document.getElementById("share-expire-inp").value||"0",10);body.maxDownloads=parseInt(document.getElementById("share-max-inp").value||"0",10);body.preview=document.getElementById("share-preview-chk").checked;var st=document.getElementById("share-status");st.textContent="Создаю ссылку...";fetch("/api/fm/share",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){if(d.ok){closeShareModal();copyOrShowLink(d.url);if(previewFp)renderPreviewInfo(previewFp,previewName);}else st.textContent=d.error||"Ошибка ссылки";}).catch(function(){st.textContent="Ошибка ссылки";});}' +
   'function shareSelected(){var items=selectedPayload();if(!items.length)return;openShareModal({items:items},"Выбрано объектов: "+items.length);}' +
   'function shareOne(fp){openShareModal({path:fp},"Объект: "+fp);}' +
 
@@ -2617,75 +2925,35 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    (currentView==="grid"?fileGridHtml(lastEntries,lastBase):fileListHtml(lastEntries,lastBase));' +
   '}' +
 
-  /* ── LIST HTML ── */
   'function fileListHtml(files,base){' +
-  '  if(!files.length)return \'<div style="color:#494454;padding:40px;text-align:center">Папка пуста</div>\';' +
+  '  if(!files.length)return \'<div style="color:#494454;padding:40px;text-align:center">\\u041f\\u0430\\u043f\\u043a\\u0430 \\u043f\\u0443\\u0441\\u0442\\u0430</div>\';' +
   '  var h=\'<div style="background:#1b1b1e;border:1px solid #494454;border-radius:12px;overflow:hidden">\';' +
-  '  h+=\'<div class="file-row" style="font-size:12px;font-weight:600;color:#494454;text-transform:uppercase;letter-spacing:.05em;cursor:default;background:#131316">\';' +
-  '  h+=\'<div style="width:20px"><input class="select-check" type="checkbox" data-action="select-all" \'+(allVisibleSelected(files,base)?"checked":"")+\'></div>\';' +
-  '  h+=\'<div style="width:28px"></div><div style="flex:1">Название</div>\';' +
-  '  h+=\'<div style="width:100px;text-align:right">Размер</div>\';' +
-  '  h+=\'<div style="width:130px;text-align:right">Изменён</div>\';' +
-  '  h+=\'<div style="width:54px"></div></div>\';' +
-  '  for(var i=0;i<files.length;i++){' +
-  '    var f=files[i];' +
-  '    var fp=base?(base+"/"+f.name):f.name;' +
-  '    var checked=!!selectedItems[fp];' +
-  '    h+=\'<div class="file-row \'+(checked?"selected":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'">\';' +
-  '    h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'"\';' +
-  '    if(checked)h+=" checked";' +
-  '    h+=">";' +
-  '    h+=fileThumb(f.name,fp,f.isDir);' +
-  '    if(f.isDir){' +
-  '      h+=\'<div data-meta="\'+(f.fileCount!=null?H(f.fileCount+" items"):"Folder")+\'" style="flex:1;font-weight:500;color:#d0bcff;cursor:pointer;pointer-events:none">\'+H(f.name)+"</div>";' +
-  '    }else{' +
-  '      h+=\'<div data-meta="\'+H(fmtSize(f.size)+" • "+fmtDate(f.mtime))+\'" style="flex:1;color:#e4e1e6;pointer-events:none">\'+H(f.name)+"</div>";' +
-  '    }' +
-  '    h+=\'<div style="width:100px;text-align:right;font-size:13px;color:#958ea0;pointer-events:none">\'+fmtSize(f.size)+"</div>";' +
-  '    h+=\'<div style="width:130px;text-align:right;font-size:12px;color:#494454;pointer-events:none">\'+fmtDate(f.mtime)+"</div>";' +
-  '    h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Действия"><span class="material-symbols-outlined">more_vert</span></button>\';' +
-  '    h+="</div>";' +
-  '  }' +
+  '  h+=\'<div class="file-row" style="font-size:12px;font-weight:600;color:#494454;text-transform:uppercase;letter-spacing:.05em;cursor:default;background:#131316"><div style="width:20px"><input class="select-check" type="checkbox" data-action="select-all" \'+(allVisibleSelected(files,base)?"checked":"")+\'></div><div style="width:28px"></div><div style="flex:1">\\u041d\\u0430\\u0437\\u0432\\u0430\\u043d\\u0438\\u0435</div><div style="width:100px;text-align:right">\\u0420\\u0430\\u0437\\u043c\\u0435\\u0440</div><div style="width:130px;text-align:right">\\u0418\\u0437\\u043c\\u0435\\u043d\\u0435\\u043d</div><div style="width:54px"></div></div>\';' +
+  '  for(var i=0;i<files.length;i++){var f=files[i],fp=base?(base+"/"+f.name):f.name,checked=!!selectedItems[fp],isNew=isNewFile(fp),badge=isNew?\'<span class="new-badge">New</span>\':"";h+=\'<div class="file-row \'+(checked?"selected ":"")+(isNew?"is-new":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'">\';h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'"\'+(checked?" checked":"")+">";h+=fileThumb(f.name,fp,f.isDir);if(f.isDir)h+=\'<div data-meta="\'+(f.fileCount!=null?H(f.fileCount+" items"):"Folder")+\'" style="flex:1;font-weight:500;color:#d0bcff;cursor:pointer;pointer-events:none">\'+H(f.name)+badge+"</div>";else h+=\'<div data-meta="\'+H(fmtSize(f.size)+" ? "+fmtDate(f.mtime))+\'" style="flex:1;color:#e4e1e6;pointer-events:none">\'+H(f.name)+badge+"</div>";h+=\'<div style="width:100px;text-align:right;font-size:13px;color:#958ea0;pointer-events:none">\'+fmtSize(f.size)+"</div>";h+=\'<div style="width:130px;text-align:right;font-size:12px;color:#494454;pointer-events:none">\'+fmtDate(f.mtime)+"</div>";h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Actions"><span class="material-symbols-outlined">more_vert</span></button></div>\';}' +
   '  return h+"</div>";' +
   '}' +
-
-  /* ── GRID HTML ── */
   'function fileGridHtml(files,base){' +
-  '  if(!files.length)return \'<div style="color:#494454;padding:40px;text-align:center">Папка пуста</div>\';' +
+  '  if(!files.length)return \'<div style="color:#494454;padding:40px;text-align:center">\\u041f\\u0430\\u043f\\u043a\\u0430 \\u043f\\u0443\\u0441\\u0442\\u0430</div>\';' +
   '  var h=\'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px">\';' +
-  '  for(var i=0;i<files.length;i++){' +
-  '    var f=files[i];' +
-  '    var fp=base?(base+"/"+f.name):f.name;' +
-  '    var checked=!!selectedItems[fp];' +
-  '    h+=\'<div class="file-grid-item \'+(checked?"selected":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:relative">\';' +
-  '    h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:absolute;top:10px;left:10px"\';' +
-  '    if(checked)h+=" checked";' +
-  '    h+=">";' +
-  '    h+=fileThumb(f.name,fp,f.isDir);' +
-  '    h+=\'<div style="font-size:13px;font-weight:700;color:\'+( f.isDir?"#d0bcff":"#e4e1e6" )+\';word-break:break-word;max-width:150px;text-align:left;pointer-events:none">\'+H(f.name)+"</div>";' +
-  '    h+=\'<div style="font-size:11px;color:#958ea0;pointer-events:none">\'+(f.isDir?(fmtSize(f.size)+" • "+(f.fileCount||0)+" items"):fmtSize(f.size))+"</div>";' +
-  '    h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Действия" style="position:absolute;right:10px;top:10px"><span class="material-symbols-outlined">more_vert</span></button>\';' +
-  '    h+="</div>";' +
-  '  }' +
+  '  for(var i=0;i<files.length;i++){var f=files[i],fp=base?(base+"/"+f.name):f.name,checked=!!selectedItems[fp],isNew=isNewFile(fp),badge=isNew?\'<span class="new-badge">New</span>\':"";h+=\'<div class="file-grid-item \'+(checked?"selected ":"")+(isNew?"is-new":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:relative">\';h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:absolute;top:10px;left:10px"\'+(checked?" checked":"")+">";h+=fileThumb(f.name,fp,f.isDir);h+=\'<div style="font-size:13px;font-weight:700;color:\'+(f.isDir?"#d0bcff":"#e4e1e6")+\';word-break:break-word;max-width:150px;text-align:left;pointer-events:none">\'+H(f.name)+badge+"</div>";h+=\'<div style="font-size:11px;color:#958ea0;pointer-events:none">\'+(f.isDir?(fmtSize(f.size)+" ? "+(f.fileCount||0)+" items"):fmtSize(f.size))+"</div>";h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Actions" style="position:absolute;right:10px;top:10px"><span class="material-symbols-outlined">more_vert</span></button></div>\';}' +
   '  return h+"</div>";' +
   '}' +
 
-  /* ── RECENT ── */
   'function loadRecent(){' +
-  '  clearSelection(false);' +
-  '  currentPath="__recent__";' +
-  '  document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">Загрузка...</div>\';' +
-  '  renderBreadcrumb("");' +
+  '  clearSelection(false);currentPath="__recent__";document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">\\u0417\\u0430\\u0433\\u0440\\u0443\\u0437\\u043a\\u0430...</div>\';renderBreadcrumb("");' +
   '  fetch("/api/fm/recent").then(function(r){return r.json();})' +
-  '  .then(function(d){' +
-  '    if(d.error){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\'+H(d.error)+"</div>";return;}' +
-  '    var entries=(d.entries||[]).map(function(e){return{name:e.relPath,size:e.size,mtime:e.mtime,isDir:false};});lastEntries=entries;lastBase="";' +
-  '    document.getElementById("file-area").innerHTML=\'<div style="font-size:13px;color:#958ea0;margin-bottom:12px">Недавние файлы</div>\'+fileListHtml(entries,"");' +
-  '  })' +
-  '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">Ошибка</div>\';});' +
+  '  .then(function(d){if(d.error){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\'+H(d.error)+"</div>";return;}var entries=(d.entries||[]).map(function(e){return{name:e.relPath,size:e.size,mtime:e.mtime,isDir:false};});lastEntries=entries;lastBase="";document.getElementById("file-area").innerHTML=\'<div style="font-size:13px;color:#958ea0;margin-bottom:12px">\\u041d\\u0435\\u0434\\u0430\\u0432\\u043d\\u0438\\u0435 \\u0444\\u0430\\u0439\\u043b\\u044b</div>\'+fileListHtml(entries,"");})' +
+  '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\\u041e\\u0448\\u0438\\u0431\\u043a\\u0430</div>\';});' +
   '}' +
 
-  /* ── SEARCH ── */
+  'function loadUrlHistory(){' +
+  '  clearSelection(false);currentPath="__url_history__";renderBreadcrumb("");' +
+  '  document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">\\u0417\\u0430\\u0433\\u0440\\u0443\\u0437\\u043a\\u0430 \\u0438\\u0441\\u0442\\u043e\\u0440\\u0438\\u0438...</div>\';' +
+  '  fetch("/api/fm/media-jobs?scope=history").then(function(r){return r.json();})' +
+  '  .then(function(items){items=Array.isArray(items)?items:[];if(!items.length){document.getElementById("file-area").innerHTML=\'<div style="color:#494454;padding:40px;text-align:center">\\u0418\\u0441\\u0442\\u043e\\u0440\\u0438\\u044f URL \\u043f\\u043e\\u043a\\u0430 \\u043f\\u0443\\u0441\\u0442\\u0430\\u044f</div>\';return;}var h=\'<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px"><div style="font-size:18px;font-weight:800;color:#e4e1e6">\\u0418\\u0441\\u0442\\u043e\\u0440\\u0438\\u044f URL-\\u0437\\u0430\\u0433\\u0440\\u0443\\u0437\\u043e\\u043a</div><button class="btn-ghost" data-action="nav-home"><span class="material-symbols-outlined">folder</span> \\u041c\\u043e\\u0438 \\u0444\\u0430\\u0439\\u043b\\u044b</button></div>\';h+=\'<div style="border:1px solid #494454;border-radius:12px;overflow:hidden">\';for(var i=0;i<items.length;i++){var x=items[i],ok=x.status==="complete",bad=x.status==="error"||x.status==="cancelled";h+=\'<div class="history-row"><div style="min-width:0"><div class="history-name">\'+H(x.name||x.file||"Media download")+\'</div><div class="history-meta">\'+H(x.url||"")+\'</div></div><div class="history-meta">\'+H((x.mode||"media")+" / "+(x.status||"unknown"))+\'</div><div class="history-meta">\'+Math.round(x.progress||0)+\'%</div><div style="display:flex;gap:8px;justify-content:flex-end">\';h+=\'<button class="btn-ghost" data-action="retry-url" data-url="\'+H(x.url||"")+\'" title="Повторить"><span class="material-symbols-outlined">refresh</span></button>\';if(ok)h+=\'<button class="btn-ghost" data-action="navigate" data-fp="\'+H(x.folder||"")+\'" title="Open folder"><span class="material-symbols-outlined">folder_open</span></button>\';if(bad&&x.error)h+=\'<button class="btn-ghost" data-action="show-history-error" data-error="\'+H(x.error)+\'" title="Error"><span class="material-symbols-outlined">error</span></button>\';h+=\'</div></div>\';}h+=\'</div>\';document.getElementById("file-area").innerHTML=h;})' +
+  '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\\u041e\\u0448\\u0438\\u0431\\u043a\\u0430 \\u0438\\u0441\\u0442\\u043e\\u0440\\u0438\\u0438</div>\';});' +
+  '}' +
+
   'function doSearch(q){' +
   '  if(!q.trim())return navigateTo(activePath());' +
   '  clearSelection(false);' +
@@ -2734,18 +3002,61 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
 
   /* ── DELETE ── */
-  'function openUrlModal(){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value="";document.getElementById("url-name-inp").value="";document.getElementById("url-mode-inp").value="file";document.getElementById("url-status").textContent="";setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
+  'function openUrlModal(prefill){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value=prefill||"";document.getElementById("url-name-inp").value="";document.getElementById("url-mode-inp").value="file";document.getElementById("url-status").textContent="";setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
   'function closeUrlModal(){document.getElementById("modal-url").style.display="none";}' +
-  'function addUrlDownload(){var url=document.getElementById("url-dl-inp").value.trim();var name=document.getElementById("url-name-inp").value.trim();var mode=document.getElementById("url-mode-inp").value;var st=document.getElementById("url-status");if(!url){st.textContent="Вставь URL";return;}var media=mode!=="file";st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:activePath(),mode:mode})}).then(function(r){return r.json();}).then(function(d){if(d.ok){st.textContent=media?"Медиа-загрузка запущена":"Загрузка добавлена";closeUrlModal();loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
+  'function stripInputMediaExt(name){return String(name||"").replace(/\\.(mp4|webm|mkv|mov|m4v|mp3|m4a|opus|ogg|wav|flac|aac)$/i,"");}' +
+  'function addUrlDownload(){var url=document.getElementById("url-dl-inp").value.trim();var name=document.getElementById("url-name-inp").value.trim();var mode=document.getElementById("url-mode-inp").value;var st=document.getElementById("url-status");if(!url){st.textContent="Вставь URL";return;}var media=mode!=="file";if(media)name=stripInputMediaExt(name);st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:activePath(),mode:mode})}).then(function(r){return r.json();}).then(function(d){if(d.ok){st.textContent=media?"Медиа-загрузка запущена":"Загрузка добавлена";closeUrlModal();loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
   'function closePreview(){document.getElementById("preview-panel").classList.remove("open");document.getElementById("preview-body").classList.remove("media-preview");document.getElementById("preview-body").innerHTML="";document.getElementById("preview-info").innerHTML="";previewKind="";previewSrc="";}' +
   'function metaRow(label,value){return \'<div class="meta-row"><div class="meta-lbl">\'+H(label)+\'</div><div class="meta-val">\'+(value||"—")+\'</div></div>\';}' +
   'function renderPreviewInfo(fp,name){var info=document.getElementById("preview-info");info.innerHTML=\'<div style="font-size:12px;color:#958ea0">Загрузка информации...</div>\';fetch("/api/fm/meta?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(m){if(m.error){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);return;}var links=m.publicLinks||[];var linkHtml=links.length?links.map(function(x){return \'<a href="\'+H(x.url)+\'" target="_blank" style="color:#d2bbff">\'+H(window.location.origin+x.url)+\'</a>\';}).join("<br>"):"Нет";var h="";h+=metaRow("Имя",m.name||name);h+=metaRow("Путь",m.path||fp);h+=metaRow("Размер",fmtSize(m.size));h+=metaRow("Тип",m.ext?m.ext.slice(1).toUpperCase():"Файл");h+=metaRow("Загружен",fmtDateTime(m.created));h+=metaRow("Изменён",fmtDateTime(m.mtime));h+=metaRow("Публичная ссылка",linkHtml);info.innerHTML=h;}).catch(function(){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);});}' +
   'function openPreview(fp,name,isDir){if(isDir){navigateTo(fp);return;}previewFp=fp;previewName=name;previewKind="";previewSrc="";var panel=document.getElementById("preview-panel");var body=document.getElementById("preview-body");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");body.innerHTML="";renderPreviewInfo(fp,name);var ext=(name.split(".").pop()||"").toLowerCase();var src="/api/fm/preview?path="+encodeURIComponent(fp);if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext)){previewKind="image";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(["mp4","webm","ogg","mov","mkv"].includes(ext)){previewKind="video";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video class="preview-media" src="${src}" muted></video></div>`;return;}if(["mp3","wav","m4a","flac","aac","oga"].includes(ext)){previewKind="audio";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><span class="material-symbols-outlined" style="font-size:72px;color:#d2bbff">graphic_eq</span></div>`;return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
-  'function closeMediaViewer(){var v=document.getElementById("media-viewer");var media=document.getElementById("mv-media");if(media&&media.pause)media.pause();v.classList.remove("open");document.getElementById("mv-stage").innerHTML="";document.getElementById("mv-bottom").innerHTML="";}' +
-  'function mvTime(n){if(!isFinite(n))return"0:00";n=Math.max(0,Math.floor(n));return Math.floor(n/60)+":"+String(n%60).padStart(2,"0");}' +
-  'function openMediaViewer(){if(!previewSrc||!previewKind)return;mvZoom=1;document.getElementById("mv-title").textContent=previewName||"Media";var v=document.getElementById("media-viewer"),stage=document.getElementById("mv-stage"),bottom=document.getElementById("mv-bottom");if(previewKind==="image"){stage.innerHTML=`<img id="mv-media" src="${previewSrc}" alt="${H(previewName)}">`;bottom.innerHTML=\'<button class="mv-icon" data-action="mv-zoom-out"><span class="material-symbols-outlined">zoom_out</span></button><button class="mv-icon" data-action="mv-fit"><span class="material-symbols-outlined">fit_screen</span></button><button class="mv-icon" data-action="mv-zoom-in"><span class="material-symbols-outlined">zoom_in</span></button><div style="flex:1"></div><div class="mv-time">Image viewer</div>\';}else{stage.innerHTML=`<${previewKind==="audio"?"audio":"video"} id="mv-media" src="${previewSrc}"></${previewKind==="audio"?"audio":"video"}>`;bottom.innerHTML=\'<button class="mv-icon" data-action="mv-play"><span id="mv-play-icon" class="material-symbols-outlined">play_arrow</span></button><input id="mv-seek" class="mv-seek" type="range" min="0" max="1000" value="0"><div id="mv-time" class="mv-time">0:00 / 0:00</div><span class="material-symbols-outlined" style="color:#cbc3d7">volume_up</span><input id="mv-volume" class="mv-range" type="range" min="0" max="1" step="0.01" value="1">\';setTimeout(bindMediaControls,0);}v.classList.add("open");}' +
-  'function bindMediaControls(){var m=document.getElementById("mv-media"),seek=document.getElementById("mv-seek"),vol=document.getElementById("mv-volume"),time=document.getElementById("mv-time"),ico=document.getElementById("mv-play-icon");if(!m)return;m.addEventListener("timeupdate",function(){if(m.duration&&seek)seek.value=Math.round(m.currentTime/m.duration*1000);if(time)time.textContent=mvTime(m.currentTime)+" / "+mvTime(m.duration||0);});m.addEventListener("play",function(){if(ico)ico.textContent="pause";});m.addEventListener("pause",function(){if(ico)ico.textContent="play_arrow";});if(seek)seek.addEventListener("input",function(){if(m.duration)m.currentTime=(parseInt(seek.value,10)||0)/1000*m.duration;});if(vol)vol.addEventListener("input",function(){m.volume=parseFloat(vol.value)||0;});}' +
-  'function mediaViewerAction(action){var m=document.getElementById("mv-media");if(action==="mv-close")return closeMediaViewer();if(action==="mv-download"&&previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);if(action==="mv-share"&&previewFp)shareOne(previewFp);if(action==="mv-play"&&m){if(m.paused)m.play();else m.pause();}if(action==="mv-zoom-in"&&m){mvZoom=Math.min(4,mvZoom+.25);m.style.transform="scale("+mvZoom+")";}if(action==="mv-zoom-out"&&m){mvZoom=Math.max(.25,mvZoom-.25);m.style.transform="scale("+mvZoom+")";}if(action==="mv-fit"&&m){mvZoom=1;m.style.transform="scale(1)";}}' +
+  'window.plyrInstance = null;' +
+  'function closeMediaViewer(){' +
+  '  var v=document.getElementById("media-viewer");' +
+  '  if(window.plyrInstance){ window.plyrInstance.destroy(); window.plyrInstance=null; }' +
+  '  var media=document.getElementById("mv-media");' +
+  '  if(media&&media.pause)media.pause();' +
+  '  v.classList.remove("open");' +
+  '  document.getElementById("mv-stage").innerHTML="";' +
+  '  document.getElementById("mv-bottom").innerHTML="";' +
+  '}' +
+  'function openMediaViewer(){' +
+  '  if(!previewSrc||!previewKind)return;' +
+  '  mvZoom=1; document.getElementById("mv-title").textContent=previewName||"Media";' +
+  '  var v=document.getElementById("media-viewer"),stage=document.getElementById("mv-stage"),bottom=document.getElementById("mv-bottom");' +
+  '  if(previewKind==="image"){' +
+  '    stage.innerHTML=`<img id="mv-media" src="${previewSrc}" alt="${H(previewName)}">`;' +
+  '    bottom.innerHTML=\'<button class="mv-icon" data-action="mv-zoom-out"><span class="material-symbols-outlined">zoom_out</span></button><button class="mv-icon" data-action="mv-fit"><span class="material-symbols-outlined">fit_screen</span></button><button class="mv-icon" data-action="mv-zoom-in"><span class="material-symbols-outlined">zoom_in</span></button><div style="flex:1"></div><div class="mv-time">Image viewer</div>\';' +
+  '  } else {' +
+  '    stage.innerHTML=`<${previewKind==="audio"?"audio":"video"} id="mv-media" src="${previewSrc}" playsinline controls style="max-height:100%"></${previewKind==="audio"?"audio":"video"}>`;' +
+  '    bottom.innerHTML="";' +
+  '    setTimeout(function() {' +
+  '      if(typeof Plyr === "undefined") { console.error("Plyr is not loaded!"); return; }' +
+  '      var isVideo = previewKind === "video";' +
+  '      var opts = { ' +
+  '        controls: isVideo ? ["play-large", "play", "progress", "current-time", "duration", "mute", "volume", "captions", "settings", "pip", "airplay", "fullscreen"] : ["play", "progress", "current-time", "duration", "mute", "volume"],' +
+  '        settings: ["captions", "quality", "speed", "loop"],' +
+  '        keyboard: { focused: true, global: true },' +
+  '        tooltips: { controls: true, seek: true }' +
+  '      };' +
+  '      try {' +
+  '        if(window.plyrInstance) { window.plyrInstance.destroy(); }' +
+  '        window.plyrInstance = new Plyr("#mv-media", opts);' +
+  '        window.plyrInstance.on("ready", function(e){ ' +
+  '           console.log("Plyr Ready event");' +
+  '           var savedTime = localStorage.getItem("plyr_time_" + previewSrc);' +
+  '           if(savedTime) e.detail.plyr.currentTime = parseFloat(savedTime);' +
+  '        });' +
+  '        window.plyrInstance.on("timeupdate", function(e){ ' +
+  '           localStorage.setItem("plyr_time_" + previewSrc, e.detail.plyr.currentTime);' +
+  '        });' +
+  '      } catch(err) { console.error("Plyr failed to init:", err); }' +
+  '    }, 150);' +
+  '  }' +
+  '  v.classList.add("open");' +
+  '}' +
+  'function bindMediaControls(){}' +
+  'function mediaViewerAction(action){var m=document.getElementById("mv-media"),viewer=document.getElementById("media-viewer");if(action==="mv-close")return closeMediaViewer();if(action==="mv-download"&&previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);if(action==="mv-share"&&previewFp)shareOne(previewFp);if(action==="mv-zoom-in"&&m){mvZoom=Math.min(4,mvZoom+.25);m.style.transform="scale("+mvZoom+")";}if(action==="mv-zoom-out"&&m){mvZoom=Math.max(.25,mvZoom-.25);m.style.transform="scale("+mvZoom+")";}if(action==="mv-fit"&&m){mvZoom=1;m.style.transform="scale(1)";}}' +
   'function deleteItem(fp,name,isDir){' +
   '  if(!confirm("Удалить " + name + "?"))return;' +
   '  fetch("/api/fm/delete",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:fp,isDir:isDir})})' +
@@ -2800,55 +3111,45 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  h+=\'<div class="ctx-sep"></div>\';' +
   '  h+=\'<div class="ctx-item danger" data-ctx="delete">\u{1F5D1}️ Удалить</div>\';' +
   '  m.innerHTML=h;' +
-  '  m.style.display="block";' +
+  '  m.style.display="block";m.classList.remove("open");void m.offsetWidth;m.classList.add("open");' +
   '  var mw=200,mh=m.scrollHeight||160;' +
   '  var ww=window.innerWidth,wh=window.innerHeight;' +
   '  m.style.left=Math.max(8,(x+mw>ww?ww-mw-8:x))+"px";' +
   '  m.style.top=Math.max(8,(y+mh>wh?wh-mh-8:y))+"px";' +
   '}' +
-  'function hideCtxMenu(){document.getElementById("ctx-menu").style.display="none";}' +
+  'function hideCtxMenu(){var m=document.getElementById("ctx-menu");m.style.display="none";m.classList.remove("open");}' +
 
   /* ── DRAG & DROP ── */
   'function clearDragOver(){document.querySelectorAll(".drag-over,.drop-target").forEach(function(el){el.classList.remove("drag-over");el.classList.remove("drop-target");});}' +
 
-  /* ── TRANSFERS ── */
+  /* TRANSFERS */
   'function loadTransfers(){' +
-  '  Promise.all([fetch("/api/downloads").then(function(r){return r.json();}).catch(function(){return[];}),fetch("/api/fm/media-jobs").then(function(r){return r.json();}).catch(function(){return[];})])' +
+  '  Promise.all([fetch("/api/downloads").then(function(r){return r.json();}).catch(function(){return[];}),fetch("/api/fm/media-jobs?scope=active").then(function(r){return r.json();}).catch(function(){return[];}),fetch("/api/fm/media-jobs?scope=history").then(function(r){return r.json();}).catch(function(){return[];})])' +
   '  .then(function(all){' +
-  '    var items=Array.isArray(all[0])?all[0]:[],media=Array.isArray(all[1])?all[1]:[];' +
-  '    if(!items.length&&!media.length){document.getElementById("transfers-list").innerHTML=\'<div style="color:#494454;font-size:13px">Нет активных загрузок</div>\';return;}' +
-  '    var h="";' +
+  '    var items=(Array.isArray(all[0])?all[0]:[]).filter(function(x){return ["active","waiting","paused"].includes(x.status);});var media=Array.isArray(all[1])?all[1]:[];var history=Array.isArray(all[2])?all[2]:[];' +
+  '    history.forEach(function(j){if(j.status==="complete"){rememberNewFile(j);}var prev=knownMediaStatuses[j.id];if(prev&&prev!==j.status){if(j.status==="complete"){notifyDone(j.name||j.file||"Media download");rememberNewFile(j);if(currentPath===j.folder)refreshCurrent();}else if(j.status==="error"){notifyFail(j.name||j.file||"Media download",j.error||"unknown error");}}knownMediaStatuses[j.id]=j.status;});' +
+  '    var count=items.length+media.length;setTransfersUi(count);if(!count){document.getElementById("transfers-list").innerHTML="";return;}' +
+  '    var h=\'<div class="transfer-section-title">\\u0421\\u0435\\u0439\\u0447\\u0430\\u0441 \\u0437\\u0430\\u0433\\u0440\\u0443\\u0436\\u0430\\u0435\\u0442\\u0441\\u044f</div>\';' +
   '    for(var i=0;i<items.length;i++){' +
-  '      var t=items[i],pct=t.progress||0,name=t.name||t.gid||"Загрузка",left=Math.max(0,(t.size||0)-(t.downloaded||0));' +
-  '      var eta=(t.speed>0&&left>0)?Math.ceil(left/t.speed):0;' +
-  '      h+=\'<div class="transfer-card">\';' +
-  '      h+=\'<div class="transfer-top"><div class="transfer-name">\'+H(name)+\'</div><div class="transfer-status">\'+H(t.status||"unknown")+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+pct+\'%</div></div>\';' +
-  '      h+=\'<div class="progress-track" style="height:8px"><div class="progress-fill\'+( pct>=100?" done":"" )+\'" style="width:\'+pct+\'%"></div></div>\';' +
-  '      h+=\'<div class="transfer-meta"><div>Скачано: \'+fmtSize(t.downloaded)+\' / \'+fmtSize(t.size)+\'</div><div>Скорость: \'+fmtSpeed(t.speed)+\'</div><div>Осталось: \'+(eta?Math.ceil(eta/60)+" мин":"—")+\'</div><div>Соединения: \'+(t.connections||0)+\'</div></div>\';' +
-  '      if(t.errorMessage)h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(t.errorMessage)+\'</div>\';' +
-  '      h+=\'<div class="transfer-controls">\';' +
-  '      if(t.status==="active")h+=\'<button class="btn-ghost" data-action="transfer-pause" data-gid="\'+H(t.gid)+\'"><span class="material-symbols-outlined">pause</span> Пауза</button>\';' +
-  '      if(t.status==="paused"||t.status==="waiting")h+=\'<button class="btn-ghost" data-action="transfer-resume" data-gid="\'+H(t.gid)+\'"><span class="material-symbols-outlined">play_arrow</span> Продолжить</button>\';' +
-  '      h+=\'<button class="btn-ghost" data-action="transfer-remove" data-gid="\'+H(t.gid)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> Убрать</button>\';' +
-  '      h+=\'</div></div>\';' +
+  '      var t=items[i],pct=t.progress||0,name=t.name||t.gid||"Download",left=Math.max(0,(t.size||0)-(t.downloaded||0));var eta=(t.speed>0&&left>0)?Math.ceil(left/t.speed):0;' +
+  '      h+=\'<div class="transfer-card is-active"><div class="transfer-top"><div class="transfer-name">\'+H(name)+\'</div><div class="transfer-status">\'+H(t.status||"unknown")+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+pct+\'%</div></div>\';' +
+  '      h+=\'<div class="progress-track"><div class="progress-fill\'+(pct>=100?" done":"")+\'" style="width:\'+pct+\'%"></div></div>\';' +
+  '      h+=\'<div class="transfer-meta"><div>\\u0421\\u043a\\u0430\\u0447\\u0430\\u043d\\u043e: \'+fmtSize(t.downloaded)+\' / \'+fmtSize(t.size)+\'</div><div>\\u0421\\u043a\\u043e\\u0440\\u043e\\u0441\\u0442\\u044c: \'+fmtSpeed(t.speed)+\'</div><div>\\u041e\\u0441\\u0442\\u0430\\u043b\\u043e\\u0441\\u044c: \'+(eta?Math.ceil(eta/60)+" \\u043c\\u0438\\u043d":"-")+\'</div><div>\\u0421\\u043e\\u0435\\u0434\\u0438\\u043d\\u0435\\u043d\\u0438\\u044f: \'+(t.connections||0)+\'</div></div>\';' +
+  '      if(t.errorMessage)h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(t.errorMessage)+\'</div>\';h+=\'<div class="transfer-controls">\';' +
+  '      if(t.status==="active")h+=\'<button class="btn-ghost" data-action="transfer-pause" data-gid="\'+H(t.gid)+\'"><span class="material-symbols-outlined">pause</span> \\u041f\\u0430\\u0443\\u0437\\u0430</button>\';' +
+  '      if(t.status==="paused"||t.status==="waiting")h+=\'<button class="btn-ghost" data-action="transfer-resume" data-gid="\'+H(t.gid)+\'"><span class="material-symbols-outlined">play_arrow</span> \\u041f\\u0440\\u043e\\u0434\\u043e\\u043b\\u0436\\u0438\\u0442\\u044c</button>\';' +
+  '      h+=\'<button class="btn-ghost" data-action="transfer-remove" data-gid="\'+H(t.gid)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> \\u0423\\u0431\\u0440\\u0430\\u0442\\u044c</button></div></div>\';' +
   '    }' +
   '    for(var j=0;j<media.length;j++){' +
-  '      var mt=media[j],mp=Math.round(mt.progress||0),done=mt.status==="complete";' +
-  '      h+=\'<div class="transfer-card">\';' +
-  '      h+=\'<div class="transfer-top"><div class="transfer-name">\'+H(mt.name||mt.file||"Media download")+\'</div><div class="transfer-status">\'+H((mt.mode||"media")+" / "+(mt.status||"unknown"))+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+mp+\'%</div></div>\';' +
-  '      h+=\'<div class="progress-track" style="height:8px"><div class="progress-fill\'+(done?" done":"")+\'" style="width:\'+mp+\'%"></div></div>\';' +
-  '      h+=\'<div class="transfer-meta"><div>Источник: media</div><div>Скорость: \'+H(mt.speed||"—")+\'</div><div>ETA: \'+H(mt.eta||"—")+\'</div><div>Папка: \'+H(mt.folder||"Мои файлы")+\'</div></div>\';' +
-  '      if(mt.error)h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(mt.error)+\'</div>\';' +
-  '      h+=\'<div class="transfer-controls">\';' +
-  '      if(mt.status==="active"||mt.status==="starting"||mt.status==="processing")h+=\'<button class="btn-ghost" data-action="media-cancel" data-job="\'+H(mt.id)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> Отмена</button>\';' +
-  '      if(done)h+=\'<button class="btn-ghost" data-action="navigate" data-fp="\'+H(mt.folder||"")+\'"><span class="material-symbols-outlined">folder_open</span> Открыть папку</button>\';' +
-  '      h+=\'</div></div>\';' +
-  '    }' +
-  '    document.getElementById("transfers-list").innerHTML=h;' +
+  '      var mt=media[j],mp=Math.round(mt.progress||0);h+=\'<div class="transfer-card is-active"><div class="transfer-top"><div class="transfer-name">\'+H(mt.name||mt.file||"Media download")+\'</div><div class="transfer-status">\'+H((mt.mode||"media")+" / "+(mt.status||"unknown"))+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+mp+\'%</div></div>\';' +
+  '      h+=\'<div class="progress-track"><div class="progress-fill" style="width:\'+mp+\'%"></div></div>\';' +
+  '      h+=\'<div class="transfer-meta"><div>\\u0418\\u0441\\u0442\\u043e\\u0447\\u043d\\u0438\\u043a: media</div><div>\\u0421\\u043a\\u043e\\u0440\\u043e\\u0441\\u0442\\u044c: \'+H(mt.speed||"-")+\'</div><div>ETA: \'+H(mt.eta||"-")+\'</div><div>\\u041f\\u0430\\u043f\\u043a\\u0430: \'+H(mt.folder||"\\u041c\\u043e\\u0438 \\u0444\\u0430\\u0439\\u043b\\u044b")+\'</div></div>\';' +
+  '      if(mt.error)h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(mt.error)+\'</div>\';if(mt.warning)h+=\'<div style="font-size:12px;color:#cbbcff">\'+H(mt.warning)+\'</div>\';' +
+  '      h+=\'<div class="transfer-controls"><button class="btn-ghost" data-action="media-cancel" data-job="\'+H(mt.id)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> \\u041e\\u0442\\u043c\\u0435\\u043d\\u0430</button></div></div>\';' +
+  '    }document.getElementById("transfers-list").innerHTML=h;' +
   '  }).catch(function(){});' +
   '}' +
 
-  /* ── DISK ── */
   'function loadDisk(){' +
   '  fetch("/api/fm/list?path=").then(function(r){return r.json();})' +
   '  .then(function(d){' +
@@ -2900,6 +3201,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="hide-upload-panel"){document.getElementById("upload-panel").style.display="none";}' +
   '  else if(action==="hide-toast"){hideToast();}' +
   '  else if(action==="copy-toast"){copyToast();}' +
+  '  else if(action==="minimize-transfers"){transfersMinimized=true;localStorage.setItem("transfers-minimized","1");setTransfersUi(1);}' +
+  '  else if(action==="restore-transfers"){transfersMinimized=false;localStorage.setItem("transfers-minimized","0");loadTransfers();}' +
   '  else if(action==="toggle-theme"){toggleTheme();}' +
   '  else if(action==="share-one"){shareOne(el.dataset.fp);}' +
   '  else if(action==="preview"){openPreview(el.dataset.fp,el.dataset.name,el.dataset.dir==="true");}' +
@@ -2918,6 +3221,9 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="media-cancel"){if(confirm("Отменить медиа-загрузку?"))fetch("/api/fm/media-jobs/"+encodeURIComponent(el.dataset.job),{method:"DELETE"}).then(loadTransfers);}' +
   '  else if(action==="nav-home"){document.querySelectorAll(".nav-item").forEach(function(x){x.classList.remove("active");});el.classList.add("active");navigateTo("");}' +
   '  else if(action==="nav-recent"){document.querySelectorAll(".nav-item").forEach(function(x){x.classList.remove("active");});el.classList.add("active");loadRecent();}' +
+  '  else if(action==="nav-url-history"){document.querySelectorAll(".nav-item").forEach(function(x){x.classList.remove("active");});el.classList.add("active");loadUrlHistory();}' +
+  '  else if(action==="retry-url"){var u=el.dataset.url;if(u){openUrlModal(u);}}' +
+  '  else if(action==="show-history-error"){alert(el.dataset.error||"Ошибка загрузки");}' +
   '  else if(action==="view-list"){setView("list");}' +
   '  else if(action==="view-grid"){setView("grid");}' +
   '  else if(action==="mkdir")openMkdirModal();' +
