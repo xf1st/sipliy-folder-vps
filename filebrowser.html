@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Downloads</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0f1117;
+    color: #e2e8f0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh;
+  }
+
+  header {
+    background: #1a1d27;
+    border-bottom: 1px solid #2d3148;
+    padding: 20px 40px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  header svg { color: #6c8aff; }
+
+  header h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #fff;
+  }
+
+  header span {
+    margin-left: auto;
+    font-size: 0.85rem;
+    color: #64748b;
+  }
+
+  .container {
+    max-width: 960px;
+    margin: 40px auto;
+    padding: 0 20px;
+  }
+
+  .stats {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+
+  .stat-card {
+    background: #1a1d27;
+    border: 1px solid #2d3148;
+    border-radius: 12px;
+    padding: 16px 24px;
+    flex: 1;
+  }
+
+  .stat-card .label { font-size: 0.8rem; color: #64748b; margin-bottom: 6px; }
+  .stat-card .value { font-size: 1.5rem; font-weight: 700; color: #6c8aff; }
+
+  .search-bar {
+    background: #1a1d27;
+    border: 1px solid #2d3148;
+    border-radius: 10px;
+    padding: 12px 18px;
+    width: 100%;
+    color: #e2e8f0;
+    font-size: 0.95rem;
+    margin-bottom: 20px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .search-bar:focus { border-color: #6c8aff; }
+  .search-bar::placeholder { color: #475569; }
+
+  .file-list { display: flex; flex-direction: column; gap: 10px; }
+
+  .file-card {
+    background: #1a1d27;
+    border: 1px solid #2d3148;
+    border-radius: 12px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .file-card:hover { border-color: #6c8aff; background: #1e2235; }
+
+  .file-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.3rem;
+    flex-shrink: 0;
+  }
+
+  .file-info { flex: 1; min-width: 0; }
+
+  .file-name {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: #e2e8f0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 4px;
+  }
+
+  .file-meta {
+    font-size: 0.78rem;
+    color: #64748b;
+  }
+
+  .expires {
+    font-size: 0.75rem;
+    color: #f59e0b;
+    margin-top: 2px;
+  }
+
+  .expires.urgent { color: #ef4444; }
+
+  .download-btn {
+    background: #6c8aff;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    transition: background 0.2s;
+  }
+  .download-btn:hover { background: #5b79ff; }
+
+  .empty {
+    text-align: center;
+    padding: 80px 20px;
+    color: #475569;
+  }
+  .empty svg { margin-bottom: 16px; opacity: 0.4; }
+  .empty p { font-size: 1rem; }
+
+  .loading {
+    text-align: center;
+    padding: 60px;
+    color: #475569;
+  }
+
+  /* Цвета иконок по типу */
+  .icon-exe  { background: #1e3a5f; }
+  .icon-zip  { background: #1e3a2f; }
+  .icon-rar  { background: #1e3a2f; }
+  .icon-mp4  { background: #3a1e3a; }
+  .icon-mkv  { background: #3a1e3a; }
+  .icon-mp3  { background: #3a2a1e; }
+  .icon-pdf  { background: #3a1e1e; }
+  .icon-iso  { background: #1e2a3a; }
+  .icon-img  { background: #1e3a35; }
+  .icon-file { background: #252836; }
+</style>
+</head>
+<body>
+
+<header>
+  <svg width="28" height="28" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+  </svg>
+  <h1>Downloads</h1>
+  <span id="last-update">Загрузка...</span>
+</header>
+
+<div class="container">
+  <div class="stats">
+    <div class="stat-card">
+      <div class="label">Файлов</div>
+      <div class="value" id="stat-count">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Занято места</div>
+      <div class="value" id="stat-size">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Удаление через</div>
+      <div class="value" style="color:#f59e0b">7 дней</div>
+    </div>
+  </div>
+
+  <input class="search-bar" type="text" placeholder="🔍  Поиск по имени файла..." id="search" oninput="filterFiles()">
+
+  <div class="file-list" id="file-list">
+    <div class="loading">Загрузка файлов...</div>
+  </div>
+</div>
+
+<script>
+const EXT_ICONS = {
+  exe: ['💿', 'icon-exe'], msi: ['💿', 'icon-exe'],
+  zip: ['📦', 'icon-zip'], tar: ['📦', 'icon-zip'], gz: ['📦', 'icon-zip'], '7z': ['📦', 'icon-zip'],
+  rar: ['📦', 'icon-rar'],
+  mp4: ['🎬', 'icon-mp4'], mkv: ['🎬', 'icon-mp4'], avi: ['🎬', 'icon-mp4'], mov: ['🎬', 'icon-mp4'], webm: ['🎬', 'icon-mp4'],
+  mp3: ['🎵', 'icon-mp3'], flac: ['🎵', 'icon-mp3'], wav: ['🎵', 'icon-mp3'],
+  pdf: ['📄', 'icon-pdf'],
+  iso: ['💿', 'icon-iso'], img: ['💿', 'icon-img'],
+  jpg: ['🖼️', 'icon-img'], jpeg: ['🖼️', 'icon-img'], png: ['🖼️', 'icon-img'], gif: ['🖼️', 'icon-img'],
+  apk: ['📱', 'icon-exe'], dmg: ['🍎', 'icon-exe'],
+};
+
+function getIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  return EXT_ICONS[ext] || ['📁', 'icon-file'];
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '—';
+  const units = ['B','KB','MB','GB'];
+  let i = 0, v = bytes;
+  while (v >= 1024 && i < 3) { v /= 1024; i++; }
+  return v.toFixed(1) + ' ' + units[i];
+}
+
+function formatDate(str) {
+  if (!str) return '';
+  const d = new Date(str);
+  return d.toLocaleDateString('ru-RU', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+
+function daysLeft(mtime) {
+  const modified = new Date(mtime);
+  const deleteAt = new Date(modified.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const diff = Math.ceil((deleteAt - Date.now()) / 86400000);
+  return diff;
+}
+
+let allFiles = [];
+
+async function loadFiles() {
+  try {
+    // nginx autoindex JSON
+    const resp = await fetch('/files-data/', {
+      headers: { 'Accept': 'application/json' }
+    });
+    const data = await resp.json();
+    allFiles = data.filter(f => f.type === 'file');
+    renderFiles(allFiles);
+
+    document.getElementById('stat-count').textContent = allFiles.length;
+    const total = allFiles.reduce((s, f) => s + (f.size || 0), 0);
+    document.getElementById('stat-size').textContent = formatSize(total);
+    document.getElementById('last-update').textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
+  } catch(e) {
+    document.getElementById('file-list').innerHTML = '<div class="loading">Ошибка загрузки списка файлов</div>';
+  }
+}
+
+function renderFiles(files) {
+  const list = document.getElementById('file-list');
+  if (!files.length) {
+    list.innerHTML = `<div class="empty">
+      <svg width="64" height="64" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+      </svg>
+      <p>Файлов нет</p>
+    </div>`;
+    return;
+  }
+
+  list.innerHTML = files.map(f => {
+    const [emoji, cls] = getIcon(f.name);
+    const days = daysLeft(f.mtime);
+    const urgentClass = days <= 2 ? 'urgent' : '';
+    const expiresText = days > 0 ? `🗑 Удалится через ${days} дн.` : '🗑 Удаляется сегодня';
+    return `<div class="file-card">
+      <div class="file-icon ${cls}">${emoji}</div>
+      <div class="file-info">
+        <div class="file-name" title="${f.name}">${f.name}</div>
+        <div class="file-meta">${formatSize(f.size)} &nbsp;·&nbsp; ${formatDate(f.mtime)}</div>
+        <div class="expires ${urgentClass}">${expiresText}</div>
+      </div>
+      <a class="download-btn" href="/files-data/${encodeURIComponent(f.name)}" download>
+        <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+        </svg>
+        Скачать
+      </a>
+    </div>`;
+  }).join('');
+}
+
+function filterFiles() {
+  const q = document.getElementById('search').value.toLowerCase();
+  renderFiles(allFiles.filter(f => f.name.toLowerCase().includes(q)));
+}
+
+loadFiles();
+setInterval(loadFiles, 30000);
+</script>
+</body>
+</html>

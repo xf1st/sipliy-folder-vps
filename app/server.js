@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const FormData = require('form-data');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 const multer = require('multer');
 
 const VT_API_KEY = '93c0c934a298f0f35b0f95be051de5b4e4ea7340fa3c7bb8fd5c1f572a13c2b8';
@@ -18,6 +18,27 @@ function loadShares() {
 }
 function saveShares(s) {
   fs.writeFileSync(SHARES_FILE, JSON.stringify(s));
+}
+
+function shareOptionsFromBody(body = {}) {
+  const maxDownloadsRaw = parseInt(body.maxDownloads, 10);
+  const expiresInRaw = parseInt(body.expiresIn, 10);
+  const out = {
+    downloads: 0,
+    maxDownloads: Number.isFinite(maxDownloadsRaw) && maxDownloadsRaw > 0 ? maxDownloadsRaw : null,
+    expiresAt: null,
+  };
+  if (Number.isFinite(expiresInRaw) && expiresInRaw > 0) {
+    out.expiresAt = new Date(Date.now() + expiresInRaw * 60 * 60 * 1000).toISOString();
+  }
+  return out;
+}
+
+function shareIsExpired(s) {
+  if (!s) return true;
+  if (s.expiresAt && Date.now() > new Date(s.expiresAt).getTime()) return true;
+  if (s.maxDownloads && (s.downloads || 0) >= s.maxDownloads) return true;
+  return false;
 }
 
 const TOKENS_FILE = '/opt/vps-downloader/tokens.json';
@@ -48,10 +69,17 @@ const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
 
-const USERS = {
-  admin:  { password: 'admin123',  label: 'Admin' },
-  friend: { password: 'friend123', label: 'Friend' },
-};
+const USERS_FILE = '/opt/vps-downloader/users.json';
+function loadUsers() {
+  try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); }
+  catch {
+    const def = { xf1st: { password: '78457845Xf!', label: 'Admin', isAdmin: true } };
+    fs.writeFileSync(USERS_FILE, JSON.stringify(def, null, 2));
+    return def;
+  }
+}
+function saveUsers(u) { fs.writeFileSync(USERS_FILE, JSON.stringify(u, null, 2)); }
+function isAdmin(username) { const u = loadUsers(); return u[username] && u[username].isAdmin; }
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -62,7 +90,7 @@ app.use(session({
   resave: true,
   saveUninitialized: false,
   rolling: true,
-  cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true }, // 30 дней, обновляется при каждом запросе
+  cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true }, // 30 дней, обновляется при каждом Р В·Р В°Р С—росе
 }));
 
 function auth(req, res, next) {
@@ -92,7 +120,8 @@ app.get('/login', (req, res) => {
 
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
-  const user = USERS[username];
+  const users = loadUsers();
+  const user = users[username];
   if (user && user.password === password) {
     req.session.user = username;
     req.session.save(() => res.redirect('/'));
@@ -112,6 +141,20 @@ function fmtBytes(b) {
   let i = 0, v = b;
   while (v >= 1024 && i < 4) { v /= 1024; i++; }
   return v.toFixed(1) + ' ' + units[i];
+}
+
+function filenameWithUrlExtension(url, filename) {
+  const clean = (filename || '').trim().replace(/[/\\:*?"<>|]/g, '_');
+  if (!clean) return '';
+  if (path.extname(clean)) return clean;
+  try {
+    const parsed = new URL(url);
+    const ext = path.extname(decodeURIComponent(parsed.pathname || '')).replace(/[/\\:*?"<>|]/g, '');
+    return ext ? clean + ext : clean;
+  } catch {
+    const ext = path.extname((url || '').split(/[?#]/)[0]).replace(/[/\\:*?"<>|]/g, '');
+    return ext ? clean + ext : clean;
+  }
 }
 
 app.get('/api/disk', auth, (req, res) => {
@@ -157,6 +200,12 @@ app.get('/api/downloads', auth, async (req, res) => {
         size: parseInt(d.totalLength || 0),
         downloaded: parseInt(d.completedLength || 0),
         speed: parseInt(d.downloadSpeed || 0),
+        uploadSpeed: parseInt(d.uploadSpeed || 0),
+        connections: parseInt(d.connections || 0),
+        numSeeders: parseInt(d.numSeeders || 0),
+        errorCode: d.errorCode || '',
+        errorMessage: d.errorMessage || '',
+        dir: d.dir || '',
         progress: d.totalLength > 0 ? Math.round(d.completedLength / d.totalLength * 100) : 0,
       }));
     res.json(mine);
@@ -165,7 +214,7 @@ app.get('/api/downloads', auth, async (req, res) => {
 
 app.post('/api/add', auth, async (req, res) => {
   const dlUrl = (req.body.url || '').trim();
-  const outName = (req.body.filename || '').trim().replace(/[/\\:*?"<>|]/g, '_');
+  const outName = filenameWithUrlExtension(dlUrl, req.body.filename || '');
   if (!dlUrl) return res.status(400).json({ error: 'URL пустой' });
   const dir = userDir(req.session.user);
   try {
@@ -288,7 +337,7 @@ app.post('/api/share', auth, (req, res) => {
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Файл не найден' });
   const token = crypto.randomUUID();
   const shares = loadShares();
-  shares[token] = { file: filename, user: req.session.user, created: new Date().toISOString() };
+  shares[token] = Object.assign({ file: filename, user: req.session.user, created: new Date().toISOString() }, shareOptionsFromBody(req.body));
   saveShares(shares);
   res.json({ token });
 });
@@ -308,16 +357,23 @@ app.get('/share/:token', (req, res) => {
   const shares = loadShares();
   const s = shares[req.params.token];
   if (!s) return res.status(404).send(shareNotFoundPage());
-  const file = path.join(userDir(s.user), path.basename(s.file));
+  if (shareIsExpired(s)) {
+    delete shares[req.params.token];
+    saveShares(shares);
+    return res.status(404).send(shareNotFoundPage());
+  }
+  const file = s.path ? fmResolve(s.user, s.path) : path.join(userDir(s.user), path.basename(s.file));
   if (!fs.existsSync(file)) return res.status(404).send(shareNotFoundPage());
-  res.download(file);
+  s.downloads = (s.downloads || 0) + 1;
+  saveShares(shares);
+  res.download(file, s.downloadName || path.basename(file), { dotfiles: 'allow' });
 });
 
 app.get('/api/shares', auth, (req, res) => {
   const shares = loadShares();
   const mine = Object.entries(shares)
     .filter(([, s]) => s.user === req.session.user)
-    .map(([token, s]) => ({ token, file: s.file, created: s.created }));
+    .map(([token, s]) => ({ token, file: s.file || s.path || s.downloadName, created: s.created, expiresAt: s.expiresAt || null, downloads: s.downloads || 0, maxDownloads: s.maxDownloads || null }));
   res.json(mine);
 });
 
@@ -406,6 +462,52 @@ app.post('/api/mytoken/reset', auth, (req, res) => {
   res.json({ token });
 });
 
+// ─── User management ────────────────────────────────────────
+app.get('/api/users', auth, (req, res) => {
+  if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
+  const users = loadUsers();
+  res.json(Object.entries(users).map(([u, d]) => ({ username: u, label: d.label, isAdmin: !!d.isAdmin })));
+});
+
+app.post('/api/users', auth, (req, res) => {
+  if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
+  const { username, password, label } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Логин и пароль обязательны' });
+  if (!/^[a-z0-9_]{2,32}$/.test(username)) return res.status(400).json({ error: 'Логин: только строчные буквы, цифры, _ (2–32 символа)' });
+  const users = loadUsers();
+  if (users[username]) return res.status(409).json({ error: 'Пользователь уже существует' });
+  users[username] = { password, label: label || username, isAdmin: false };
+  saveUsers(users);
+  res.json({ ok: true });
+});
+
+app.delete('/api/users/:username', auth, (req, res) => {
+  if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
+  const target = req.params.username;
+  if (target === req.session.user) return res.status(400).json({ error: 'Нельзя удалить себя' });
+  const users = loadUsers();
+  if (!users[target]) return res.status(404).json({ error: 'Пользователь не найден' });
+  delete users[target];
+  saveUsers(users);
+  // Сбрасываем токены удалённого пользователя
+  const tokens = loadTokens();
+  Object.keys(tokens).forEach(t => { if (tokens[t] === target) delete tokens[t]; });
+  saveTokens(tokens);
+  res.json({ ok: true });
+});
+
+app.post('/api/change-password', auth, (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'Новый пароль минимум 6 символов' });
+  const users = loadUsers();
+  const me = users[req.session.user];
+  if (!me) return res.status(404).json({ error: 'Пользователь не найден' });
+  if (me.password !== currentPassword) return res.status(403).json({ error: 'Неверный текущий пароль' });
+  me.password = newPassword;
+  saveUsers(users);
+  res.json({ ok: true });
+});
+
 app.get('/api/settings', auth, (req, res) => {
   res.json({ retention: getUserRetention(req.session.user) });
 });
@@ -443,8 +545,334 @@ app.delete('/api/files/:file', auth, (req, res) => {
 
 app.listen(PORT, () => console.log('Running on port ' + PORT));
 
+// ─── File Manager helper ─────────────────────────────────
+function fmResolve(username, relPath) {
+  const base = userDir(username);
+  const rel = (relPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const full = path.resolve(path.join(base, rel));
+  if (full !== base && !full.startsWith(base + '/')) return null;
+  return full;
+}
+
+function fmRelative(username, fullPath) {
+  return path.relative(userDir(username), fullPath).replace(/\\/g, '/');
+}
+
+function fmDirSize(fullPath) {
+  let total = 0;
+  try {
+    fs.readdirSync(fullPath, { withFileTypes: true }).forEach(entry => {
+      const child = path.join(fullPath, entry.name);
+      try {
+        if (entry.isDirectory()) total += fmDirSize(child);
+        else total += fs.statSync(child).size;
+      } catch {}
+    });
+  } catch {}
+  return total;
+}
+
+function fmArchiveDir(username) {
+  const dir = path.join(userDir(username), '.archives');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function fmCollectItems(username, items) {
+  const base = userDir(username);
+  const seen = new Set();
+  const out = [];
+  (Array.isArray(items) ? items : [items]).forEach(item => {
+    const relRaw = typeof item === 'string' ? item : (item && (item.path || item.fp));
+    const full = fmResolve(username, relRaw || '');
+    if (!full || full === base || !fs.existsSync(full)) return;
+    const rel = fmRelative(username, full);
+    if (!rel || rel.startsWith('.archives/') || seen.has(rel)) return;
+    const stat = fs.statSync(full);
+    seen.add(rel);
+    out.push({ rel, full, isDir: stat.isDirectory(), name: path.basename(full) });
+  });
+  return out;
+}
+
+function fmZipItems(username, items, downloadName, cb, shareOptions) {
+  const picked = fmCollectItems(username, items);
+  if (!picked.length) return cb(new Error('No files'));
+  const token = crypto.randomUUID();
+  const archiveRel = '.archives/' + token + '.zip';
+  const archivePath = path.join(fmArchiveDir(username), token + '.zip');
+  const args = ['-m', 'zipfile', '-c', archivePath].concat(picked.map(x => x.rel));
+  execFile('python3', args, { cwd: userDir(username), timeout: 10 * 60 * 1000 }, err => {
+    if (err) return cb(err);
+    const shares = loadShares();
+    shares[token] = Object.assign({
+      path: archiveRel,
+      user: username,
+      downloadName: downloadName || 'cloudspace.zip',
+      created: new Date().toISOString(),
+      kind: 'zip',
+    }, shareOptions || {});
+    saveShares(shares);
+    cb(null, { token, url: '/share/' + token, count: picked.length });
+  });
+}
+
+// GET /api/fm/list?path=
+app.get('/api/fm/list', auth, (req, res) => {
+  const full = fmResolve(req.session.user, req.query.path || '');
+  if (!full) return res.status(403).json({ error: 'Invalid path' });
+  try {
+    let diskUsed = null, diskTotal = null;
+    try {
+      const sf = fs.statfsSync(full);
+      diskTotal = sf.blocks * sf.bsize;
+      diskUsed  = (sf.blocks - sf.bfree) * sf.bsize;
+    } catch {}
+    const entries = fs.readdirSync(full)
+      .filter(n => !n.startsWith('.'))
+      .map(name => {
+        const p = path.join(full, name);
+        const stat = fs.statSync(p);
+        const isDir = stat.isDirectory();
+        let fileCount = 0;
+        if (isDir) { try { fileCount = fs.readdirSync(p).filter(n => !n.startsWith('.')).length; } catch {} }
+        return { name, isDir, size: isDir ? fmDirSize(p) : stat.size, mtime: stat.mtime, fileCount };
+      })
+      .sort((a, b) => { if (a.isDir !== b.isDir) return a.isDir ? -1 : 1; return a.name.localeCompare(b.name, 'ru'); });
+    res.json({ entries, diskUsed, diskTotal });
+  } catch { res.json({ entries: [], diskUsed: null, diskTotal: null }); }
+});
+
+// POST /api/fm/mkdir  body: { path, name }
+app.post('/api/fm/mkdir', auth, (req, res) => {
+  const parentRel = req.body.path || '';
+  const name = (req.body.name || '').trim().replace(/[/\\]/g, '');
+  if (!name) return res.status(400).json({ error: 'Не указано имя' });
+  const combined = parentRel ? (parentRel + '/' + name) : name;
+  const full = fmResolve(req.session.user, combined);
+  if (!full) return res.status(403).json({ error: 'Invalid path' });
+  if (fs.existsSync(full)) return res.status(409).json({ error: 'Уже существует' });
+  try { fs.mkdirSync(full, { recursive: true }); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/fm/rename  body: { oldPath, newName }
+app.post('/api/fm/rename', auth, (req, res) => {
+  const oldPath = req.body.oldPath || '';
+  const newName = (req.body.newName || '').trim().replace(/[/\\]/g, '');
+  if (!oldPath || !newName) return res.status(400).json({ error: 'Неверные параметры' });
+  const from = fmResolve(req.session.user, oldPath);
+  if (!from) return res.status(403).json({ error: 'Invalid path' });
+  if (!fs.existsSync(from)) return res.status(404).json({ error: 'Not found' });
+  const stat = fs.statSync(from);
+  let finalName = newName;
+  if (!stat.isDirectory()) {
+    const oldBase = path.basename(oldPath);
+    const dot = oldBase.lastIndexOf('.');
+    const oldExt = dot > 0 ? oldBase.slice(dot) : '';
+    if (oldExt) {
+      finalName = newName.toLowerCase().endsWith(oldExt.toLowerCase())
+        ? newName.slice(0, -oldExt.length) + oldExt
+        : newName + oldExt;
+    }
+  }
+  const dir = path.dirname(oldPath);
+  const toRel = (dir === '.' || dir === '') ? finalName : (dir + '/' + finalName);
+  const to   = fmResolve(req.session.user, toRel);
+  if (!to) return res.status(403).json({ error: 'Invalid path' });
+  if (fs.existsSync(to)) return res.status(409).json({ error: 'Уже существует' });
+  try { fs.renameSync(from, to); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/fm/delete  body: { path }
+app.delete('/api/fm/delete', auth, (req, res) => {
+  const full = fmResolve(req.session.user, req.body.path || req.query.path || '');
+  if (!full) return res.status(403).json({ error: 'Invalid path' });
+  if (!fs.existsSync(full)) return res.status(404).json({ error: 'Not found' });
+  try {
+    const stat = fs.statSync(full);
+    if (stat.isDirectory()) fs.rmSync(full, { recursive: true, force: true });
+    else fs.unlinkSync(full);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/fm/move  body: { from, to }
+app.post('/api/fm/move', auth, (req, res) => {
+  const from = fmResolve(req.session.user, req.body.from);
+  const to   = fmResolve(req.session.user, req.body.to);
+  if (!from || !to) return res.status(403).json({ error: 'Invalid path' });
+  if (!fs.existsSync(from)) return res.status(404).json({ error: 'Not found' });
+  try { fs.renameSync(from, to); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/fm/recent
+app.get('/api/fm/recent', auth, (req, res) => {
+  const base = userDir(req.session.user);
+  const results = [];
+  function walk(dir, relDir) {
+    try {
+      fs.readdirSync(dir).filter(n => !n.startsWith('.')).forEach(name => {
+        const full = path.join(dir, name);
+        const stat = fs.statSync(full);
+        const rel = (relDir ? relDir + '/' : '') + name;
+        if (stat.isDirectory()) walk(full, rel);
+        else results.push({ name, relPath: rel, size: stat.size, mtime: stat.mtime });
+      });
+    } catch {}
+  }
+  walk(base, '');
+  results.sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
+  res.json({ entries: results.slice(0, 50) });
+});
+
+// GET /api/fm/search?q=
+app.get('/api/fm/search', auth, (req, res) => {
+  const q = (req.query.q || '').toLowerCase().trim();
+  if (!q) return res.json({ entries: [] });
+  const base = userDir(req.session.user);
+  const results = [];
+  function walk(dir, relDir) {
+    try {
+      fs.readdirSync(dir).filter(n => !n.startsWith('.')).forEach(name => {
+        const full = path.join(dir, name);
+        const stat = fs.statSync(full);
+        const rel = (relDir ? relDir + '/' : '') + name;
+        const isDir = stat.isDirectory();
+        if (name.toLowerCase().includes(q)) results.push({ name, relPath: rel, isDir, size: isDir ? fmDirSize(full) : stat.size, mtime: stat.mtime });
+        if (isDir) walk(full, rel);
+      });
+    } catch {}
+  }
+  walk(base, '');
+  res.json({ entries: results.slice(0, 100) });
+});
+
+// GET /api/fm/download?path=
+app.get('/api/fm/download', auth, (req, res) => {
+  const full = fmResolve(req.session.user, req.query.path || '');
+  if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).send('Not found');
+  res.download(full, path.basename(full));
+});
+
+// GET /api/fm/preview?path=
+app.get('/api/fm/preview', auth, (req, res) => {
+  const full = fmResolve(req.session.user, req.query.path || '');
+  if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).send('Not found');
+  const ext = path.extname(full).toLowerCase();
+  const textExt = new Set(['.txt','.log','.md','.json','.csv','.js','.css','.html','.xml','.yml','.yaml','.ini','.conf']);
+  if (textExt.has(ext)) {
+    const max = 1024 * 1024;
+    const buf = fs.readFileSync(full);
+    res.type('text/plain').send(buf.slice(0, max).toString('utf8') + (buf.length > max ? '\n\n... trimmed ...' : ''));
+    return;
+  }
+  res.sendFile(full);
+});
+
+app.get('/api/fm/meta', auth, (req, res) => {
+  const rel = req.query.path || '';
+  const full = fmResolve(req.session.user, rel);
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'Not found' });
+  try {
+    const stat = fs.statSync(full);
+    const shares = loadShares();
+    const publicLinks = Object.entries(shares)
+      .filter(([, s]) => s.user === req.session.user && (s.path === rel || s.file === path.basename(rel)))
+      .map(([token, s]) => ({
+        token,
+        url: '/share/' + token,
+        created: s.created,
+        expiresAt: s.expiresAt || null,
+        downloads: s.downloads || 0,
+        maxDownloads: s.maxDownloads || null,
+        kind: s.kind || 'file',
+      }));
+    res.json({
+      name: path.basename(full),
+      path: rel,
+      isDir: stat.isDirectory(),
+      size: stat.isDirectory() ? fmDirSize(full) : stat.size,
+      mtime: stat.mtime,
+      created: stat.birthtime,
+      ext: path.extname(full).toLowerCase(),
+      publicLinks,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/fm/add-url  body: { url, path, filename }
+app.post('/api/fm/add-url', auth, async (req, res) => {
+  const dlUrl = (req.body.url || '').trim();
+  const relPath = req.body.path || '';
+  const outName = filenameWithUrlExtension(dlUrl, req.body.filename || '');
+  if (!dlUrl) return res.status(400).json({ error: 'URL empty' });
+  const dir = fmResolve(req.session.user, relPath);
+  if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return res.status(403).json({ error: 'Invalid path' });
+  try {
+    const opts = { dir };
+    if (outName) opts.out = outName;
+    const gid = await aria2('aria2.addUri', [[dlUrl], opts]);
+    res.json({ ok: true, gid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/fm/zip  body: { items, name }
+app.post('/api/fm/zip', auth, (req, res) => {
+  fmZipItems(req.session.user, req.body.items || [], (req.body.name || 'cloudspace.zip').trim(), (err, z) => {
+    if (err) return res.status(400).json({ error: err.message });
+    res.json({ ok: true, token: z.token, url: z.url, count: z.count });
+  });
+});
+
+// POST /api/fm/share  body: { path } or { items }
+app.post('/api/fm/share', auth, (req, res) => {
+  const items = req.body.items || (req.body.path ? [{ path: req.body.path }] : []);
+  const picked = fmCollectItems(req.session.user, items);
+  if (!picked.length) return res.status(400).json({ error: 'No files' });
+  const shareOptions = shareOptionsFromBody(req.body);
+  if (picked.length === 1 && !picked[0].isDir) {
+    const token = crypto.randomUUID();
+    const shares = loadShares();
+    shares[token] = Object.assign({ path: picked[0].rel, user: req.session.user, created: new Date().toISOString(), kind: 'fm-file' }, shareOptions);
+    saveShares(shares);
+    return res.json({ ok: true, token, url: '/share/' + token });
+  }
+  fmZipItems(req.session.user, picked.map(x => x.rel), 'cloudspace-share.zip', (err, z) => {
+    if (err) return res.status(400).json({ error: err.message });
+    res.json({ ok: true, token: z.token, url: z.url, archived: true, count: z.count });
+  }, shareOptions);
+});
+
+// POST /api/fm/upload?path=
+const fmUploader = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const fp = fmResolve(req.session.user, req.query.path || '');
+      if (!fp) return cb(new Error('Invalid path'));
+      if (!fs.existsSync(fp)) fs.mkdirSync(fp, { recursive: true });
+      cb(null, fp);
+    },
+    filename: (req, file, cb) => cb(null, Buffer.from(file.originalname, 'latin1').toString('utf8')),
+  }),
+  limits: { fileSize: 500 * 1024 * 1024 },
+});
+app.post('/api/fm/upload', auth, (req, res) => {
+  fmUploader.array('files', 50)(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.files || !req.files.length) return res.status(400).json({ error: 'Нет файлов' });
+    res.json({ ok: true, files: req.files.map(f => ({ name: f.filename, size: f.size })) });
+  });
+});
+
+app.get('/cloud', auth, (req, res) => res.send(cloudPage(req.session.user)));
+
 function runCleanup() {
-  Object.keys(USERS).forEach(function(username) {
+  Object.keys(loadUsers()).forEach(function(username) {
     const retention = getUserRetention(username);
     if (retention === 0) return;
     const dir = path.join(DOWNLOADS_ROOT, username);
@@ -546,7 +974,9 @@ function loginPage(error) {
 }
 
 function mainPage(username) {
-  const label = USERS[username] ? USERS[username].label : username;
+  const usersData = loadUsers();
+  const label = usersData[username] ? usersData[username].label : username;
+  const userIsAdmin = usersData[username] && usersData[username].isAdmin;
   const initial = label[0].toUpperCase();
   return '<!DOCTYPE html><html lang="ru"><head><title>VPS Downloader</title>' + HEAD + '</head>' +
   '<body class="bg-background font-body text-on-surface overflow-hidden">' +
@@ -571,6 +1001,9 @@ function mainPage(username) {
       '</button>' +
       '<button onclick="showTab(\'shares\')" id="nav-shares" class="w-full flex items-center gap-3 text-secondary px-4 py-3 hover:bg-secondary-container/30 rounded-xl transition-all font-label text-sm text-left">' +
         '<span class="material-symbols-outlined text-lg">link</span> Публичные ссылки' +
+      '</button>' +
+      '<button onclick="window.location=\'/cloud\'" class="w-full flex items-center gap-3 text-secondary px-4 py-3 hover:bg-secondary-container/30 rounded-xl transition-all font-label text-sm text-left">' +
+        '<span class="material-symbols-outlined text-lg">cloud</span> Файловый менеджер' +
       '</button>' +
       '<button onclick="openSettings()" class="w-full flex items-center gap-3 text-secondary px-4 py-3 hover:bg-secondary-container/30 rounded-xl transition-all font-label text-sm text-left">' +
         '<span class="material-symbols-outlined text-lg">settings</span> Настройки' +
@@ -716,8 +1149,8 @@ function mainPage(username) {
 
   // Settings Modal
   '<div id="settings-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4" style="background:rgba(0,0,0,0.4);backdrop-filter:blur(4px)">' +
-    '<div class="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden">' +
-      '<div class="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-100">' +
+    '<div class="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col" style="max-height:82vh">' +
+      '<div class="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-100 flex-shrink-0">' +
         '<div class="flex items-center gap-3">' +
           '<span class="material-symbols-outlined" style="color:#6b509a">settings</span>' +
           '<p style="font-family:Plus Jakarta Sans,sans-serif;font-weight:700;font-size:0.95rem;color:#1a1c1f">Настройки</p>' +
@@ -726,7 +1159,7 @@ function mainPage(username) {
           '<span class="material-symbols-outlined">close</span>' +
         '</button>' +
       '</div>' +
-      '<div class="p-6 space-y-5">' +
+      '<div class="p-6 space-y-5 overflow-y-auto">' +
         '<div>' +
           '<p class="font-headline font-bold text-sm text-on-surface mb-2">🗑 Автоудаление файлов</p>' +
           '<div class="flex gap-3 items-center">' +
@@ -747,6 +1180,29 @@ function mainPage(username) {
             '<button id="notif-btn" onclick="requestNotifPerm()" class="px-4 py-2.5 rounded-xl text-sm font-bold transition-all bg-surface-container-high text-secondary hover:bg-surface-variant">Разрешить</button>' +
           '</div>' +
         '</div>' +
+        '<div class="border-t border-outline-variant/30 pt-5">' +
+          '<p class="font-headline font-bold text-sm text-on-surface mb-2">🔑 Сменить пароль</p>' +
+          '<div class="space-y-2">' +
+            '<input id="pwd-current" type="password" placeholder="Текущий пароль" class="w-full bg-surface-container-low text-on-surface border border-outline-variant/30 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-primary"/>' +
+            '<input id="pwd-new" type="password" placeholder="Новый пароль (мин. 6 символов)" class="w-full bg-surface-container-low text-on-surface border border-outline-variant/30 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-primary"/>' +
+            '<button onclick="changePassword()" class="w-full px-4 py-2.5 rounded-xl text-sm font-bold text-white transition-all hover:opacity-90" style="background:#6b509a">Сменить пароль</button>' +
+            '<p id="pwd-status" class="text-xs text-center min-h-[16px]"></p>' +
+          '</div>' +
+        '</div>' +
+        (userIsAdmin ?
+        '<div class="border-t border-outline-variant/30 pt-5">' +
+          '<p class="font-headline font-bold text-sm text-on-surface mb-3">👥 Пользователи</p>' +
+          '<div id="users-list" class="space-y-2 mb-3"></div>' +
+          '<div class="bg-surface-container-low rounded-2xl p-3 space-y-2">' +
+            '<p class="text-xs font-bold text-secondary uppercase tracking-wider mb-2">Добавить пользователя</p>' +
+            '<input id="new-username" type="text" placeholder="Логин (a-z, 0-9, _)" class="w-full bg-white dark:bg-surface-container text-on-surface border border-outline-variant/30 rounded-xl px-3 py-2 text-sm outline-none focus:border-primary"/>' +
+            '<input id="new-password" type="password" placeholder="Пароль" class="w-full bg-white dark:bg-surface-container text-on-surface border border-outline-variant/30 rounded-xl px-3 py-2 text-sm outline-none focus:border-primary"/>' +
+            '<input id="new-label" type="text" placeholder="Отображаемое имя (необязательно)" class="w-full bg-white dark:bg-surface-container text-on-surface border border-outline-variant/30 rounded-xl px-3 py-2 text-sm outline-none focus:border-primary"/>' +
+            '<button onclick="addUser()" class="w-full px-4 py-2 rounded-xl text-sm font-bold text-white transition-all hover:opacity-90" style="background:#6b509a">Создать пользователя</button>' +
+            '<p id="users-status" class="text-xs text-center min-h-[16px]"></p>' +
+          '</div>' +
+        '</div>'
+        : '') +
         '<div class="border-t border-outline-variant/30 pt-5">' +
           '<p class="font-headline font-bold text-sm text-on-surface mb-1">🧩 Токен для расширения</p>' +
           '<p class="text-xs text-secondary mb-3">Вставьте в настройки браузерного расширения</p>' +
@@ -1212,13 +1668,14 @@ function mainPage(username) {
   '  document.getElementById("settings-modal").classList.remove("hidden");\n' +
   '  loadRetention();\n' +
   '  updateNotifStatus();\n' +
+  '  loadUsers();\n' +
   '}\n' +
   '\n' +
   'function updateNotifStatus() {\n' +
   '  var s = document.getElementById("notif-status");\n' +
   '  var b = document.getElementById("notif-btn");\n' +
   '  if (!("Notification" in window)) {\n' +
-  '    s.textContent = "Не поддерживается браузером";\n' +
+  '    s.textContent = "Не Р С—Р С•Р Т‘Р Т‘Р ВµРЎР‚Р В¶Р С‘вается браузером";\n' +
   '    b.style.display = "none"; return;\n' +
   '  }\n' +
   '  var p = Notification.permission;\n' +
@@ -1237,7 +1694,7 @@ function mainPage(username) {
   '}\n' +
   '\n' +
   'function requestNotifPerm() {\n' +
-  '  if (!("Notification" in window)) { toast("Браузер не поддерживает уведомления"); return; }\n' +
+  '  if (!("Notification" in window)) { toast("Браузер не поддерживает РЎС“Р Р†Р ВµР Т‘Р С•Р СР В»Р ВµР Р…Р С‘я"); return; }\n' +
   '  Notification.requestPermission().then(function() { updateNotifStatus(); });\n' +
   '}\n' +
   '\n' +
@@ -1317,6 +1774,76 @@ function mainPage(username) {
   '  icon.textContent = isDark ? "light_mode" : "dark_mode";\n' +
   '}\n' +
   '\n' +
+  '// ── Смена пароля ──\n' +
+  'function changePassword() {\n' +
+  '  var cur = document.getElementById("pwd-current").value;\n' +
+  '  var nw  = document.getElementById("pwd-new").value;\n' +
+  '  var st  = document.getElementById("pwd-status");\n' +
+  '  if (!cur || !nw) { st.textContent = "Заполните оба поля"; st.style.color = "#dc2626"; return; }\n' +
+  '  var body = new URLSearchParams();\n' +
+  '  body.append("currentPassword", cur);\n' +
+  '  body.append("newPassword", nw);\n' +
+  '  fetch("/api/change-password", { method: "POST", body: body })\n' +
+  '    .then(function(r) { return r.json(); })\n' +
+  '    .then(function(d) {\n' +
+  '      if (d.error) { st.textContent = d.error; st.style.color = "#dc2626"; }\n' +
+  '      else { st.textContent = "✓ Пароль изменён"; st.style.color = "#16a34a";\n' +
+  '        document.getElementById("pwd-current").value = "";\n' +
+  '        document.getElementById("pwd-new").value = ""; }\n' +
+  '    }).catch(function() { st.textContent = "Ошибка"; st.style.color = "#dc2626"; });\n' +
+  '}\n' +
+  '\n' +
+  '// ── Управление пользователями (admin) ──\n' +
+  'function loadUsers() {\n' +
+  '  var el = document.getElementById("users-list");\n' +
+  '  if (!el) return;\n' +
+  '  fetch("/api/users").then(function(r) { return r.json(); }).then(function(users) {\n' +
+  '    el.innerHTML = users.map(function(u) {\n' +
+  '      return \'<div class="flex items-center justify-between bg-white dark:bg-surface-container rounded-xl px-3 py-2">\' +\n' +
+  '        \'<div>\' +\n' +
+  '          \'<p class="text-sm font-bold text-on-surface">\' + u.label + (u.isAdmin ? \' <span class="text-xs text-primary font-normal">admin</span>\' : \'\') + \'</p>\' +\n' +
+  '          \'<p class="text-xs text-secondary">@\' + u.username + \'</p>\' +\n' +
+  '        \'</div>\' +\n' +
+  '        (!u.isAdmin ? \'<button onclick="deleteUser(\\"\' + u.username + \'\\")" class="text-xs text-error hover:bg-red-50 px-2 py-1 rounded-lg transition-colors">Удалить</button>\' : \'\') +\n' +
+  '      \'</div>\';\n' +
+  '    }).join("");\n' +
+  '  });\n' +
+  '}\n' +
+  '\n' +
+  'function addUser() {\n' +
+  '  var username = document.getElementById("new-username").value.trim();\n' +
+  '  var password = document.getElementById("new-password").value;\n' +
+  '  var label    = document.getElementById("new-label").value.trim();\n' +
+  '  var st = document.getElementById("users-status");\n' +
+  '  if (!username || !password) { st.textContent = "Логин и пароль обязательны"; st.style.color = "#dc2626"; return; }\n' +
+  '  var body = new URLSearchParams();\n' +
+  '  body.append("username", username);\n' +
+  '  body.append("password", password);\n' +
+  '  body.append("label", label || username);\n' +
+  '  fetch("/api/users", { method: "POST", body: body })\n' +
+  '    .then(function(r) { return r.json(); })\n' +
+  '    .then(function(d) {\n' +
+  '      if (d.error) { st.textContent = d.error; st.style.color = "#dc2626"; }\n' +
+  '      else {\n' +
+  '        st.textContent = "✓ Пользователь создан"; st.style.color = "#16a34a";\n' +
+  '        document.getElementById("new-username").value = "";\n' +
+  '        document.getElementById("new-password").value = "";\n' +
+  '        document.getElementById("new-label").value = "";\n' +
+  '        loadUsers();\n' +
+  '      }\n' +
+  '    }).catch(function() { st.textContent = "Ошибка"; st.style.color = "#dc2626"; });\n' +
+  '}\n' +
+  '\n' +
+  'function deleteUser(username) {\n' +
+  '  if (!confirm("Удалить пользователя @" + username + "? Его файлы останутся на сервере.")) return;\n' +
+  '  fetch("/api/users/" + encodeURIComponent(username), { method: "DELETE" })\n' +
+  '    .then(function(r) { return r.json(); })\n' +
+  '    .then(function(d) {\n' +
+  '      if (d.error) { toast("✕ " + d.error); }\n' +
+  '      else { toast("✓ Пользователь СѓРґалён"); loadUsers(); }\n' +
+  '    });\n' +
+  '}\n' +
+  '\n' +
   'function toggleDark() {\n' +
   '  var isDark = document.documentElement.classList.toggle("dark");\n' +
   '  localStorage.theme = isDark ? "dark" : "light";\n' +
@@ -1389,6 +1916,887 @@ function mainPage(username) {
   'setInterval(loadDownloads, 3000);\n' +
   'loadDisk();\n' +
   'setInterval(loadDisk, 60000);\n' +
+  '</script>' +
+  '</body></html>';
+}
+
+function cloudPage(username) { // v3 — multiselect + upload progress + disk fix
+  return '<!DOCTYPE html>' +
+  '<html lang="ru">' +
+  '<head>' +
+  '<meta charset="UTF-8">' +
+  '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+  '<title>CloudSpace — ' + username + '</title>' +
+  '<script src="https://cdn.tailwindcss.com"></script>' +
+  '<link rel="preconnect" href="https://fonts.googleapis.com">' +
+  '<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">' +
+  '<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">' +
+  '<style>' +
+  '*{box-sizing:border-box}' +
+  'body{font-family:Manrope,sans-serif;background:#131315;color:#e5e1e4;letter-spacing:0;}' +
+  '.material-symbols-outlined{font-variation-settings:"FILL" 0,"wght" 500,"GRAD" 0,"opsz" 24;line-height:1;vertical-align:middle}' +
+  '::-webkit-scrollbar{width:6px;height:6px}' +
+  '::-webkit-scrollbar-track{background:#1b1b1e}' +
+  '::-webkit-scrollbar-thumb{background:#494454;border-radius:9999px}' +
+  '::-webkit-scrollbar-thumb:hover{background:#958ea0}' +
+  '.mobile-topbar,.mobile-bottom-nav{display:none}' +
+  '.sidebar{background:#0e0e10;width:280px;min-height:100vh;flex-shrink:0}' +
+  '.card{background:#1b1b1d;border:1px solid rgba(74,68,85,.7);border-radius:16px}' +
+  '.btn-primary{background:#7c3aed;color:#fff;border-radius:9999px;padding:10px 20px;font-weight:700;font-size:14px;border:none;cursor:pointer;transition:opacity .2s,transform .2s,box-shadow .2s;min-height:44px}' +
+  '.btn-primary:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 10px 24px rgba(160,120,255,.24)}' +
+  '.btn-ghost{background:#201f21;border:1px solid #4a4455;color:#e5e1e4;border-radius:9999px;padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;transition:background .2s,transform .2s,border-color .2s;min-height:40px}' +
+  '.btn-ghost:hover{background:rgba(208,188,255,.1);border-color:#7f67b8;transform:translateY(-1px)}' +
+  '.nav-item{display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:12px;cursor:pointer;color:#cbc3d7;font-size:14px;font-weight:500;transition:background .2s;text-decoration:none}' +
+  '.nav-item:hover{background:rgba(208,188,255,.1);color:#e4e1e6}' +
+  '.nav-item.active{background:rgba(208,188,255,.15);color:#d0bcff}' +
+  '.breadcrumb-sep{color:#494454;margin:0 6px}' +
+  '.file-row{display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:12px;cursor:pointer;transition:background .15s,border-color .15s,transform .15s;border-bottom:1px solid #1f1f22}' +
+  '.file-row:last-child{border-bottom:none}' +
+  '.file-row:hover{background:#2a2a2d;transform:translateX(2px)}' +
+  '.file-row.selected{background:rgba(160,120,255,.14)}' +
+  '.file-row.drag-over{background:rgba(160,120,255,.18)!important;outline:2px dashed #a078ff;outline-offset:-2px}' +
+  '.file-row.dragging{opacity:.4}' +
+  '.file-grid-item{background:#1b1b1d;border:1px solid rgba(74,68,85,.55);border-radius:16px;padding:16px 12px;display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;transition:border-color .15s,background .15s,transform .15s,box-shadow .15s;text-align:center;animation:popIn .18s ease both}' +
+  '.file-grid-item:hover{background:#2a2a2d;border-color:#6d3bd7;transform:translateY(-3px);box-shadow:0 14px 28px rgba(0,0,0,.24)}' +
+  '.file-grid-item.selected{background:rgba(160,120,255,.14);border-color:#a078ff}' +
+  '.file-grid-item.drag-over{background:rgba(160,120,255,.18)!important;border-color:#a078ff;outline:2px dashed #a078ff;outline-offset:-2px}' +
+  '.file-grid-item.dragging{opacity:.4}' +
+  '.file-thumb{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:#353437;color:#d2bbff;font-size:26px;overflow:hidden;flex:0 0 auto}' +
+  '.file-thumb .material-symbols-outlined{font-size:28px;color:#d2bbff}' +
+  '.file-thumb img{width:100%;height:100%;object-fit:cover}' +
+  '.file-actions{display:flex;gap:4px;margin-top:auto;flex-wrap:wrap;justify-content:center;max-width:100%}' +
+  '.file-actions .btn-ghost{padding:3px 7px!important;min-width:30px}' +
+  '.item-menu-btn{width:40px;height:40px;min-height:40px;border-radius:9999px;padding:0;display:flex;align-items:center;justify-content:center;flex:0 0 auto}' +
+  '.item-menu-btn .material-symbols-outlined{font-size:22px}' +
+  '.drop-target{outline:2px dashed #a078ff!important;outline-offset:-3px;background:rgba(160,120,255,.16)!important;color:#d2bbff!important}' +
+  '.transfer-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #1f1f22}' +
+  '.transfer-row:last-child{border-bottom:none}' +
+  '.transfer-card{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-bottom:1px solid #1f1f22}' +
+  '.transfer-card:last-child{border-bottom:none}' +
+  '.transfer-top{display:flex;align-items:center;gap:10px}' +
+  '.transfer-name{flex:1;min-width:0;font-size:13px;font-weight:700;color:#e4e1e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+  '.transfer-status{font-size:11px;font-weight:800;text-transform:uppercase;color:#d2bbff;background:rgba(124,58,237,.16);border-radius:9999px;padding:3px 8px}' +
+  '.transfer-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;font-size:12px;color:#958ea0}' +
+  '.transfer-controls{display:flex;gap:8px;flex-wrap:wrap}' +
+  '.transfer-controls .btn-ghost{min-height:32px;padding:4px 10px;font-size:12px}' +
+  '.progress-track{background:#2a2a2d;border-radius:9999px;height:6px;overflow:hidden;flex:1}' +
+  '.progress-fill{height:100%;border-radius:9999px;background:linear-gradient(90deg,#a078ff,#6d3bd7);transition:width .4s}' +
+  '.progress-fill.done{background:#10B981;box-shadow:0 0 8px rgba(16,185,129,.5)}' +
+  '.select-check{width:16px;height:16px;accent-color:#a078ff;cursor:pointer;flex:0 0 auto}' +
+  '#selection-bar{display:none;align-items:center;gap:10px;padding:10px 24px;border-bottom:1px solid #1f1f22;background:#17171a;flex-shrink:0}' +
+  '#upload-panel{display:none;position:fixed;right:24px;bottom:24px;z-index:350;width:min(420px,calc(100vw - 48px));background:#1f1f22;border:1px solid #494454;border-radius:14px;padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.55);animation:slideUp .22s ease both}' +
+  '#toast{display:none;position:fixed;right:24px;top:24px;z-index:650;width:min(420px,calc(100vw - 48px));background:#1f1f22;border:1px solid #6d3bd7;border-radius:14px;padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.55);animation:slideUp .2s ease both}' +
+  '.preview-panel{display:none;width:380px;max-width:38vw;border-left:1px solid #1f1f22;background:#151518;flex-shrink:0;flex-direction:column;overflow:hidden}' +
+  '.preview-panel.open{display:flex}' +
+  '.preview-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid #1f1f22;flex-shrink:0}' +
+  '.preview-body{padding:14px;overflow:auto;flex:1;min-height:0}' +
+  '.preview-body.media-preview{display:flex;align-items:center;justify-content:center;background:#0e0e10}' +
+  '.preview-media{max-width:100%;max-height:72vh;border-radius:12px;object-fit:contain;display:block}' +
+  '.preview-media-wrap{width:100%;min-height:260px;display:flex;align-items:center;justify-content:center}' +
+  '.preview-media-wrap:fullscreen{background:#050506;padding:24px}' +
+  '.preview-media-wrap:fullscreen .preview-media{max-width:100vw;max-height:100vh}' +
+  '#preview-info{padding:14px 16px;border-top:1px solid #1f1f22;flex-shrink:0;max-height:260px;overflow-y:auto;background:#121215}' +
+  '.meta-row{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #252528;font-size:12px}' +
+  '.meta-row:last-child{border-bottom:none}' +
+  '.meta-lbl{color:#494454;flex-shrink:0;padding-top:1px}' +
+  '.meta-val{color:#cbc3d7;font-weight:500;text-align:right;word-break:break-all}' +
+  '.dir-name{color:#d0bcff}' +
+  '.file-name{color:#e4e1e6}' +
+  '.upload-file{font-size:12px;color:#cbc3d7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+  '.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:flex;align-items:center;justify-content:center}' +
+  '.modal{background:#1f1f22;border:1px solid #494454;border-radius:16px;padding:24px;min-width:360px;max-width:90vw;animation:popIn .18s ease both}' +
+  '.inp{background:#0e0e11;border:1px solid #494454;border-radius:8px;color:#e4e1e6;padding:8px 14px;font-size:14px;width:100%;outline:none;font-family:Manrope,sans-serif}' +
+  '.inp:focus{border-color:#d0bcff;box-shadow:0 0 0 3px rgba(208,188,255,.15)}' +
+  '.disk-bar{background:#2a2a2d;border-radius:9999px;height:8px;overflow:hidden}' +
+  '.disk-fill{height:100%;border-radius:9999px;background:linear-gradient(90deg,#a078ff,#6d3bd7)}' +
+  'body.light{background:#f0ecfa;color:#17151c}' +
+  'body.light .sidebar{background:#fff;border-right:1px solid #e2d9f3}' +
+  'body.light .sidebar [style*="color:#e4e1e6"]{color:#17151c!important}' +
+  'body.light .sidebar [style*="color:#958ea0"]{color:#7b6f93!important}' +
+  'body.light .sidebar [style*="color:#494454"]{color:#4a3b6e!important}' +
+  'body.light .nav-item{color:#4a3b6e}' +
+  'body.light .nav-item:hover{background:#ede5ff;color:#6d3bd7}' +
+  'body.light .nav-item.active{background:#e8e0ff;color:#6d3bd7}' +
+  'body.light #main-area{background:#f6f3ff!important}' +
+  'body.light #main-area>div:first-child{background:#fff!important;border-bottom-color:#e2d9f3!important}' +
+  'body.light #main-area>div:nth-child(2){background:#f1ecfb!important;border-bottom-color:#d8cdec!important}' +
+  'body.light #selection-bar{background:#ede5ff;border-bottom-color:#e2d9f3;color:#17151c}' +
+  'body.light #file-scroll{background:#f0ecfa}' +
+  'body.light .card{background:#fff;border-color:#e2d9f3;color:#17151c}' +
+  'body.light .transfer-row{border-bottom-color:#e2d9f3}' +
+  'body.light .transfer-card{border-bottom-color:#e2d9f3}' +
+  'body.light .transfer-name{color:#17151c}' +
+  'body.light .transfer-status{background:#ede5ff;color:#6d3bd7}' +
+  'body.light .transfer-meta{color:#7b6f93}' +
+  'body.light .progress-track{background:#e2d9f3}' +
+  'body.light .file-row{background:#fff!important;border-color:#d8cdec!important;border-bottom-color:#ede5ff;color:#17151c}' +
+  'body.light .file-row:hover{background:#f7f2ff!important}' +
+  'body.light .file-row.selected{background:#e0d5ff}' +
+  'body.light .file-thumb{background:#ede5ff}' +
+  'body.light .dir-name{color:#6d3bd7}' +
+  'body.light .file-name{color:#17151c}' +
+  'body.light .file-grid-item{background:#fff!important;border-color:#d8cdec!important;color:#17151c!important}' +
+  'body.light .file-grid-item:hover{background:#f7f2ff!important;border-color:#a078ff!important}' +
+  'body.light .file-grid-item.selected{background:#e8e0ff!important;border-color:#7c4dff!important}' +
+  'body.light .file-grid-item [style*="color:#e4e1e6"],body.light .file-row [style*="color:#e4e1e6"]{color:#17151c!important}' +
+  'body.light .file-grid-item [style*="color:#d0bcff"],body.light .file-row [style*="color:#d0bcff"]{color:#6d3bd7!important}' +
+  'body.light .modal{background:#fff;border-color:#e2d9f3;color:#17151c}' +
+  'body.light #upload-panel{background:#fff;border-color:#e2d9f3}' +
+  'body.light #toast{background:#fff;border-color:#a078ff;color:#17151c}' +
+  'body.light .preview-panel{background:#fff;border-left-color:#e2d9f3}' +
+  'body.light .preview-head{border-bottom-color:#e2d9f3}' +
+  'body.light #preview-title{color:#17151c}' +
+  'body.light #preview-info{background:#faf8ff;border-top-color:#e2d9f3}' +
+  'body.light .meta-row{border-bottom-color:#e8e0f4}' +
+  'body.light .meta-lbl{color:#9b91b4}' +
+  'body.light .meta-val{color:#17151c}' +
+  'body.light .preview-body{color:#17151c}' +
+  'body.light .breadcrumb-sep{color:#c9bfe0}' +
+  'body.light .disk-bar{background:#e2d9f3}' +
+  'body.light #disk-label{color:#4a3b6e}' +
+  'body.light .inp{background:#faf8ff;color:#17151c;border-color:#c9bfe0}' +
+  'body.light .inp:focus{border-color:#a078ff}' +
+  'body.light .btn-ghost{color:#4a3b6e;border-color:#c0b3d8;background:#fff}' +
+  'body.light .btn-ghost:hover{background:#ede5ff;border-color:#a078ff;color:#6d3bd7}' +
+  'body.light .btn-primary{background:#7c3aed!important;color:#fff!important}' +
+  'body.light .mobile-actions button{background:#fff!important;border-color:#c0b3d8!important;color:#4a3b6e!important}' +
+  'body.light .mobile-topbar,body.light .mobile-bottom-nav{background:rgba(255,255,255,.88)!important;border-color:#e2d9f3!important}' +
+  'body.light .mobile-brand{color:#17151c!important;text-shadow:none!important}' +
+  'body.light .mobile-avatar{background:#ede5ff!important;border-color:#d8cdec!important;color:#6d3bd7!important}' +
+  'body.light #ctx-menu{background:#fff!important;border-color:#d8cdec!important;box-shadow:0 12px 40px rgba(50,34,80,.18)!important}' +
+  'body.light .ctx-item{color:#2d2440!important}' +
+  'body.light .ctx-item:hover{background:#ede5ff!important;color:#6d3bd7!important}' +
+  'body.light .ctx-sep{background:#e8e0f4!important}' +
+  'body.light #file-area{color:#17151c}' +
+  /* context menu */
+  '#ctx-menu{position:fixed;z-index:500;background:#1f1f22;border:1px solid #494454;border-radius:10px;padding:4px;min-width:190px;box-shadow:0 12px 40px rgba(0,0,0,.7);display:none}' +
+  '.ctx-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;color:#e4e1e6;transition:background .12s}' +
+  '.ctx-item:hover{background:rgba(208,188,255,.15);color:#d0bcff}' +
+  '.ctx-item.danger{color:#ffb4ab}' +
+  '.ctx-item.danger:hover{background:rgba(255,180,171,.1);color:#ff8a80}' +
+  '.ctx-sep{height:1px;background:#353438;margin:3px 6px}' +
+  /* drop zone overlay */
+  '#drop-zone{position:fixed;inset:0;z-index:300;pointer-events:none;display:none;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:rgba(109,59,215,.1);border:3px dashed #a078ff;border-radius:0}' +
+  '#drop-zone.active{display:flex}' +
+  '@keyframes popIn{from{opacity:0;transform:scale(.98) translateY(6px)}to{opacity:1;transform:scale(1) translateY(0)}}' +
+  '@keyframes slideUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}' +
+  '@media (max-width:768px){' +
+  'body{display:block!important;min-height:100dvh;overflow-x:hidden;padding:0 0 96px;background:#131315}' +
+  '.mobile-topbar{display:flex;position:sticky;top:0;z-index:60;height:64px;align-items:center;justify-content:space-between;padding:0 20px;background:rgba(14,14,16,.86);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-bottom:1px solid rgba(53,52,55,.65)}' +
+  '.mobile-brand{font-size:28px;line-height:34px;font-weight:800;color:#fff;letter-spacing:0;text-shadow:0 2px 12px rgba(0,0,0,.45)}' +
+  '.mobile-avatar{width:36px;height:36px;border-radius:9999px;background:#353437;border:1px solid #4a4455;display:flex;align-items:center;justify-content:center;color:#d2bbff}' +
+  '.mobile-icon-btn{width:44px;height:44px;border:0;border-radius:9999px;background:transparent;color:#8b5cf6;display:flex;align-items:center;justify-content:center}' +
+  '.mobile-icon-btn .material-symbols-outlined{font-size:32px}' +
+  '.sidebar{display:none!important}' +
+  '#main-area{min-height:calc(100dvh - 64px);display:block!important}' +
+  '.desktop-toolbar{display:none!important}' +
+  '.mobile-toolbar{display:flex!important;padding:44px 20px 28px!important;gap:14px!important;align-items:center!important;border-bottom:0!important;background:transparent!important}' +
+  '.mobile-toolbar>button:not([data-action="upload-btn"]){display:none!important}' +
+  '.mobile-toolbar #breadcrumb{display:none!important}' +
+  '.mobile-toolbar>div[style*="position:relative"]{display:block!important;flex:1;min-width:0}' +
+  '#search-inp{width:100%!important;height:58px;border-radius:9999px!important;background:#2a2a2c!important;border:1px solid #4a4455!important;color:#e5e1e4!important;font-size:16px!important;padding-left:54px!important}' +
+  '#search-inp::placeholder{color:#ccc3d8}' +
+  '.mobile-toolbar>div[style*="position:relative"] span{left:20px!important;color:#ccc3d8!important}' +
+  '.mobile-toolbar [data-action="upload-btn"]{display:flex!important;width:64px!important;height:64px!important;padding:0!important;align-items:center;justify-content:center;box-shadow:0 18px 30px rgba(124,58,237,.28);font-size:0}' +
+  '.mobile-toolbar [data-action="upload-btn"]::before{content:"upload";font-family:"Material Symbols Outlined";font-size:34px;font-variation-settings:"FILL" 1,"wght" 700,"GRAD" 0,"opsz" 32}' +
+  '.mobile-actions{display:flex!important;padding:0 20px 28px!important;gap:10px!important;overflow-x:auto;border-bottom:0!important;background:transparent!important}' +
+  '.mobile-actions button{white-space:nowrap;min-height:44px;background:#201f21;border-color:#353437;color:#e5e1e4}' +
+  '#mobile-storage{display:block!important;margin:0 20px 34px!important;padding:20px 28px!important}' +
+  '#mobile-storage .disk-bar{height:8px;background:#201f21}' +
+  '#selection-bar{position:sticky;top:64px;z-index:45;margin:0 20px 14px;padding:12px!important;flex-wrap:wrap;border:1px solid rgba(74,68,85,.65);border-radius:16px;background:#1b1b1d}' +
+  '#file-scroll{padding:0 20px 20px!important;overflow:visible!important}' +
+  '#file-area{display:block}' +
+  '#file-area>div[style*="background:#1b1b1e"]{background:transparent!important;border:0!important;border-radius:0!important;overflow:visible!important;display:flex!important;flex-direction:column!important;gap:14px!important}' +
+  '.file-row:first-child{display:none!important}' +
+  '.file-row{min-height:80px;gap:14px!important;padding:16px 22px!important;background:#0e0e10!important;border:1px solid rgba(31,31,34,.65)!important;border-radius:18px!important;box-shadow:none;transform:none!important}' +
+  '.file-row.selected{border-color:#7c3aed!important;box-shadow:0 0 0 2px rgba(124,58,237,.18);background:#1b1427!important}' +
+  '.file-row>div:nth-child(4),.file-row>div:nth-child(5){display:none!important}' +
+  '.file-row>div:nth-child(3){min-width:0;font-size:18px!important;line-height:24px!important;font-weight:700!important;color:#e5e1e4!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+  '.file-row>div:nth-child(3)::after{content:attr(data-meta);display:block;font-size:14px;line-height:20px;color:#ccc3d8;font-weight:600;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+  '.file-row>div:last-child{width:auto!important;flex-shrink:0}' +
+  '.file-actions{gap:6px!important;justify-content:flex-end!important}' +
+  '.file-actions .btn-ghost{width:34px;height:34px;min-height:34px;padding:0!important;font-size:0!important;border:0!important;background:transparent!important;color:#ccc3d8!important}' +
+  '#file-area>div[style*="grid-template-columns"]{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:22px!important}' +
+  '.file-grid-item{min-height:144px;padding:18px 14px!important;align-items:flex-start!important;text-align:left!important;background:#1b1b1d!important;border-radius:18px!important}' +
+  '.card{margin:0 20px 24px!important;padding:20px!important;border-radius:18px!important}' +
+  '.mobile-bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:55;height:88px;align-items:center;justify-content:space-around;padding:8px 18px calc(8px + env(safe-area-inset-bottom));background:rgba(14,14,16,.88);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid rgba(53,52,55,.7)}' +
+  '.bottom-nav-item{min-width:68px;height:64px;border:0;background:transparent;color:#8d8994;border-radius:22px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:12px;font-weight:800}' +
+  '.bottom-nav-item.active{background:#211734;color:#d2bbff}' +
+  '.bottom-nav-item .material-symbols-outlined{font-size:30px}' +
+  '#upload-panel{left:20px!important;right:20px!important;bottom:104px!important;width:auto!important;border-radius:18px!important}' +
+  '#toast{left:20px!important;right:20px!important;top:76px!important;width:auto!important}' +
+  '.preview-panel{position:fixed!important;left:0;right:0;bottom:0;z-index:70;width:100%!important;max-width:none!important;max-height:72dvh;border-left:0;border-top:1px solid #353437;border-radius:22px 22px 0 0;background:#1b1b1d}' +
+  '.modal-backdrop{align-items:flex-end!important;padding:20px}' +
+  '.modal{min-width:0!important;width:100%!important;padding:22px!important;border-radius:22px!important}' +
+  '}' +
+  '</style>' +
+  '</head>' +
+  '<body class="flex">' +
+
+  '<header class="mobile-topbar">' +
+  '<div class="mobile-avatar"><span class="material-symbols-outlined">person</span></div>' +
+  '<div class="mobile-brand">CloudSpace</div>' +
+  '<button class="mobile-icon-btn" data-action="focus-search" title="Поиск"><span class="material-symbols-outlined">search</span></button>' +
+  '</header>' +
+
+  /* ── SIDEBAR ── */
+  '<aside class="sidebar flex flex-col py-6 px-4 gap-2 sticky top-0 h-screen overflow-y-auto">' +
+  '<div class="flex items-center gap-3 px-2 mb-6">' +
+  '<div style="background:linear-gradient(135deg,#a078ff,#6d3bd7);border-radius:10px;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-size:18px;"><span class="material-symbols-outlined">cloud</span></div>' +
+  '<div><div style="font-weight:700;font-size:16px;color:#e4e1e6">CloudSpace</div>' +
+  '<div style="font-size:12px;color:#958ea0">' + username + '</div></div>' +
+  '</div>' +
+  '<a href="/" class="nav-item"><span class="material-symbols-outlined">arrow_back</span><span>Главная</span></a>' +
+  '<div style="font-size:11px;font-weight:600;letter-spacing:.05em;color:#494454;text-transform:uppercase;padding:8px 4px 4px">Навигация</div>' +
+  '<div class="nav-item active" data-action="nav-home"><span class="material-symbols-outlined">folder</span><span>Мои файлы</span></div>' +
+  '<div class="nav-item" data-action="nav-recent"><span class="material-symbols-outlined">schedule</span><span>Недавние</span></div>' +
+  '<div style="flex:1"></div>' +
+  '<div style="padding:8px 4px">' +
+  '<div style="font-size:12px;color:#958ea0;margin-bottom:6px">Диск</div>' +
+  '<div class="disk-bar"><div class="disk-fill" id="disk-fill" style="width:0%"></div></div>' +
+  '<div style="font-size:12px;color:#958ea0;margin-top:4px" id="disk-label">Загрузка...</div>' +
+  '</div>' +
+  '</aside>' +
+
+  /* ── MAIN ── */
+  '<main id="main-area" class="flex-1 flex flex-col" style="min-width:0">' +
+  '<div class="desktop-toolbar mobile-toolbar" style="background:#0e0e11;border-bottom:1px solid #1f1f22;padding:12px 24px;display:flex;align-items:center;gap:16px;flex-shrink:0">' +
+  '<button id="go-back-btn" class="btn-ghost" data-action="go-back" data-drop-path="" title="Назад" style="padding:6px 10px"><span class="material-symbols-outlined">arrow_back</span></button>' +
+  '<div id="breadcrumb" style="flex:1;display:flex;align-items:center;flex-wrap:wrap;font-size:14px;color:#cbc3d7"></div>' +
+  '<div style="position:relative">' +
+  '<input id="search-inp" class="inp" placeholder="Search files, folders..." style="width:200px;padding-left:32px">' +
+  '<span class="material-symbols-outlined" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#958ea0">search</span>' +
+  '</div>' +
+  '<button class="btn-ghost" data-action="view-list" title="Список"><span class="material-symbols-outlined">view_list</span></button>' +
+  '<button class="btn-ghost" data-action="view-grid" title="Сетка"><span class="material-symbols-outlined">grid_view</span></button>' +
+  '<button class="btn-ghost" data-action="toggle-theme" title="Theme">Theme</button>' +
+  '<button class="btn-primary" data-action="upload-btn">Загрузить</button>' +
+  '</div>' +
+  '<section id="mobile-storage" class="card" style="display:none">' +
+  '<div style="display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:18px">' +
+  '<h2 style="font-size:24px;line-height:30px;font-weight:800;color:#fff;margin:0">Storage</h2>' +
+  '<div style="font-size:16px;color:#ccc3d8;font-weight:700" id="mobile-disk-label">Загрузка...</div>' +
+  '</div>' +
+  '<div class="disk-bar"><div class="disk-fill" id="mobile-disk-fill" style="width:0%"></div></div>' +
+  '</section>' +
+  '<div class="mobile-actions" style="padding:12px 24px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #1f1f22;flex-shrink:0">' +
+  '<input type="file" id="upload-input" multiple style="display:none">' +
+  '<button class="btn-ghost" data-action="open-url-modal"><span class="material-symbols-outlined">link</span> URL</button>' +
+  '<button class="btn-ghost" data-action="mkdir"><span class="material-symbols-outlined">create_new_folder</span> Новая папка</button>' +
+  '<button class="btn-ghost" data-action="view-list"><span class="material-symbols-outlined">view_list</span></button>' +
+  '<button class="btn-ghost" data-action="view-grid"><span class="material-symbols-outlined">grid_view</span></button>' +
+  '</div>' +
+  '<div id="selection-bar">' +
+  '<div id="selection-count" style="font-size:13px;font-weight:600;color:#d0bcff;flex:1">0 selected</div>' +
+  '<button class="btn-ghost" data-action="download-selected">Скачать всё</button>' +
+  '<button class="btn-ghost" data-action="zip-selected">Скачать архивом</button>' +
+  '<button class="btn-ghost" data-action="share-selected">Публичная ссылка</button>' +
+  '<button class="btn-ghost" data-action="clear-selection">Сбросить</button>' +
+  '<button class="btn-ghost" data-action="delete-selected" style="color:#ffb4ab;border-color:#93000a">Удалить</button>' +
+  '</div>' +
+  '<div id="file-scroll" style="flex:1;overflow-y:auto;padding:16px 24px">' +
+  '<div id="file-area"><div style="color:#958ea0;padding:40px;text-align:center">Загрузка...</div></div>' +
+  '</div>' +
+  '<div class="card" style="margin:0 24px 16px;padding:16px">' +
+  '<div style="font-size:13px;font-weight:600;color:#cbc3d7;margin-bottom:10px">Активные загрузки</div>' +
+  '<div id="transfers-list"><div style="color:#494454;font-size:13px">Нет активных загрузок</div></div>' +
+  '</div>' +
+  '</main>' +
+  '<nav class="mobile-bottom-nav">' +
+  '<button class="bottom-nav-item" data-action="nav-home"><span class="material-symbols-outlined">home</span><span>Home</span></button>' +
+  '<button class="bottom-nav-item active" data-action="nav-home"><span class="material-symbols-outlined">folder</span><span>Files</span></button>' +
+  '<button class="bottom-nav-item" data-action="nav-recent"><span class="material-symbols-outlined">schedule</span><span>Recent</span></button>' +
+  '<button class="bottom-nav-item" data-action="upload-btn"><span class="material-symbols-outlined">upload</span><span>Upload</span></button>' +
+  '</nav>' +
+  '<aside id="preview-panel" class="preview-panel">' +
+  '<div class="preview-head">' +
+  '<div id="preview-title" style="font-weight:700;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Предпросмотр</div>' +
+  '<button class="btn-ghost" data-action="fullscreen-preview" style="padding:5px 9px" title="На весь экран"><span class="material-symbols-outlined">fullscreen</span></button>' +
+  '<button class="btn-ghost" data-action="download-preview" style="padding:5px 9px" title="Скачать"><span class="material-symbols-outlined">download</span></button>' +
+  '<button class="btn-ghost" data-action="share-preview" style="padding:5px 9px" title="Публичная ссылка"><span class="material-symbols-outlined">link</span></button>' +
+  '<button class="btn-ghost" data-action="close-preview" style="padding:5px 9px" title="Закрыть"><span class="material-symbols-outlined">close</span></button>' +
+  '</div>' +
+  '<div id="preview-body" class="preview-body"></div>' +
+  '<div id="preview-info"></div>' +
+  '</aside>' +
+
+  /* ── CONTEXT MENU ── */
+  '<div id="ctx-menu"></div>' +
+  '<div id="toast"><div id="toast-title" style="font-weight:700;font-size:13px;margin-bottom:6px"></div><div id="toast-body" style="font-size:12px;color:#cbc3d7;word-break:break-all"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn-ghost" data-action="copy-toast" style="padding:4px 9px">Копировать</button><button class="btn-ghost" data-action="hide-toast" style="padding:4px 9px">x</button></div></div>' +
+
+  /* ── DROP ZONE ── */
+  '<div id="drop-zone">' +
+  '<div style="font-size:48px">\u{1F4E5}</div>' +
+  '<div style="font-size:20px;font-weight:700;color:#d0bcff">Перетащите файлы для загрузки</div>' +
+  '<div style="font-size:13px;color:#958ea0">Отпустите, чтобы загрузить в текущую папку</div>' +
+  '</div>' +
+
+  /* ── MKDIR MODAL ── */
+  '<div id="upload-panel">' +
+  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+  '<div id="upload-title" style="font-size:13px;font-weight:700;color:#e4e1e6;flex:1">Upload</div>' +
+  '<button class="btn-ghost" data-action="hide-upload-panel" style="padding:3px 8px;font-size:12px">x</button>' +
+  '</div>' +
+  '<div id="upload-files" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px"></div>' +
+  '<div class="progress-track" style="height:8px;margin-bottom:8px"><div id="upload-fill" class="progress-fill" style="width:0%"></div></div>' +
+  '<div id="upload-status" style="font-size:12px;color:#958ea0">0%</div>' +
+  '</div>' +
+
+  '<div id="modal-mkdir" class="modal-backdrop" style="display:none">' +
+  '<div class="modal">' +
+  '<div style="font-weight:700;font-size:18px;margin-bottom:16px">Новая папка</div>' +
+  '<input id="mkdir-name" class="inp" placeholder="Название папки" style="margin-bottom:16px">' +
+  '<div style="display:flex;gap:10px;justify-content:flex-end">' +
+  '<button class="btn-ghost" data-action="close-mkdir">Отмена</button>' +
+  '<button class="btn-primary" data-action="confirm-mkdir">Создать</button>' +
+  '</div></div></div>' +
+
+  /* ── RENAME MODAL ── */
+  '<div id="modal-rename" class="modal-backdrop" style="display:none">' +
+  '<div class="modal">' +
+  '<div style="font-weight:700;font-size:18px;margin-bottom:16px">Переименовать</div>' +
+  '<div style="display:flex;align-items:center;margin-bottom:16px">' +
+  '<input id="rename-inp" class="inp" style="flex:1;min-width:0;border-top-right-radius:0;border-bottom-right-radius:0">' +
+  '<div id="rename-ext" class="inp" style="display:none;width:auto;flex:0 0 auto;border-left:0;border-top-left-radius:0;border-bottom-left-radius:0;color:#958ea0;background:#121216"></div>' +
+  '</div>' +
+  '<div style="display:flex;gap:10px;justify-content:flex-end">' +
+  '<button class="btn-ghost" data-action="close-rename">Отмена</button>' +
+  '<button class="btn-primary" data-action="confirm-rename">Сохранить</button>' +
+  '</div></div></div>' +
+
+  '<div id="modal-url" class="modal-backdrop" style="display:none">' +
+  '<div class="modal" style="width:460px">' +
+  '<div style="font-weight:700;font-size:18px;margin-bottom:6px">Загрузить по URL</div>' +
+  '<div style="font-size:12px;color:#958ea0;margin-bottom:14px">Файл попадёт в текущую папку CloudSpace</div>' +
+  '<input id="url-dl-inp" class="inp" placeholder="https://example.com/file.zip" style="margin-bottom:10px">' +
+  '<input id="url-name-inp" class="inp" placeholder="Имя файла, если нужно" style="margin-bottom:14px">' +
+  '<div id="url-status" style="font-size:12px;color:#958ea0;min-height:16px;margin-bottom:12px"></div>' +
+  '<div style="display:flex;gap:10px;justify-content:flex-end">' +
+  '<button class="btn-ghost" data-action="close-url-modal">Отмена</button>' +
+  '<button class="btn-primary" data-action="confirm-url-download">Загрузить</button>' +
+  '</div></div></div>' +
+
+  '<div id="modal-share" class="modal-backdrop" style="display:none">' +
+  '<div class="modal" style="width:460px">' +
+  '<div style="font-weight:700;font-size:18px;margin-bottom:6px">Публичная ссылка</div>' +
+  '<div id="share-target-label" style="font-size:12px;color:#958ea0;margin-bottom:14px">Настройки доступа</div>' +
+  '<label style="display:block;font-size:12px;color:#958ea0;margin-bottom:6px">Срок действия</label>' +
+  '<select id="share-expire-inp" class="inp" style="margin-bottom:12px">' +
+  '<option value="0">Без ограничения</option><option value="1">1 час</option><option value="24">1 день</option><option value="72">3 дня</option><option value="168">7 дней</option><option value="720">30 дней</option>' +
+  '</select>' +
+  '<label style="display:block;font-size:12px;color:#958ea0;margin-bottom:6px">Количество скачиваний</label>' +
+  '<input id="share-max-inp" class="inp" type="number" min="0" step="1" placeholder="0 = без ограничения" style="margin-bottom:12px">' +
+  '<div id="share-status" style="font-size:12px;color:#958ea0;min-height:16px;margin-bottom:12px"></div>' +
+  '<div style="display:flex;gap:10px;justify-content:flex-end">' +
+  '<button class="btn-ghost" data-action="close-share-modal">Отмена</button>' +
+  '<button class="btn-primary" data-action="confirm-share">Создать ссылку</button>' +
+  '</div></div></div>' +
+
+  '<script>' +
+  'var currentPath="",currentView=localStorage.getItem("fm-view")||"list";' +
+  'if(currentView!=="grid")currentView="list";' +
+  'var renameFp="",renameIsDir=false,renameExt="";' +
+  'var ctxFp="",ctxName="",ctxIsDir=false;' +
+  'var dragFp=null,dragName=null,dragIsDir=false,dragEl=null;' +
+  'var selectedItems={},lastEntries=[],lastBase="";' +
+  'var previewFp="",previewName="";' +
+  'var toastUrl="";' +
+  'var pendingShare=null;' +
+
+  /* ── UTILS ── */
+  'function H(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
+  'function fmtSize(b){if(!b)return "0 B";var u=["B","KB","MB","GB"],i=0;while(b>=1024&&i<3){b/=1024;i++;}return b.toFixed(i?1:0)+" "+u[i];}' +
+  'function fmtSpeed(b){return fmtSize(b||0)+"/s";}' +
+  'function fmtDate(ts){if(!ts)return "";return new Date(ts).toLocaleDateString("ru-RU",{day:"2-digit",month:"short",year:"numeric"});}' +
+  'function fmtDateTime(ts){if(!ts)return "";return new Date(ts).toLocaleString("ru-RU",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"});}' +
+  'function activePath(){return currentPath==="__recent__"?"":currentPath;}' +
+  'function parentPath(p){var parts=(p||"").split("/").filter(Boolean);parts.pop();return parts.join("/");}' +
+  'function splitExt(name,isDir){if(isDir)return {base:name,ext:""};var dot=name.lastIndexOf(".");if(dot<=0)return {base:name,ext:""};return {base:name.slice(0,dot),ext:name.slice(dot)};}' +
+  'function setView(v){currentView=v==="grid"?"grid":"list";localStorage.setItem("fm-view",currentView);if(currentPath!=="__recent__")loadDir();}' +
+  'function selectedList(){return Object.keys(selectedItems).map(function(k){return selectedItems[k];});}' +
+  'function updateSelectionBar(){var n=selectedList().length;document.getElementById("selection-count").textContent="Выбрано: "+n;document.getElementById("selection-bar").style.display=n?"flex":"none";}' +
+  'function clearSelection(refresh){selectedItems={};updateSelectionBar();if(refresh)renderContent(lastEntries,lastBase);}' +
+  'function toggleSelect(fp,name,isDir,checked){if(checked)selectedItems[fp]={fp:fp,name:name,isDir:isDir};else delete selectedItems[fp];updateSelectionBar();renderContent(lastEntries,lastBase);}' +
+  'function selectAllVisible(checked){selectedItems={};if(checked){for(var i=0;i<lastEntries.length;i++){var f=lastEntries[i];var fp=lastBase?(lastBase+"/"+f.name):f.name;selectedItems[fp]={fp:fp,name:f.name,isDir:!!f.isDir};}}updateSelectionBar();renderContent(lastEntries,lastBase);}' +
+  'function refreshCurrent(){if(currentPath==="__recent__")loadRecent();else loadDir();}' +
+  'function goBackPath(){var p=activePath();if(!p)return;navigateTo(parentPath(p));}' +
+  'function allVisibleSelected(files,base){if(!files.length)return false;for(var i=0;i<files.length;i++){var fp=base?(base+"/"+files[i].name):files[i].name;if(!selectedItems[fp])return false;}return true;}' +
+  'function selectedPayload(){return selectedList().map(function(x){return {path:x.fp,isDir:x.isDir};});}' +
+  'function itemParent(fp){var parts=(fp||"").split("/").filter(Boolean);parts.pop();return parts.join("/");}' +
+  'function moveItemTo(from,name,dest){dest=dest||"";if(!from||dest===from||dest.indexOf(from+"/")===0)return;var to=dest?(dest+"/"+name):name;if(to===from)return;fetch("/api/fm/move",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({from:from,to:to})}).then(function(r){return r.json();}).then(function(d){if(d.ok)navigateTo(activePath());else alert(d.error||"Ошибка перемещения");});}' +
+  'function showToast(title,body,url){toastUrl=url||"";document.getElementById("toast-title").textContent=title;document.getElementById("toast-body").textContent=body||"";document.getElementById("toast").style.display="block";if(url&&navigator.clipboard)navigator.clipboard.writeText(url).catch(function(){});}' +
+  'function hideToast(){document.getElementById("toast").style.display="none";}' +
+  'function copyToast(){if(toastUrl&&navigator.clipboard)navigator.clipboard.writeText(toastUrl).then(function(){showToast("Скопировано",toastUrl,toastUrl);});}' +
+  'function copyOrShowLink(url){var full=window.location.origin+url;showToast("Публичная ссылка готова",full,full);}' +
+  'function applyTheme(){var light=localStorage.getItem("fm-theme")==="light";document.body.classList.toggle("light",light);}' +
+  'function toggleTheme(){localStorage.setItem("fm-theme",document.body.classList.contains("light")?"dark":"light");applyTheme();}' +
+  'function fileKind(name){var ext=(name.split(".").pop()||"").toLowerCase();if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext))return"image";if(["mp4","webm","ogg","mov","mkv"].includes(ext))return"video";if(["mp3","wav","m4a","flac","aac","oga"].includes(ext))return"audio";if(ext==="pdf")return"pdf";if(["zip","rar","7z","tar","gz"].includes(ext))return"archive";if(["exe","msi","apk","deb"].includes(ext))return"app";if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf"].includes(ext))return"text";return"file";}' +
+  'function fileThumb(name,fp,isDir){if(isDir)return \'<div class="file-thumb"><span class="material-symbols-outlined">folder</span></div>\';var k=fileKind(name);if(k==="image")return \'<div class="file-thumb"><img src="/api/fm/preview?path=\'+encodeURIComponent(fp)+\'"></div>\';var icons={video:"movie",audio:"audio_file",pdf:"picture_as_pdf",archive:"folder_zip",app:"deployed_code",text:"article",file:"draft"};return \'<div class="file-thumb"><span class="material-symbols-outlined">\'+(icons[k]||"draft")+\'</span></div>\';}' +
+  'function makeZip(items,name,startDownload){return fetch("/api/fm/zip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:items,name:name||"cloudspace.zip"})}).then(function(r){return r.json();}).then(function(d){if(!d.ok)throw new Error(d.error||"Ошибка архива");if(startDownload)window.location.href=d.url;return d;});}' +
+  'function downloadSelected(){var items=selectedList();if(!items.length)return;if(items.some(function(x){return x.isDir;})||items.length>5){zipSelected();return;}items.forEach(function(it,i){setTimeout(function(){var a=document.createElement("a");a.href="/api/fm/download?path="+encodeURIComponent(it.fp);a.download=it.name;document.body.appendChild(a);a.click();a.remove();},i*350);});}' +
+  'function zipSelected(){var items=selectedPayload();if(!items.length)return;makeZip(items,"cloudspace.zip",true).catch(function(e){alert(e.message);});}' +
+  'function openShareModal(payload,label){pendingShare=payload;document.getElementById("share-target-label").textContent=label||"Настройки доступа";document.getElementById("share-expire-inp").value="0";document.getElementById("share-max-inp").value="";document.getElementById("share-status").textContent="";document.getElementById("modal-share").style.display="flex";}' +
+  'function closeShareModal(){document.getElementById("modal-share").style.display="none";pendingShare=null;}' +
+  'function confirmShare(){if(!pendingShare)return;var body=Object.assign({},pendingShare);body.expiresIn=parseInt(document.getElementById("share-expire-inp").value||"0",10);body.maxDownloads=parseInt(document.getElementById("share-max-inp").value||"0",10);var st=document.getElementById("share-status");st.textContent="Создаю ссылку...";fetch("/api/fm/share",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){if(d.ok){closeShareModal();copyOrShowLink(d.url);if(previewFp)renderPreviewInfo(previewFp,previewName);}else st.textContent=d.error||"Ошибка ссылки";}).catch(function(){st.textContent="Ошибка ссылки";});}' +
+  'function shareSelected(){var items=selectedPayload();if(!items.length)return;openShareModal({items:items},"Выбрано объектов: "+items.length);}' +
+  'function shareOne(fp){openShareModal({path:fp},"Объект: "+fp);}' +
+
+  /* ── BREADCRUMB ── */
+  'function renderBreadcrumb(p){' +
+  '  var el=document.getElementById("breadcrumb");' +
+  '  var parts=p?p.split("/").filter(Boolean):[];' +
+  '  var back=document.getElementById("go-back-btn");if(back)back.dataset.dropPath=parentPath(p);' +
+  '  var html=\'<span data-action="navigate" data-drop-path="" data-fp="" style="color:#a078ff;cursor:pointer;font-weight:600">Мои файлы</span>\';' +
+  '  var built="";' +
+  '  for(var i=0;i<parts.length;i++){' +
+  '    built=built?(built+"/"+parts[i]):parts[i];' +
+  '    html+=\'<span class="breadcrumb-sep">/</span>\';' +
+  '    html+=\'<span data-action="navigate" data-drop-path="\'+H(built)+\'" data-fp="\'+H(built)+\'" style="cursor:pointer;color:#cbc3d7">\'+H(parts[i])+"</span>";' +
+  '  }' +
+  '  el.innerHTML=html;' +
+  '}' +
+
+  /* ── NAVIGATE & LOAD ── */
+  'function navigateTo(p){p=p||"";if(p!==currentPath)clearSelection(false);currentPath=p;loadDir();}' +
+  'function loadDir(){' +
+  '  renderBreadcrumb(currentPath);' +
+  '  document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">Загрузка...</div>\';' +
+  '  fetch("/api/fm/list?path="+encodeURIComponent(currentPath))' +
+  '  .then(function(r){return r.json();})' +
+  '  .then(function(d){' +
+  '    if(d.error){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\'+H(d.error)+"</div>";return;}' +
+  '    renderContent(d.entries||[]);' +
+  '  })' +
+  '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">Ошибка загрузки</div>\';});' +
+  '}' +
+  'function renderContent(entries,base){' +
+  '  lastEntries=entries||[];lastBase=(base!==undefined)?base:currentPath;' +
+  '  document.getElementById("file-area").innerHTML=' +
+  '    (currentView==="grid"?fileGridHtml(lastEntries,lastBase):fileListHtml(lastEntries,lastBase));' +
+  '}' +
+
+  /* ── LIST HTML ── */
+  'function fileListHtml(files,base){' +
+  '  if(!files.length)return \'<div style="color:#494454;padding:40px;text-align:center">Папка пуста</div>\';' +
+  '  var h=\'<div style="background:#1b1b1e;border:1px solid #494454;border-radius:12px;overflow:hidden">\';' +
+  '  h+=\'<div class="file-row" style="font-size:12px;font-weight:600;color:#494454;text-transform:uppercase;letter-spacing:.05em;cursor:default;background:#131316">\';' +
+  '  h+=\'<div style="width:20px"><input class="select-check" type="checkbox" data-action="select-all" \'+(allVisibleSelected(files,base)?"checked":"")+\'></div>\';' +
+  '  h+=\'<div style="width:28px"></div><div style="flex:1">Название</div>\';' +
+  '  h+=\'<div style="width:100px;text-align:right">Размер</div>\';' +
+  '  h+=\'<div style="width:130px;text-align:right">Изменён</div>\';' +
+  '  h+=\'<div style="width:54px"></div></div>\';' +
+  '  for(var i=0;i<files.length;i++){' +
+  '    var f=files[i];' +
+  '    var fp=base?(base+"/"+f.name):f.name;' +
+  '    var checked=!!selectedItems[fp];' +
+  '    h+=\'<div class="file-row \'+(checked?"selected":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'">\';' +
+  '    h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'"\';' +
+  '    if(checked)h+=" checked";' +
+  '    h+=">";' +
+  '    h+=fileThumb(f.name,fp,f.isDir);' +
+  '    if(f.isDir){' +
+  '      h+=\'<div data-meta="\'+(f.fileCount!=null?H(f.fileCount+" items"):"Folder")+\'" style="flex:1;font-weight:500;color:#d0bcff;cursor:pointer;pointer-events:none">\'+H(f.name)+"</div>";' +
+  '    }else{' +
+  '      h+=\'<div data-meta="\'+H(fmtSize(f.size)+" • "+fmtDate(f.mtime))+\'" style="flex:1;color:#e4e1e6;pointer-events:none">\'+H(f.name)+"</div>";' +
+  '    }' +
+  '    h+=\'<div style="width:100px;text-align:right;font-size:13px;color:#958ea0;pointer-events:none">\'+fmtSize(f.size)+"</div>";' +
+  '    h+=\'<div style="width:130px;text-align:right;font-size:12px;color:#494454;pointer-events:none">\'+fmtDate(f.mtime)+"</div>";' +
+  '    h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Действия"><span class="material-symbols-outlined">more_vert</span></button>\';' +
+  '    h+="</div>";' +
+  '  }' +
+  '  return h+"</div>";' +
+  '}' +
+
+  /* ── GRID HTML ── */
+  'function fileGridHtml(files,base){' +
+  '  if(!files.length)return \'<div style="color:#494454;padding:40px;text-align:center">Папка пуста</div>\';' +
+  '  var h=\'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px">\';' +
+  '  for(var i=0;i<files.length;i++){' +
+  '    var f=files[i];' +
+  '    var fp=base?(base+"/"+f.name):f.name;' +
+  '    var checked=!!selectedItems[fp];' +
+  '    h+=\'<div class="file-grid-item \'+(checked?"selected":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:relative">\';' +
+  '    h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:absolute;top:10px;left:10px"\';' +
+  '    if(checked)h+=" checked";' +
+  '    h+=">";' +
+  '    h+=fileThumb(f.name,fp,f.isDir);' +
+  '    h+=\'<div style="font-size:13px;font-weight:700;color:\'+( f.isDir?"#d0bcff":"#e4e1e6" )+\';word-break:break-word;max-width:150px;text-align:left;pointer-events:none">\'+H(f.name)+"</div>";' +
+  '    h+=\'<div style="font-size:11px;color:#958ea0;pointer-events:none">\'+(f.isDir?(fmtSize(f.size)+" • "+(f.fileCount||0)+" items"):fmtSize(f.size))+"</div>";' +
+  '    h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Действия" style="position:absolute;right:10px;top:10px"><span class="material-symbols-outlined">more_vert</span></button>\';' +
+  '    h+="</div>";' +
+  '  }' +
+  '  return h+"</div>";' +
+  '}' +
+
+  /* ── RECENT ── */
+  'function loadRecent(){' +
+  '  clearSelection(false);' +
+  '  currentPath="__recent__";' +
+  '  document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">Загрузка...</div>\';' +
+  '  renderBreadcrumb("");' +
+  '  fetch("/api/fm/recent").then(function(r){return r.json();})' +
+  '  .then(function(d){' +
+  '    if(d.error){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\'+H(d.error)+"</div>";return;}' +
+  '    var entries=(d.entries||[]).map(function(e){return{name:e.relPath,size:e.size,mtime:e.mtime,isDir:false};});lastEntries=entries;lastBase="";' +
+  '    document.getElementById("file-area").innerHTML=\'<div style="font-size:13px;color:#958ea0;margin-bottom:12px">Недавние файлы</div>\'+fileListHtml(entries,"");' +
+  '  })' +
+  '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">Ошибка</div>\';});' +
+  '}' +
+
+  /* ── SEARCH ── */
+  'function doSearch(q){' +
+  '  if(!q.trim())return navigateTo(activePath());' +
+  '  clearSelection(false);' +
+  '  document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">Поиск...</div>\';' +
+  '  fetch("/api/fm/search?q="+encodeURIComponent(q)).then(function(r){return r.json();})' +
+  '  .then(function(d){' +
+  '    if(d.error){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\'+H(d.error)+"</div>";return;}' +
+  '    var entries=(d.entries||[]).map(function(e){return{name:e.relPath,size:e.size,mtime:e.mtime,isDir:e.isDir};});lastEntries=entries;lastBase="";' +
+  '    if(!entries.length){document.getElementById("file-area").innerHTML=\'<div style="color:#494454;padding:40px;text-align:center">Ничего не найдено</div>\';return;}' +
+  '    document.getElementById("file-area").innerHTML=fileListHtml(entries,"");' +
+  '  })' +
+  '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">Ошибка</div>\';});' +
+  '}' +
+
+  /* ── MKDIR ── */
+  'function openMkdirModal(){document.getElementById("modal-mkdir").style.display="flex";document.getElementById("mkdir-name").value="";document.getElementById("mkdir-name").focus();}' +
+  'function closeMkdirModal(){document.getElementById("modal-mkdir").style.display="none";}' +
+  'function createFolder(){' +
+  '  var name=document.getElementById("mkdir-name").value.trim();' +
+  '  if(!name)return;' +
+  '  var p=activePath();' +
+  '  fetch("/api/fm/mkdir",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:p,name:name})})' +
+  '  .then(function(r){return r.json();}).then(function(d){closeMkdirModal();if(d.ok)navigateTo(p);else alert(d.error||"Ошибка");});' +
+  '}' +
+
+  /* ── RENAME ── */
+  'function openRenameModal(fp,name,isDir){' +
+  '  renameFp=fp;renameIsDir=isDir;' +
+  '  var parts=splitExt(name,isDir);renameExt=parts.ext;' +
+  '  document.getElementById("rename-inp").value=parts.base;' +
+  '  var extEl=document.getElementById("rename-ext");' +
+  '  extEl.textContent=renameExt;' +
+  '  extEl.style.display=renameExt?"block":"none";' +
+  '  document.getElementById("modal-rename").style.display="flex";' +
+  '  document.getElementById("rename-inp").focus();' +
+  '  document.getElementById("rename-inp").select();' +
+  '}' +
+  'function closeRenameModal(){document.getElementById("modal-rename").style.display="none";}' +
+  'function doRename(){' +
+  '  var newName=document.getElementById("rename-inp").value.trim();' +
+  '  if(!newName)return;' +
+  '  if(renameExt&&newName.toLowerCase().endsWith(renameExt.toLowerCase()))newName=newName.slice(0,-renameExt.length);' +
+  '  newName=newName+renameExt;' +
+  '  fetch("/api/fm/rename",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({oldPath:renameFp,newName:newName})})' +
+  '  .then(function(r){return r.json();}).then(function(d){closeRenameModal();if(d.ok)navigateTo(activePath());else alert(d.error||"Ошибка");});' +
+  '}' +
+
+  /* ── DELETE ── */
+  'function openUrlModal(){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value="";document.getElementById("url-name-inp").value="";document.getElementById("url-status").textContent="";setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
+  'function closeUrlModal(){document.getElementById("modal-url").style.display="none";}' +
+  'function addUrlDownload(){var url=document.getElementById("url-dl-inp").value.trim();var name=document.getElementById("url-name-inp").value.trim();var st=document.getElementById("url-status");if(!url){st.textContent="Вставь URL";return;}st.textContent="Добавляю загрузку...";fetch("/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:activePath()})}).then(function(r){return r.json();}).then(function(d){if(d.ok){st.textContent="Загрузка добавлена";closeUrlModal();loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
+  'function closePreview(){document.getElementById("preview-panel").classList.remove("open");document.getElementById("preview-body").classList.remove("media-preview");document.getElementById("preview-body").innerHTML="";document.getElementById("preview-info").innerHTML="";}' +
+  'function metaRow(label,value){return \'<div class="meta-row"><div class="meta-lbl">\'+H(label)+\'</div><div class="meta-val">\'+(value||"—")+\'</div></div>\';}' +
+  'function renderPreviewInfo(fp,name){var info=document.getElementById("preview-info");info.innerHTML=\'<div style="font-size:12px;color:#958ea0">Загрузка информации...</div>\';fetch("/api/fm/meta?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(m){if(m.error){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);return;}var links=m.publicLinks||[];var linkHtml=links.length?links.map(function(x){return \'<a href="\'+H(x.url)+\'" target="_blank" style="color:#d2bbff">\'+H(window.location.origin+x.url)+\'</a>\';}).join("<br>"):"Нет";var h="";h+=metaRow("Имя",m.name||name);h+=metaRow("Путь",m.path||fp);h+=metaRow("Размер",fmtSize(m.size));h+=metaRow("Тип",m.ext?m.ext.slice(1).toUpperCase():"Файл");h+=metaRow("Загружен",fmtDateTime(m.created));h+=metaRow("Изменён",fmtDateTime(m.mtime));h+=metaRow("Публичная ссылка",linkHtml);info.innerHTML=h;}).catch(function(){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);});}' +
+  'function openPreview(fp,name,isDir){if(isDir){navigateTo(fp);return;}previewFp=fp;previewName=name;var panel=document.getElementById("preview-panel");var body=document.getElementById("preview-body");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");body.innerHTML="";renderPreviewInfo(fp,name);var ext=(name.split(".").pop()||"").toLowerCase();var src="/api/fm/preview?path="+encodeURIComponent(fp);if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext)){body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(["mp4","webm","ogg","mov"].includes(ext)){body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video class="preview-media" controls src="${src}"></video></div>`;return;}if(["mp3","wav","m4a","flac","aac","oga"].includes(ext)){body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><audio controls src="${src}" style="width:100%"></audio></div>`;return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
+  'function deleteItem(fp,name,isDir){' +
+  '  if(!confirm("Удалить " + name + "?"))return;' +
+  '  fetch("/api/fm/delete",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:fp,isDir:isDir})})' +
+  '  .then(function(r){return r.json();}).then(function(d){if(d.ok)navigateTo(activePath());else alert(d.error||"Ошибка");});' +
+  '}' +
+
+  /* ── UPLOAD ── */
+  'function deleteSelected(){' +
+  '  var items=selectedList();' +
+  '  if(!items.length)return;' +
+  '  if(!confirm("Удалить выбранные: " + items.length + "?"))return;' +
+  '  Promise.all(items.map(function(it){return fetch("/api/fm/delete",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:it.fp,isDir:it.isDir})}).then(function(r){return r.json();});}))' +
+  '  .then(function(results){var failed=results.filter(function(x){return !x.ok;});clearSelection(false);refreshCurrent();if(failed.length)alert("Не удалось удалить: "+failed.length);})' +
+  '  .catch(function(){alert("Ошибка удаления");});' +
+  '}' +
+  'function uploadFiles(files,folderPath){' +
+  '  if(!files||!files.length)return;' +
+  '  var panel=document.getElementById("upload-panel");' +
+  '  var fill=document.getElementById("upload-fill");' +
+  '  var status=document.getElementById("upload-status");' +
+  '  var title=document.getElementById("upload-title");' +
+  '  var list=document.getElementById("upload-files");' +
+  '  panel.style.display="block";fill.classList.remove("done");fill.style.width="0%";status.textContent="0%";title.textContent="Загрузка файлов";' +
+  '  var names=[];for(var n=0;n<Math.min(files.length,4);n++)names.push(\'<div class="upload-file">\'+H(files[n].name)+\'</div>\');' +
+  '  if(files.length>4)names.push(\'<div class="upload-file">+ \'+(files.length-4)+\' more</div>\');' +
+  '  list.innerHTML=names.join("");' +
+  '  var fd=new FormData();' +
+  '  for(var i=0;i<files.length;i++)fd.append("files",files[i]);' +
+  '  var xhr=new XMLHttpRequest();' +
+  '  xhr.open("POST","/api/fm/upload?path="+encodeURIComponent(folderPath||""));' +
+  '  xhr.upload.onprogress=function(e){if(e.lengthComputable){var pct=Math.round(e.loaded/e.total*100);fill.style.width=pct+"%";status.textContent=pct+"%";}};' +
+  '  xhr.onload=function(){if(xhr.status>=200&&xhr.status<300){fill.style.width="100%";fill.classList.add("done");status.textContent="Готово";title.textContent="Файлы загружены";refreshCurrent();loadDisk();setTimeout(function(){panel.style.display="none";},1800);}else{status.textContent="Ошибка загрузки";}};' +
+  '  xhr.onerror=function(){status.textContent="Ошибка загрузки";};' +
+  '  xhr.send(fd);' +
+  '}' +
+
+  /* ── CONTEXT MENU ── */
+  'function showCtxMenu(x,y,fp,name,isDir){' +
+  '  ctxFp=fp;ctxName=name;ctxIsDir=isDir;' +
+  '  var m=document.getElementById("ctx-menu");' +
+  '  var h="";' +
+  '  if(isDir){' +
+  '    h+=\'<div class="ctx-item" data-ctx="open">\u{1F4C2} Открыть</div>\';' +
+  '  }else{' +
+  '    h+=\'<div class="ctx-item" data-ctx="download">↓ Скачать</div>\';' +
+  '  }' +
+  '  if(!isDir)h+=\'<div class="ctx-item" data-ctx="preview">👁 Предпросмотр</div>\';' +
+  '  h+=\'<div class="ctx-sep"></div>\';' +
+  '  h+=\'<div class="ctx-item" data-ctx="share">🔗 Публичная ссылка</div>\';' +
+  '  h+=\'<div class="ctx-item" data-ctx="rename">✏️ Переименовать</div>\';' +
+  '  h+=\'<div class="ctx-item" data-ctx="copypath">\u{1F4CB} Копировать путь</div>\';' +
+  '  h+=\'<div class="ctx-sep"></div>\';' +
+  '  h+=\'<div class="ctx-item danger" data-ctx="delete">\u{1F5D1}️ Удалить</div>\';' +
+  '  m.innerHTML=h;' +
+  '  m.style.display="block";' +
+  '  var mw=200,mh=m.scrollHeight||160;' +
+  '  var ww=window.innerWidth,wh=window.innerHeight;' +
+  '  m.style.left=Math.max(8,(x+mw>ww?ww-mw-8:x))+"px";' +
+  '  m.style.top=Math.max(8,(y+mh>wh?wh-mh-8:y))+"px";' +
+  '}' +
+  'function hideCtxMenu(){document.getElementById("ctx-menu").style.display="none";}' +
+
+  /* ── DRAG & DROP ── */
+  'function clearDragOver(){document.querySelectorAll(".drag-over,.drop-target").forEach(function(el){el.classList.remove("drag-over");el.classList.remove("drop-target");});}' +
+
+  /* ── TRANSFERS ── */
+  'function loadTransfers(){' +
+  '  fetch("/api/downloads").then(function(r){return r.json();})' +
+  '  .then(function(d){' +
+  '    var items=Array.isArray(d)?d:[];' +
+  '    if(!items.length){document.getElementById("transfers-list").innerHTML=\'<div style="color:#494454;font-size:13px">Нет активных загрузок</div>\';return;}' +
+  '    var h="";' +
+  '    for(var i=0;i<items.length;i++){' +
+  '      var t=items[i],pct=t.progress||0,name=t.name||t.gid||"Загрузка",left=Math.max(0,(t.size||0)-(t.downloaded||0));' +
+  '      var eta=(t.speed>0&&left>0)?Math.ceil(left/t.speed):0;' +
+  '      h+=\'<div class="transfer-card">\';' +
+  '      h+=\'<div class="transfer-top"><div class="transfer-name">\'+H(name)+\'</div><div class="transfer-status">\'+H(t.status||"unknown")+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+pct+\'%</div></div>\';' +
+  '      h+=\'<div class="progress-track" style="height:8px"><div class="progress-fill\'+( pct>=100?" done":"" )+\'" style="width:\'+pct+\'%"></div></div>\';' +
+  '      h+=\'<div class="transfer-meta"><div>Скачано: \'+fmtSize(t.downloaded)+\' / \'+fmtSize(t.size)+\'</div><div>Скорость: \'+fmtSpeed(t.speed)+\'</div><div>Осталось: \'+(eta?Math.ceil(eta/60)+" мин":"—")+\'</div><div>Соединения: \'+(t.connections||0)+\'</div></div>\';' +
+  '      if(t.errorMessage)h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(t.errorMessage)+\'</div>\';' +
+  '      h+=\'<div class="transfer-controls">\';' +
+  '      if(t.status==="active")h+=\'<button class="btn-ghost" data-action="transfer-pause" data-gid="\'+H(t.gid)+\'"><span class="material-symbols-outlined">pause</span> Пауза</button>\';' +
+  '      if(t.status==="paused"||t.status==="waiting")h+=\'<button class="btn-ghost" data-action="transfer-resume" data-gid="\'+H(t.gid)+\'"><span class="material-symbols-outlined">play_arrow</span> Продолжить</button>\';' +
+  '      h+=\'<button class="btn-ghost" data-action="transfer-remove" data-gid="\'+H(t.gid)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> Убрать</button>\';' +
+  '      h+=\'</div></div>\';' +
+  '    }' +
+  '    document.getElementById("transfers-list").innerHTML=h;' +
+  '  }).catch(function(){});' +
+  '}' +
+
+  /* ── DISK ── */
+  'function loadDisk(){' +
+  '  fetch("/api/fm/list?path=").then(function(r){return r.json();})' +
+  '  .then(function(d){' +
+  '    if(d.diskUsed!=null&&d.diskTotal!=null){' +
+  '      var pct=Math.round(d.diskUsed/d.diskTotal*100);' +
+  '      document.getElementById("disk-fill").style.width=pct+"%";' +
+  '      document.getElementById("disk-label").textContent=fmtSize(d.diskUsed)+" / "+fmtSize(d.diskTotal);' +
+  '      var mf=document.getElementById("mobile-disk-fill"),ml=document.getElementById("mobile-disk-label");' +
+  '      if(mf)mf.style.width=pct+"%";' +
+  '      if(ml)ml.textContent=fmtSize(d.diskUsed)+" / "+fmtSize(d.diskTotal);' +
+  '    }' +
+  '  }).catch(function(){});' +
+  '}' +
+
+  /* ── CLICK DELEGATION ── */
+  'document.addEventListener("click",function(e){' +
+  '  /* context menu item */\n' +
+  '  var ctx=e.target.closest("[data-ctx]");' +
+  '  if(ctx){' +
+  '    var ca=ctx.dataset.ctx;' +
+  '    hideCtxMenu();' +
+  '    if(ca==="open")navigateTo(ctxFp);' +
+  '    else if(ca==="download")window.location.href="/api/fm/download?path="+encodeURIComponent(ctxFp);' +
+  '    else if(ca==="preview")openPreview(ctxFp,ctxName,ctxIsDir);' +
+  '    else if(ca==="share")shareOne(ctxFp);' +
+  '    else if(ca==="rename")openRenameModal(ctxFp,ctxName,ctxIsDir);' +
+  '    else if(ca==="delete")deleteItem(ctxFp,ctxName,ctxIsDir);' +
+  '    else if(ca==="copypath"){navigator.clipboard&&navigator.clipboard.writeText(ctxFp).catch(function(){});}' +
+  '    return;' +
+  '  }' +
+  '  if(!e.target.closest("#ctx-menu"))hideCtxMenu();' +
+  '  /* action buttons */\n' +
+  '  var el=e.target.closest("[data-action]");' +
+  '  if(!el)return;' +
+  '  var action=el.dataset.action;' +
+  '  if(action==="focus-search"){var si=document.getElementById("search-inp");if(si){si.focus();si.scrollIntoView({block:"center",behavior:"smooth"});}return;}' +
+  '  if(action==="item-menu"){e.preventDefault();e.stopPropagation();var r=el.getBoundingClientRect();showCtxMenu(r.right-190,r.bottom+6,el.dataset.fp,el.dataset.name,el.dataset.dir==="true");return;}' +
+  '  if(el.classList&&el.classList.contains("bottom-nav-item")){document.querySelectorAll(".bottom-nav-item").forEach(function(x){x.classList.remove("active");});el.classList.add("active");}' +
+  '  if(action==="navigate")navigateTo(el.dataset.fp||"");' +
+  '  else if(action==="go-back")goBackPath();' +
+  '  else if(action==="select-item"){toggleSelect(el.dataset.fp,el.dataset.name,el.dataset.dir==="true",el.checked);}' +
+  '  else if(action==="select-all"){selectAllVisible(el.checked);}' +
+  '  else if(action==="clear-selection"){clearSelection(true);}' +
+  '  else if(action==="download-selected"){downloadSelected();}' +
+  '  else if(action==="zip-selected"){zipSelected();}' +
+  '  else if(action==="share-selected"){shareSelected();}' +
+  '  else if(action==="delete-selected"){deleteSelected();}' +
+  '  else if(action==="hide-upload-panel"){document.getElementById("upload-panel").style.display="none";}' +
+  '  else if(action==="hide-toast"){hideToast();}' +
+  '  else if(action==="copy-toast"){copyToast();}' +
+  '  else if(action==="toggle-theme"){toggleTheme();}' +
+  '  else if(action==="share-one"){shareOne(el.dataset.fp);}' +
+  '  else if(action==="preview"){openPreview(el.dataset.fp,el.dataset.name,el.dataset.dir==="true");}' +
+  '  else if(action==="open-url-modal"){openUrlModal();}' +
+  '  else if(action==="close-url-modal"){closeUrlModal();}' +
+  '  else if(action==="confirm-url-download"){addUrlDownload();}' +
+  '  else if(action==="close-share-modal"){closeShareModal();}' +
+  '  else if(action==="confirm-share"){confirmShare();}' +
+  '  else if(action==="close-preview"){closePreview();}' +
+  '  else if(action==="fullscreen-preview"){var w=document.getElementById("preview-media-wrap")||document.getElementById("preview-body");if(w&&w.requestFullscreen)w.requestFullscreen();}' +
+  '  else if(action==="download-preview"){if(previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);}' +
+  '  else if(action==="share-preview"){if(previewFp)shareOne(previewFp);}' +
+  '  else if(action==="transfer-pause"){fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid)+"/pause",{method:"POST"}).then(loadTransfers);}' +
+  '  else if(action==="transfer-resume"){fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid)+"/resume",{method:"POST"}).then(loadTransfers);}' +
+  '  else if(action==="transfer-remove"){if(confirm("Убрать загрузку?"))fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid),{method:"DELETE"}).then(loadTransfers);}' +
+  '  else if(action==="nav-home"){document.querySelectorAll(".nav-item").forEach(function(x){x.classList.remove("active");});el.classList.add("active");navigateTo("");}' +
+  '  else if(action==="nav-recent"){document.querySelectorAll(".nav-item").forEach(function(x){x.classList.remove("active");});el.classList.add("active");loadRecent();}' +
+  '  else if(action==="view-list"){setView("list");}' +
+  '  else if(action==="view-grid"){setView("grid");}' +
+  '  else if(action==="mkdir")openMkdirModal();' +
+  '  else if(action==="close-mkdir")closeMkdirModal();' +
+  '  else if(action==="confirm-mkdir")createFolder();' +
+  '  else if(action==="rename")openRenameModal(el.dataset.fp,el.dataset.name,el.dataset.dir==="true");' +
+  '  else if(action==="close-rename")closeRenameModal();' +
+  '  else if(action==="confirm-rename")doRename();' +
+  '  else if(action==="delete")deleteItem(el.dataset.fp,el.dataset.name,el.dataset.dir==="true");' +
+  '  else if(action==="upload-btn")document.getElementById("upload-input").click();' +
+  '});' +
+
+  /* ── CLICK on file row to open folder ── */
+  'document.addEventListener("click",function(e){' +
+  '  if(e.target.closest("[data-action]")||e.target.closest("[data-ctx]"))return;' +
+  '  var row=e.target.closest("[data-fp][data-dir]");' +
+  '  if(!row)return;' +
+  '  if(row.dataset.dir==="true")navigateTo(row.dataset.fp);else openPreview(row.dataset.fp,row.dataset.name,false);' +
+  '});' +
+
+  /* ── CONTEXT MENU trigger ── */
+  'document.addEventListener("contextmenu",function(e){' +
+  '  var row=e.target.closest("[data-fp][data-name]");' +
+  '  if(!row){hideCtxMenu();return;}' +
+  '  e.preventDefault();' +
+  '  showCtxMenu(e.clientX,e.clientY,row.dataset.fp,row.dataset.name,row.dataset.dir==="true");' +
+  '});' +
+  'document.addEventListener("scroll",hideCtxMenu,true);' +
+
+  /* ── DRAG START ── */
+  'document.addEventListener("dragstart",function(e){' +
+  '  var row=e.target.closest("[data-fp][data-name]");' +
+  '  if(!row)return;' +
+  '  dragFp=row.dataset.fp;dragName=row.dataset.name;dragIsDir=row.dataset.dir==="true";dragEl=row;' +
+  '  e.dataTransfer.effectAllowed="move";' +
+  '  e.dataTransfer.setData("text/plain",dragFp);' +
+  '  setTimeout(function(){if(dragEl)dragEl.classList.add("dragging");},0);' +
+  '});' +
+
+  /* ── DRAG END ── */
+  'document.addEventListener("dragend",function(){' +
+  '  if(dragEl)dragEl.classList.remove("dragging");' +
+  '  dragEl=null;dragFp=null;' +
+  '  clearDragOver();' +
+  '  document.getElementById("drop-zone").classList.remove("active");' +
+  '});' +
+
+  /* ── DRAG OVER ── */
+  'document.addEventListener("dragover",function(e){' +
+  '  /* internal move: drag over a folder */\n' +
+  '  if(dragFp){' +
+  '    var dropTarget=e.target.closest("[data-drop-path]");' +
+  '    if(dropTarget){' +
+  '      e.preventDefault();e.dataTransfer.dropEffect="move";' +
+  '      clearDragOver();dropTarget.classList.add("drop-target");' +
+  '      return;' +
+  '    }' +
+  '    var target=e.target.closest("[data-dir=\'true\'][data-fp]");' +
+  '    if(target&&target.dataset.fp!==dragFp){' +
+  '      e.preventDefault();e.dataTransfer.dropEffect="move";' +
+  '      clearDragOver();target.classList.add("drag-over");' +
+  '      return;' +
+  '    }' +
+  '    clearDragOver();' +
+  '    return;' +
+  '  }' +
+  '  /* external files */\n' +
+  '  if(e.dataTransfer.types&&Array.from(e.dataTransfer.types).includes("Files")){' +
+  '    e.preventDefault();e.dataTransfer.dropEffect="copy";' +
+  '    document.getElementById("drop-zone").classList.add("active");' +
+  '  }' +
+  '});' +
+
+  /* ── DRAG LEAVE ── */
+  'document.addEventListener("dragleave",function(e){' +
+  '  if(!e.relatedTarget){' +
+  '    clearDragOver();' +
+  '    document.getElementById("drop-zone").classList.remove("active");' +
+  '  }' +
+  '});' +
+
+  /* ── DROP ── */
+  'document.addEventListener("drop",function(e){' +
+  '  clearDragOver();' +
+  '  document.getElementById("drop-zone").classList.remove("active");' +
+  '  /* external file drop */\n' +
+  '  if(!dragFp&&e.dataTransfer.files&&e.dataTransfer.files.length){' +
+  '    e.preventDefault();' +
+  '    uploadFiles(e.dataTransfer.files,activePath());' +
+  '    return;' +
+  '  }' +
+  '  /* internal move */\n' +
+  '  if(!dragFp)return;' +
+  '  var dropTarget=e.target.closest("[data-drop-path]");' +
+  '  if(dropTarget){' +
+  '    e.preventDefault();' +
+  '    var destDrop=dropTarget.dataset.dropPath||"";' +
+  '    var fromDrop=dragFp,nameDrop=dragName;' +
+  '    dragFp=null;' +
+  '    moveItemTo(fromDrop,nameDrop,destDrop);' +
+  '    return;' +
+  '  }' +
+  '  var target=e.target.closest("[data-dir=\'true\'][data-fp]");' +
+  '  if(!target||target.dataset.fp===dragFp){dragFp=null;return;}' +
+  '  e.preventDefault();' +
+  '  var destFp=target.dataset.fp;' +
+  '  var moveFp=dragFp,moveName=dragName;' +
+  '  dragFp=null;' +
+  '  moveItemTo(moveFp,moveName,destFp);' +
+  '});' +
+
+  /* ── KEYBOARD ── */
+  'document.addEventListener("keydown",function(e){' +
+  '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeUrlModal();closeShareModal();closePreview();}' +
+  '  if(e.key==="Enter"){' +
+  '    if(document.getElementById("modal-mkdir").style.display!=="none")createFolder();' +
+  '    else if(document.getElementById("modal-rename").style.display!=="none")doRename();' +
+  '    else if(document.getElementById("modal-url").style.display!=="none")addUrlDownload();' +
+  '    else if(document.getElementById("modal-share").style.display!=="none")confirmShare();' +
+  '  }' +
+  '});' +
+
+  /* ── UPLOAD input ── */
+  'document.getElementById("upload-input").addEventListener("change",function(){' +
+  '  uploadFiles(this.files,activePath());this.value="";' +
+  '});' +
+
+  /* ── SEARCH ── */
+  'var searchTimer;' +
+  'document.getElementById("search-inp").addEventListener("input",function(){' +
+  '  clearTimeout(searchTimer);var q=this.value;' +
+  '  searchTimer=setTimeout(function(){doSearch(q);},400);' +
+  '});' +
+
+  'applyTheme();' +
+  'navigateTo("");' +
+  'loadDisk();' +
+  'loadTransfers();' +
+  'setInterval(loadTransfers,5000);' +
+  'setInterval(loadDisk,60000);' +
   '</script>' +
   '</body></html>';
 }

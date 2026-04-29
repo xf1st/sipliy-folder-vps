@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sshpass -p \"0UAxHGujXbxP\" ssh -o StrictHostKeyChecking=no root@77.73.135.98 \"echo 'SSH OK'\")",
+      "Bash(where ssh:*)",
+      "Bash(where scp:*)",
+      "Bash(ssh -V)",
+      "Bash(python3 -c \"import paramiko; print\\('paramiko OK'\\)\")",
+      "Bash(python -c \"import paramiko; print\\('paramiko OK'\\)\")",
+      "Bash(pip install:*)",
+      "Bash(where python3.exe)",
+      "Bash(where python.exe)",
+      "Bash(where pip3.exe)",
+      "Bash(where pip.exe)",
+      "Bash(where node.exe)",
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(node deploy.js)",
+      "Bash(node -e ':*)",
+      "Bash(curl -v http://77.73.135.98/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://77.73.135.98:8080/)",
+      "Bash(curl -s -X POST http://77.73.135.98:8080/jsonrpc -H \"Content-Type: application/json\" -d \"{\\\\\"jsonrpc\\\\\":\\\\\"2.0\\\\\",\\\\\"method\\\\\":\\\\\"aria2.getVersion\\\\\",\\\\\"id\\\\\":1,\\\\\"params\\\\\":[\\\\\"token:mySecretToken123\\\\\"]}\")",
+      "Bash(curl -s -u \"admin:downloads123\" -H \"Accept: application/json\" http://77.73.135.98:8080/files/)",
+      "Bash(curl -s -u \"admin:downloads123\" http://77.73.135.98:8080/files/)",
+      "Bash(curl -s -u \"admin:downloads123\" http://77.73.135.98:8080/files-data/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://77.73.135.98:8080/login)",
+      "WebFetch(domain:stitch.anthropic.com)",
+      "WebFetch(domain:stitch.withanthopic.com)",
+      "Bash(curl -sI \"https://storage.googleapis.com/stitch-public/675277011889887258/64d6825fe8904809b8995a2609d23ca7/screen.png\")",
+      "Bash(curl -sI \"https://stitch.anthropic.com/api/projects/675277011889887258/screens/64d6825fe8904809b8995a2609d23ca7\")",
+      "Bash(curl -sL \"https://stitch.anthropic.com/projects/675277011889887258/screens/64d6825fe8904809b8995a2609d23ca7.png\" -o /tmp/screen.png -w \"%{http_code}\")",
+      "Bash(curl -sL \"https://stitch.anthropic.com/v1/projects/675277011889887258\" -w \"%{http_code}\")",
+      "Bash(curl -sv \"https://claude.ai/api/stitch/projects/675277011889887258\")",
+      "Bash(curl -sL \"https://api.anthropic.com/v1/stitch/projects/675277011889887258\")",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "Read(//c/Users/myszfx/Desktop/stitch_vps_remote_file_fetcher/**)",
+      "Read(//d/tmp/**)",
+      "Bash(unzip -o stitch_vps_remote_file_fetcher.zip -d stitch_design)",
+      "Bash(curl -s -c /tmp/cookies.txt -d \"username=admin&password=admin123\" -X POST http://77.73.135.98:8080/login -L)",
+      "Bash(curl -s -b /tmp/cookies.txt http://77.73.135.98:8080/)"
+    ]
+  }
+}
