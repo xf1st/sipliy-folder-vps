@@ -1,4 +1,4 @@
-// Sipliy Folder VPS — background service worker v2.2
+// Sipliy Folder VPS — background service worker v2.3
 
 const ICON = 'icons/icon-128.png';
 const POLL_ALARM = 'poll-vps';
@@ -24,11 +24,90 @@ function setupAlarm() {
   });
 }
 
-// ─── Alarm: опрос загрузок ────────────────────────────────
+// ─── Alarm: опрос загрузок + синхронизация файлов ─────────
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === POLL_ALARM) pollPendingDownloads();
+  if (alarm.name === POLL_ALARM) {
+    pollPendingDownloads();
+    syncVpsFiles(); // следим за файлами добавленными через сайт
+  }
 });
 
+// ─── Синхронизация файлов VPS (для файлов загруженных через сайт) ──
+async function syncVpsFiles() {
+  const cfg = await getConfig();
+  if (!cfg.serverUrl || !cfg.token) return;
+
+  try {
+    const res = await fetchExt(cfg, '/api/files-ext');
+    if (!res.ok) return;
+    const files = await res.json().catch(() => []);
+    const fileNames = files.map(f => f.name);
+
+    const { lastVpsFileNames = null } = await localGet('lastVpsFileNames');
+
+    if (lastVpsFileNames === null) {
+      // Первый запуск: сохраняем текущие файлы как baseline, не уведомляем
+      await localSet({ lastVpsFileNames: fileNames });
+      return;
+    }
+
+    const knownSet = new Set(lastVpsFileNames);
+
+    // Новые файлы — появились с момента последней проверки
+    const newFiles = files.filter(f => !knownSet.has(f.name));
+
+    if (newFiles.length > 0) {
+      const { readyFiles = [] } = await localGet('readyFiles');
+      const { autoDownload = true } = await localGet('autoDownload');
+      const readyNames = new Set(readyFiles.map(r => r.name));
+
+      for (const f of newFiles) {
+        if (readyNames.has(f.name)) continue; // уже в списке (tracked через extension)
+        const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(cfg.token);
+        readyFiles.unshift({ name: f.name, size: f.size, dlUrl, readyAt: Date.now(), fromSite: true });
+        if (readyFiles.length > 20) readyFiles.pop();
+
+        // Авто-скачивание
+        let autoDlOk = false;
+        if (autoDownload) {
+          try {
+            await chrome.downloads.download({ url: dlUrl, filename: f.name, saveAs: false });
+            autoDlOk = true;
+          } catch (_) {}
+        }
+
+        // Уведомление о новом файле с сайта
+        const notifId = 'site-' + Date.now() + '-' + encodeURIComponent(f.name).slice(0, 20);
+        chrome.notifications.create(notifId, {
+          type: 'basic',
+          iconUrl: chrome.runtime.getURL(ICON),
+          title: autoDlOk ? '✓ Файл скачивается на ПК!' : '✓ Новый файл на VPS!',
+          message: trunc(f.name, 60),
+          buttons: [{ title: '⬇ Скачать на ПК' }, { title: '📂 Открыть сайт' }],
+          requireInteraction: !autoDlOk,
+        });
+        const { notifMap = {} } = await localGet('notifMap');
+        notifMap[notifId] = { dlUrl, name: f.name, serverUrl: cfg.serverUrl };
+        await localSet({ notifMap });
+      }
+      await localSet({ readyFiles });
+    }
+
+    // Чистим readyFiles: удаляем файлы которых больше нет на VPS
+    const { readyFiles: currentReady = [] } = await localGet('readyFiles');
+    const vpsSet = new Set(fileNames);
+    const cleanedReady = currentReady.filter(f => vpsSet.has(f.name));
+    if (cleanedReady.length !== currentReady.length) {
+      await localSet({ readyFiles: cleanedReady });
+    }
+
+    // Обновляем baseline
+    await localSet({ lastVpsFileNames: fileNames });
+
+  } catch (_) {}
+}
+
+// ─── Опрос загрузок (отслеживаемых расширением) ──────────
 async function pollPendingDownloads() {
   const { pendingGids = {} } = await localGet('pendingGids');
   if (!Object.keys(pendingGids).length) return;
@@ -42,26 +121,18 @@ async function pollPendingDownloads() {
     if (!res.ok) return;
     const list = await res.json();
 
-    // Индекс по GID
-    const byGid = {};
-    list.forEach(d => byGid[d.gid] = d);
-
-    // Индекс по имени файла (для восстановления пропавших GID)
+    const byGid  = {};
     const byName = {};
-    list.forEach(d => { if (d.name) byName[d.name] = d; });
+    list.forEach(d => { byGid[d.gid] = d; if (d.name) byName[d.name] = d; });
 
     for (const [gid, info] of Object.entries(pendingGids)) {
       const d = byGid[gid];
 
       if (!d) {
-        // GID пропал из aria2 — файл либо готов, либо удалён
-        // Проверяем по файлам на VPS чтобы не пропустить
         if (info.status !== 'complete' && info.status !== 'error') {
-          // Считаем завершённым — запрашиваем файлы
           const filesRes = await fetchExt(cfg, '/api/files-ext').catch(() => null);
           if (filesRes && filesRes.ok) {
             const files = await filesRes.json().catch(() => []);
-            // Ищем файл появившийся после старта загрузки
             const match = files.find(f =>
               new Date(f.mtime).getTime() > info.addedAt &&
               (f.name === info.name || (info.origName && f.name.startsWith(info.origName.replace(/\.[^.]+$/, ''))))
@@ -74,7 +145,6 @@ async function pollPendingDownloads() {
               continue;
             }
           }
-          // Не нашли файл — удаляем из отслеживания
           delete pendingGids[gid];
           changed = true;
         }
@@ -82,8 +152,8 @@ async function pollPendingDownloads() {
       }
 
       const prevStatus = info.status;
-      pendingGids[gid].name = d.name || info.name;
-      pendingGids[gid].status = d.status;
+      pendingGids[gid].name     = d.name || info.name;
+      pendingGids[gid].status   = d.status;
       pendingGids[gid].progress = d.progress;
       changed = true;
 
@@ -108,7 +178,6 @@ async function onComplete(cfg, name, size, gid) {
   const { autoDownload = true } = await localGet('autoDownload');
   const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(name) + '?t=' + encodeURIComponent(cfg.token);
 
-  // Сохраняем в список "готово к скачиванию"
   const { readyFiles = [] } = await localGet('readyFiles');
   if (!readyFiles.find(f => f.name === name)) {
     readyFiles.unshift({ name, size, dlUrl, readyAt: Date.now() });
@@ -121,27 +190,19 @@ async function onComplete(cfg, name, size, gid) {
     try {
       await chrome.downloads.download({ url: dlUrl, filename: name, saveAs: false });
       autoDlOk = true;
-    } catch (e) {
-      autoDlOk = false;
-    }
+    } catch (e) { autoDlOk = false; }
   }
 
-  // Уведомление с кнопкой — показываем всегда
-  // Если авто-скачивание не сработало → кнопка обязательна
   const notifId = 'ready-' + gid;
   chrome.notifications.create(notifId, {
     type: 'basic',
     iconUrl: chrome.runtime.getURL(ICON),
     title: autoDlOk ? '✓ Файл скачивается на ПК!' : '✓ Файл готов на VPS!',
     message: trunc(name, 60),
-    buttons: [
-      { title: '⬇ Скачать на ПК' },
-      { title: '📂 Открыть сайт' },
-    ],
-    requireInteraction: !autoDlOk, // держать видимым если авто не сработало
+    buttons: [{ title: '⬇ Скачать на ПК' }, { title: '📂 Открыть сайт' }],
+    requireInteraction: !autoDlOk,
   });
 
-  // Сохраняем инфо для кнопки уведомления
   const { notifMap = {} } = await localGet('notifMap');
   notifMap[notifId] = { dlUrl, name, serverUrl: cfg.serverUrl };
   await localSet({ notifMap });
@@ -154,11 +215,9 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   if (!info) return;
   chrome.notifications.clear(notifId);
   if (btnIdx === 0) {
-    // Скачать на ПК
     try {
       await chrome.downloads.download({ url: info.dlUrl, filename: info.name, saveAs: false });
     } catch (e) {
-      // Если всё равно не работает — открываем вкладку (браузер скачает сам)
       chrome.tabs.create({ url: info.dlUrl });
     }
   } else {
@@ -172,9 +231,8 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   await localSet({ notifMap: nm });
 });
 
-// Клик по самому уведомлению — открываем popup/сайт
 chrome.notifications.onClicked.addListener(async (notifId) => {
-  if (!notifId.startsWith('ready-')) return;
+  if (!notifId.startsWith('ready-') && !notifId.startsWith('site-')) return;
   chrome.action.openPopup?.().catch(() => {});
 });
 

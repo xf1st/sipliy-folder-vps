@@ -1,15 +1,17 @@
-// Sipliy Folder VPS — popup script v2.2
+// Sipliy Folder VPS — popup script v2.3
 
 const $ = id => document.getElementById(id);
 
 // ─── Tab switching ────────────────────────────────────────
+function switchTab(tabName) {
+  document.querySelectorAll('.tab-btn, .panel').forEach(el => el.classList.remove('active'));
+  document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+  $('panel-' + tabName).classList.add('active');
+  if (tabName === 'downloads') loadDownloadsTab();
+}
+
 document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab-btn, .panel').forEach(el => el.classList.remove('active'));
-    btn.classList.add('active');
-    $('panel-' + btn.dataset.tab).classList.add('active');
-    if (btn.dataset.tab === 'downloads') loadDownloadsTab();
-  });
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
 
 // ─── Settings tab ─────────────────────────────────────────
@@ -31,16 +33,19 @@ function normalizeUrl(u) {
   return u;
 }
 
-// Загрузка настроек
+// Загрузка настроек + автопереход на вкладку Загрузки
 chrome.storage.sync.get(['serverUrl', 'token'], cfg => {
   if (cfg.serverUrl) urlEl.value = cfg.serverUrl;
-  if (cfg.token) tokenEl.value = cfg.token;
+  if (cfg.token)     tokenEl.value = cfg.token;
   refreshStatus();
+  // Если расширение настроено — сразу открыть вкладку Загрузки
+  if (cfg.serverUrl && cfg.token) {
+    switchTab('downloads');
+  }
 });
 chrome.storage.local.get('autoDownload', d => {
   autoDl.checked = d.autoDownload !== false;
 });
-
 
 async function refreshStatus() {
   const url = normalizeUrl(urlEl.value), token = (tokenEl.value || '').trim();
@@ -94,10 +99,7 @@ $('test-dl-btn').addEventListener('click', async () => {
   const warn = $('perm-warn');
   const inst = $('perm-instructions');
 
-  // Диагностика: определяем точную причину
-  let errorType = null;
-  let errorMsg  = '';
-
+  let errorType = null, errorMsg = '';
   if (typeof chrome.downloads === 'undefined') {
     errorType = 'no-permission';
   } else {
@@ -106,47 +108,34 @@ $('test-dl-btn').addEventListener('click', async () => {
       const blobUrl = URL.createObjectURL(blob);
       const id = await chrome.downloads.download({ url: blobUrl, filename: 'sipliy-test.txt', saveAs: false });
       URL.revokeObjectURL(blobUrl);
-      // Сразу отменяем тестовую загрузку
       setTimeout(() => chrome.downloads.cancel(id, () => chrome.downloads.erase({ id })), 500);
-      errorType = null; // успех
-    } catch (e) {
-      errorMsg = e.message || '';
-      errorType = 'blocked';
-    }
+      errorType = null;
+    } catch (e) { errorMsg = e.message || ''; errorType = 'blocked'; }
   }
 
   if (!errorType) {
-    // Всё работает — скрываем инструкцию
     warn.style.display = 'none';
     setToast('ok', '✓ Авто-скачивание работает!');
   } else {
-    // Показываем инструкцию с объяснением конкретной причины
     warn.style.display = 'flex';
     const isEdge = navigator.userAgent.includes('Edg/');
     const browserName = isEdge ? 'Edge' : 'Chrome';
-
     if (errorType === 'no-permission') {
-      inst.innerHTML = `
-        <b>Причина:</b> расширению не выдано разрешение на загрузку файлов.<br>
+      inst.innerHTML = `<b>Причина:</b> расширению не выдано разрешение на загрузку файлов.<br>
         <b>Решение — перезагрузить расширение:</b>
-        <ol>
-          <li>Откройте <b>${isEdge ? 'edge' : 'chrome'}://extensions</b></li>
-          <li>Найдите <b>Sipliy Folder VPS</b></li>
-          <li>Нажмите кнопку <b>↻ обновить</b> (значок перезагрузки под расширением)</li>
-          <li>Снова нажмите «Тест авто-загрузки»</li>
-        </ol>`;
+        <ol><li>Откройте <b>${isEdge ? 'edge' : 'chrome'}://extensions</b></li>
+        <li>Найдите <b>Sipliy Folder VPS</b></li>
+        <li>Нажмите кнопку <b>↻ обновить</b></li>
+        <li>Снова нажмите «Тест авто-загрузки»</li></ol>`;
     } else {
-      inst.innerHTML = `
-        <b>Причина:</b> браузер заблокировал автоматическую загрузку.<br>
+      inst.innerHTML = `<b>Причина:</b> браузер заблокировал автоматическую загрузку.<br>
         <b>Решение:</b>
-        <ol>
-          <li>Откройте настройки ${browserName}: нажмите <b>⋯</b> → <b>Настройки</b></li>
-          <li>Перейдите в <b>Конфиденциальность и безопасность</b></li>
-          <li>Откройте <b>Настройки сайтов</b> (или «Разрешения сайтов»)</li>
-          <li>Найдите <b>Автоматическая загрузка файлов</b></li>
-          <li>Добавьте <b>${normalizeUrl(urlEl.value) || 'адрес вашего сервера'}</b> в список разрешённых</li>
-          <li>Снова нажмите «Тест авто-загрузки»</li>
-        </ol>
+        <ol><li>Откройте настройки ${browserName}: <b>⋯</b> → <b>Настройки</b></li>
+        <li>Перейдите в <b>Конфиденциальность и безопасность</b></li>
+        <li>Откройте <b>Настройки сайтов</b></li>
+        <li>Найдите <b>Автоматическая загрузка файлов</b></li>
+        <li>Добавьте <b>${normalizeUrl(urlEl.value) || 'адрес вашего сервера'}</b> в список разрешённых</li>
+        <li>Снова нажмите «Тест авто-загрузки»</li></ol>
         ${errorMsg ? '<span style="font-size:.67rem;color:#92400e;margin-top:4px;display:block">Ошибка: ' + escHtml(errorMsg) + '</span>' : ''}`;
     }
     setToast('err', '✕ Авто-скачивание заблокировано');
@@ -190,7 +179,7 @@ const SL = { active:'Скачивается', waiting:'В очереди', pause
 async function loadDownloadsTab() {
   clearTimeout(pollTimer);
   await renderDownloads();
-  pollTimer = setTimeout(loadDownloadsTab, 4000);
+  pollTimer = setTimeout(loadDownloadsTab, 2000); // обновляем каждые 2 секунды
 }
 
 async function renderDownloads() {
@@ -202,8 +191,27 @@ async function renderDownloads() {
     return;
   }
 
-  // Готовые к скачиванию (из хранилища расширения)
-  const { readyFiles = [] } = await new Promise(r => chrome.storage.local.get('readyFiles', r));
+  // Параллельно запрашиваем загрузки и файлы
+  const [dlRes, filesRes] = await Promise.all([
+    fetch(cfg.serverUrl + '/api/downloads-ext', { headers: { 'Authorization': 'Bearer ' + cfg.token } }).catch(() => null),
+    fetch(cfg.serverUrl + '/api/files-ext',     { headers: { 'Authorization': 'Bearer ' + cfg.token } }).catch(() => null),
+  ]);
+
+  // Получаем текущие файлы на VPS
+  let vpsFiles = [];
+  if (filesRes && filesRes.ok) {
+    vpsFiles = await filesRes.json().catch(() => []);
+  }
+  const vpsFileNames = new Set(vpsFiles.map(f => f.name));
+
+  // ── Чистим readyFiles: удаляем те, которых больше нет на VPS ──
+  const { readyFiles: rawReady = [] } = await new Promise(r => chrome.storage.local.get('readyFiles', r));
+  const readyFiles = rawReady.filter(f => vpsFileNames.has(f.name));
+  if (readyFiles.length !== rawReady.length) {
+    await new Promise(r => chrome.storage.local.set({ readyFiles }, r));
+  }
+
+  // ── Секция "Готово — скачать на ПК" ──
   const readySection = $('ready-section');
   const readyList    = $('ready-list');
   if (readyFiles.length > 0) {
@@ -221,12 +229,7 @@ async function renderDownloads() {
     readySection.style.display = 'none';
   }
 
-  // Активные загрузки VPS
-  const [dlRes, filesRes] = await Promise.all([
-    fetch(cfg.serverUrl + '/api/downloads-ext', { headers: { 'Authorization': 'Bearer ' + cfg.token } }).catch(() => null),
-    fetch(cfg.serverUrl + '/api/files-ext',     { headers: { 'Authorization': 'Bearer ' + cfg.token } }).catch(() => null),
-  ]);
-
+  // ── Активные загрузки VPS ──
   const activeEl = $('active-list');
   if (!dlRes || !dlRes.ok) {
     activeEl.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div>Нет соединения с сервером</div>';
@@ -254,15 +257,17 @@ async function renderDownloads() {
     }
   }
 
-  // Все файлы на VPS
+  // ── Все файлы на VPS ──
   const fileEl = $('file-list');
-  if (!filesRes || !filesRes.ok) { fileEl.innerHTML = ''; return; }
-  const files = await filesRes.json().catch(() => []);
-  if (!files.length) {
+  if (!filesRes || !filesRes.ok) {
+    fileEl.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div>Нет соединения с сервером</div>';
+    return;
+  }
+  if (!vpsFiles.length) {
     fileEl.innerHTML = '<div class="empty-state"><div class="icon">📂</div>Файлов нет</div>';
   } else {
     const token = cfg.token, server = cfg.serverUrl;
-    fileEl.innerHTML = files.map(f => {
+    fileEl.innerHTML = vpsFiles.map(f => {
       const dlUrl = server + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(token);
       return `<div class="file-item">
         <div class="file-ico">${fileEmoji(f.name)}</div>
@@ -284,14 +289,13 @@ async function doDownload(btn) {
   try {
     await chrome.downloads.download({ url, filename: name, saveAs: false });
     btn.textContent = '✓ Начато';
-    // Убрать из readyFiles если было там
+    // Убрать из readyFiles
     const { readyFiles = [] } = await new Promise(r => chrome.storage.local.get('readyFiles', r));
     await new Promise(r => chrome.storage.local.set({ readyFiles: readyFiles.filter(f => f.name !== name) }, r));
     const card = $('ready-' + encodeURIComponent(name));
     if (card) card.remove();
-    if ($('ready-list').children.length === 0) $('ready-section').style.display = 'none';
+    if ($('ready-list') && $('ready-list').children.length === 0) $('ready-section').style.display = 'none';
   } catch (e) {
-    // Fallback: открываем URL в новой вкладке
     chrome.tabs.create({ url });
     btn.textContent = '↗ Открыто';
   }
