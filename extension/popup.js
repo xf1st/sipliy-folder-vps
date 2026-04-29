@@ -452,15 +452,18 @@ async function renderDownloads() {
   // ── Ready-to-download section ──
   if (readyFiles.length > 0) {
     $('ready-section').style.display = 'block';
-    $('ready-list').innerHTML = readyFiles.map(f => `
-      <div class="ready-item" id="ri-${escHtml(encodeURIComponent(f.name))}">
+    $('ready-list').innerHTML = readyFiles.map(f => {
+      const filePath = f.path || ('/' + f.name);
+      return `<div class="ready-item" id="ri-${escHtml(encodeURIComponent(f.name))}">
         <div class="ready-icon">${fileEmoji(f.name)}</div>
         <div class="ready-info">
           <div class="ready-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
           <div class="ready-meta">${fmt(f.size)} · готово ${fmtDate(f.readyAt)}</div>
         </div>
+        <button class="btn-sm btn-share" style="flex-shrink:0;margin-right:4px" data-share-file="${escHtml(f.name)}" data-share-path="${escHtml(filePath)}" title="Публичная ссылка / QR">🔗</button>
         <button class="btn-pc" data-url="${escHtml(encodeURIComponent(f.dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}" data-account-id="${escHtml(f.accountId || activeAcc?.id || '')}">⬇ На ПК</button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   } else {
     $('ready-section').style.display = 'none';
   }
@@ -502,13 +505,15 @@ async function renderDownloads() {
   fileEl.innerHTML = vpsFiles.length
     ? vpsFiles.map(f => {
         const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(cfg.token);
+        const filePath = f.path || ('/' + f.name);
         return `<div class="file-item">
           <div class="file-ico">${fileEmoji(f.name)}</div>
           <div class="file-info">
             <div class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
             <div class="file-meta">${fmt(f.size)} · ${fmtDate(new Date(f.mtime).getTime())}</div>
           </div>
-          <button class="btn-sm btn-dl" data-url="${escHtml(encodeURIComponent(dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}">⬇ На ПК</button>
+          <button class="btn-sm btn-share" data-share-file="${escHtml(f.name)}" data-share-path="${escHtml(filePath)}" title="Публичная ссылка / QR">🔗</button>
+          <button class="btn-sm btn-dl" data-url="${escHtml(encodeURIComponent(dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}">⬇</button>
         </div>`;
       }).join('')
     : '<div class="empty-state"><div class="icon">📂</div>Файлов нет</div>';
@@ -532,6 +537,32 @@ function setManualUrlStatus(kind, text) {
   el.textContent = text || '';
 }
 
+async function addManualUrlDirect(cfg, url, filename) {
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), 12000);
+  const body = new URLSearchParams();
+  body.set('url', url);
+  if (filename) body.set('filename', filename);
+
+  const res = await fetch(cfg.serverUrl + '/api/add-ext', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + cfg.token,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: body.toString(),
+    signal: ctrl.signal
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+
+  const name = filename || guessUrlName(url);
+  const { pendingGids = {} } = await new Promise(r => chrome.storage.local.get('pendingGids', r));
+  pendingGids[data.gid] = { gid: data.gid, name, origName: name, status: 'active', addedAt: Date.now(), progress: 0, accountId: cfg.accountId, forceAutoDownload: true };
+  await new Promise(r => chrome.storage.local.set({ pendingGids }, r));
+  return { gid: data.gid, name };
+}
+
 async function addManualUrlDownload() {
   const cfg = await getConfig();
   const btn = $('manual-url-btn');
@@ -551,8 +582,14 @@ async function addManualUrlDownload() {
   btn.disabled = true;
   setManualUrlStatus('', 'Отправляю...');
   try {
-    const data = await chrome.runtime.sendMessage({ type: 'add-url-download', url, filename });
-    if (!data || !data.ok) throw new Error((data && data.error) || 'Ошибка');
+    let data;
+    try {
+      data = await chrome.runtime.sendMessage({ type: 'add-url-download', url, filename });
+      if (!data || !data.ok) throw new Error((data && data.error) || 'Ошибка');
+    } catch (msgErr) {
+      if (!/Receiving end does not exist|Could not establish connection/i.test(msgErr.message || '')) throw msgErr;
+      data = await addManualUrlDirect(cfg, url, filename);
+    }
 
     $('manual-url-inp').value = '';
     $('manual-name-inp').value = '';
@@ -596,3 +633,162 @@ $('manual-url-btn').addEventListener('click', addManualUrlDownload);
 $('manual-url-inp').addEventListener('keydown', e => { if (e.key === 'Enter') addManualUrlDownload(); });
 $('manual-name-inp').addEventListener('keydown', e => { if (e.key === 'Enter') addManualUrlDownload(); });
 window.addEventListener('unload', () => clearTimeout(pollTimer));
+
+// ─── QR / Share modal ─────────────────────────────────────
+let _qrFilePath = null, _qrFileName = null, _qrCfg = null;
+
+function qrImgUrl(link) {
+  return 'https://api.qrserver.com/v1/create-qr-code/?size=160x160&qzone=1&format=svg&data=' + encodeURIComponent(link);
+}
+
+function renderQrLinks(links) {
+  const wrap = $('qr-links-wrap');
+  if (!links.length) {
+    wrap.innerHTML = '<div style="text-align:center;color:var(--muted);font-size:.78rem;padding:10px 0">Публичных ссылок нет.<br>Нажмите кнопку ниже чтобы создать.</div>';
+    return;
+  }
+  wrap.innerHTML = links.map((lnk, i) => `
+    <div class="qr-link-row">
+      <div class="qr-link-url">${escHtml(lnk.fullUrl)}</div>
+      <div class="qr-img-wrap"><img src="${escHtml(qrImgUrl(lnk.fullUrl))}" alt="QR" loading="lazy"/></div>
+      <div class="qr-actions">
+        <button class="btn btn-secondary" style="flex:1;font-size:.71rem;padding:6px 8px" data-copy-link="${escHtml(lnk.fullUrl)}">📋 Копировать</button>
+        <button class="btn btn-secondary" style="flex:1;font-size:.71rem;padding:6px 8px" data-open-link="${escHtml(lnk.fullUrl)}">↗ Открыть</button>
+      </div>
+    </div>`).join('');
+}
+
+async function openShareModal(fileName, filePath) {
+  const cfg = await getConfig();
+  if (!cfg.serverUrl || !cfg.token) return;
+  _qrFilePath = filePath;
+  _qrFileName = fileName;
+  _qrCfg = cfg;
+
+  $('qr-filename').textContent = fileName;
+  $('qr-links-wrap').innerHTML = '<div style="text-align:center;padding:16px;color:var(--muted);font-size:.8rem">Загрузка ссылок...</div>';
+  $('qr-status').textContent = '';
+  $('qr-status').className = 'qr-status';
+  $('qr-overlay').style.display = 'flex';
+
+  try {
+    const r = await fetch(cfg.serverUrl + '/api/ext/shares?path=' + encodeURIComponent(filePath), {
+      headers: { 'Authorization': 'Bearer ' + cfg.token }
+    });
+    const d = await r.json();
+    renderQrLinks(d.links || []);
+  } catch (e) {
+    $('qr-links-wrap').innerHTML = '<div style="color:var(--err);font-size:.78rem;text-align:center">Ошибка загрузки ссылок</div>';
+  }
+}
+
+function closeShareModal() {
+  $('qr-overlay').style.display = 'none';
+  _qrFilePath = null; _qrFileName = null; _qrCfg = null;
+}
+
+$('qr-close-btn').addEventListener('click', closeShareModal);
+$('qr-overlay').addEventListener('click', e => { if (e.target === $('qr-overlay')) closeShareModal(); });
+
+$('qr-create-btn').addEventListener('click', async () => {
+  if (!_qrFilePath || !_qrCfg) return;
+  const btn = $('qr-create-btn');
+  btn.disabled = true; btn.textContent = '⏳ Создаю...';
+  $('qr-status').textContent = ''; $('qr-status').className = 'qr-status';
+  try {
+    const r = await fetch(_qrCfg.serverUrl + '/api/ext/share', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + _qrCfg.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: _qrFilePath })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      $('qr-status').textContent = '✓ Ссылка создана'; $('qr-status').className = 'qr-status ok';
+      // Reload links
+      const r2 = await fetch(_qrCfg.serverUrl + '/api/ext/shares?path=' + encodeURIComponent(_qrFilePath), {
+        headers: { 'Authorization': 'Bearer ' + _qrCfg.token }
+      });
+      const d2 = await r2.json();
+      renderQrLinks(d2.links || []);
+    } else {
+      $('qr-status').textContent = d.error || 'Ошибка'; $('qr-status').className = 'qr-status err';
+    }
+  } catch {
+    $('qr-status').textContent = 'Ошибка запроса'; $('qr-status').className = 'qr-status err';
+  }
+  btn.disabled = false; btn.textContent = '🔗 Создать публичную ссылку';
+});
+
+// Event delegation for copy/open inside modal
+$('qr-links-wrap').addEventListener('click', e => {
+  const copyBtn = e.target.closest('[data-copy-link]');
+  if (copyBtn) {
+    navigator.clipboard.writeText(copyBtn.dataset.copyLink).then(() => {
+      const orig = copyBtn.textContent;
+      copyBtn.textContent = '✓ Скопировано';
+      setTimeout(() => { copyBtn.textContent = orig; }, 1800);
+    });
+    return;
+  }
+  const openBtn = e.target.closest('[data-open-link]');
+  if (openBtn) { chrome.tabs.create({ url: openBtn.dataset.openLink }); return; }
+});
+
+// Share button clicks in file list (event delegation)
+document.addEventListener('click', e => {
+  const shareBtn = e.target.closest('[data-share-file]');
+  if (!shareBtn) return;
+  openShareModal(shareBtn.dataset.shareFile, shareBtn.dataset.sharePath);
+});
+
+// ─── OTA version check ────────────────────────────────────
+const CURRENT_VERSION = '2.4.0';
+
+function versionNewer(a, b) {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i]||0) < (pb[i]||0)) return true;
+    if ((pa[i]||0) > (pb[i]||0)) return false;
+  }
+  return false;
+}
+
+async function checkForUpdate(showStatus = false) {
+  try {
+    const { siteUrl } = await loadAccountsData();
+    if (!siteUrl) return;
+    const r = await fetch(siteUrl + '/api/ext/version');
+    const d = await r.json();
+    if (versionNewer(CURRENT_VERSION, d.version)) {
+      $('update-badge').style.display = '';
+      $('check-update-btn').classList.add('has-update');
+      $('check-update-btn').title = 'Доступна версия v' + d.version;
+      chrome.storage.local.set({ pendingUpdate: d });
+      if (showStatus) {
+        chrome.tabs.create({ url: d.downloadUrl });
+      }
+    } else {
+      $('update-badge').style.display = 'none';
+      $('check-update-btn').classList.remove('has-update');
+      chrome.storage.local.remove('pendingUpdate');
+      if (showStatus) {
+        const orig = $('check-update-btn').textContent;
+        $('check-update-btn').textContent = '✓ Актуальная';
+        setTimeout(() => { $('check-update-btn').textContent = orig; }, 2000);
+      }
+    }
+  } catch { /* silently ignore network errors */ }
+}
+
+$('check-update-btn').addEventListener('click', async () => {
+  const btn = $('check-update-btn');
+  // If update already known — open download page directly
+  const { pendingUpdate } = await new Promise(r => chrome.storage.local.get('pendingUpdate', r));
+  if (pendingUpdate) { chrome.tabs.create({ url: pendingUpdate.downloadUrl }); return; }
+  btn.textContent = '⏳';
+  await checkForUpdate(true);
+  setTimeout(() => { if (btn.textContent === '⏳') btn.textContent = '🔄'; }, 2100);
+});
+
+// Check on popup open (silently)
+checkForUpdate(false);

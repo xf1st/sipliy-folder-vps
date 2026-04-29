@@ -205,6 +205,42 @@
   .refresh-btn { background:none; border:none; cursor:pointer; color:var(--muted);
     padding:2px 6px; font-size:0.69rem; border-radius:5px; margin-left:auto; }
   .refresh-btn:hover { background:var(--line); color:var(--txt); }
+
+  /* ── Share button on file items ── */
+  .btn-share { background:rgba(107,80,154,.12); color:var(--p); border:1px solid rgba(107,80,154,.25); }
+  .btn-share:hover { background:rgba(107,80,154,.22); }
+
+  /* ── QR / Share modal ── */
+  .qr-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:999;
+    display:flex; align-items:center; justify-content:center; }
+  .qr-modal { background:var(--surf); border-radius:16px; padding:18px;
+    width:340px; max-width:calc(100vw - 24px); box-shadow:0 16px 48px rgba(0,0,0,.22); }
+  .qr-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  .qr-title { font-size:.82rem; font-weight:700; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; max-width:240px; }
+  .qr-close { background:none; border:none; cursor:pointer; font-size:1rem; color:var(--muted);
+    width:26px; height:26px; border-radius:6px; display:flex; align-items:center; justify-content:center; }
+  .qr-close:hover { background:var(--line); }
+  .qr-link-row { border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:8px; }
+  .qr-link-url { font-size:.69rem; color:var(--p2); word-break:break-all; margin-bottom:8px;
+    line-height:1.4; }
+  .qr-img-wrap { display:flex; justify-content:center; margin-bottom:8px; }
+  .qr-img-wrap img { width:160px; height:160px; border-radius:8px; }
+  .qr-actions { display:flex; gap:6px; }
+  .qr-actions .btn { font-size:.72rem; padding:7px 8px; }
+  .qr-status { font-size:.72rem; text-align:center; min-height:16px; color:var(--muted);
+    margin-top:4px; }
+  .qr-status.ok { color:var(--ok); }
+  .qr-status.err { color:var(--err); }
+
+  /* ── Update badge in footer ── */
+  .update-badge { background:var(--warn); color:#fff; border-radius:6px; padding:1px 6px;
+    font-size:.58rem; font-weight:700; vertical-align:middle; margin-left:4px; }
+  .btn-update-check { background:none; border:1px solid var(--line); border-radius:7px;
+    cursor:pointer; color:var(--muted); font-size:.67rem; padding:3px 8px;
+    transition:all .15s; }
+  .btn-update-check:hover { border-color:var(--p2); color:var(--p); }
+  .btn-update-check.has-update { border-color:var(--warn); color:var(--warn); font-weight:700; }
 </style>
 </head>
 <body>
@@ -263,7 +299,8 @@
     </div>
 
     <div class="footer">
-      <span>v2.3.4</span>
+      <span>v2.4.0 <span id="update-badge" class="update-badge" style="display:none">Обновление!</span></span>
+      <button class="btn-update-check" id="check-update-btn" title="Проверить обновление">🔄</button>
       <a href="#" id="open-help">Инструкция</a>
     </div>
   </div>
@@ -331,6 +368,23 @@
   <div class="sec-label" style="margin-top:13px">Все файлы на VPS</div>
   <div id="file-list">
     <div class="empty-state"><div class="icon">📂</div>Файлов нет</div>
+  </div>
+</div>
+
+<!-- ── QR / Share modal ────────────────────────────────── -->
+<div id="qr-overlay" class="qr-overlay" style="display:none">
+  <div class="qr-modal">
+    <div class="qr-header">
+      <div class="qr-title" id="qr-filename">filename.mp4</div>
+      <button class="qr-close" id="qr-close-btn">✕</button>
+    </div>
+    <div id="qr-links-wrap">
+      <!-- rendered by JS -->
+    </div>
+    <div id="qr-status" class="qr-status"></div>
+    <div class="btn-row" style="margin-top:8px">
+      <button class="btn btn-primary" id="qr-create-btn">🔗 Создать публичную ссылку</button>
+    </div>
   </div>
 </div>
 

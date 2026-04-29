@@ -1,7 +1,9 @@
-// Sipliy Folder VPS — background service worker v2.3 (multi-account)
+// Sipliy Folder VPS — background service worker v2.4 (QR + OTA)
 
 const ICON = 'icons/icon-128.png';
 const POLL_ALARM = 'poll-vps';
+const UPDATE_ALARM = 'check-update';
+const CURRENT_EXT_VERSION = '2.4.0';
 
 function normalizeUrl(u) {
   u = (u || '').trim().replace(/\/+$/, '');
@@ -12,30 +14,29 @@ function normalizeUrl(u) {
 // ─── Инициализация ────────────────────────────────────────
 chrome.runtime.onInstalled.addListener((details) => {
   setupContextMenus();
-  setupAlarm();
+  setupAlarms();
   refreshBadge();
   if (details.reason === 'install') {
     chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
   }
+  setTimeout(checkForUpdate, 3000);
 });
 chrome.runtime.onStartup.addListener(() => {
   setupContextMenus();
-  setupAlarm();
+  setupAlarms();
   refreshBadge();
+  setTimeout(checkForUpdate, 3000);
 });
 
-function setupAlarm() {
-  chrome.alarms.get(POLL_ALARM, a => {
-    if (!a) chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.25 }); // каждые 15 с
-  });
+function setupAlarms() {
+  chrome.alarms.get(POLL_ALARM,   a => { if (!a) chrome.alarms.create(POLL_ALARM,   { periodInMinutes: 0.25 }); });
+  chrome.alarms.get(UPDATE_ALARM, a => { if (!a) chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 360  }); }); // 6 ч
 }
 
 // ─── Alarm: опрос загрузок + синхронизация файлов ─────────
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === POLL_ALARM) {
-    pollPendingDownloads();
-    syncVpsFiles();
-  }
+  if (alarm.name === POLL_ALARM)   { pollPendingDownloads(); syncVpsFiles(); }
+  if (alarm.name === UPDATE_ALARM) { checkForUpdate(); }
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -398,3 +399,42 @@ async function refreshBadge() {
 }
 function trunc(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 chrome.storage.onChanged.addListener((_, area) => { if (area === 'sync') refreshBadge(); });
+
+// ─── OTA: проверка версии ──────────────────────────────────
+function versionNewer(a, b) {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i]||0) < (pb[i]||0)) return true;
+    if ((pa[i]||0) > (pb[i]||0)) return false;
+  }
+  return false;
+}
+
+async function checkForUpdate() {
+  try {
+    const { siteUrl, serverUrl } = await new Promise(r =>
+      chrome.storage.sync.get(['siteUrl', 'serverUrl'], r)
+    );
+    const base = (siteUrl || serverUrl || '').replace(/\/+$/, '');
+    if (!base) return;
+    const resp = await fetch(base + '/api/ext/version');
+    if (!resp.ok) return;
+    const d = await resp.json();
+    if (versionNewer(CURRENT_EXT_VERSION, d.version)) {
+      // Store update info
+      await new Promise(r => chrome.storage.local.set({ pendingUpdate: d }, r));
+      // Show badge "!" in orange
+      chrome.action.setBadgeBackgroundColor({ color: '#d97706' });
+      chrome.action.setBadgeText({ text: '↑' });
+      // Notify once per version
+      const key = 'notifiedUpdate_' + d.version;
+      const prev = await new Promise(r => chrome.storage.local.get(key, r));
+      if (!prev[key]) {
+        notify(`Доступна новая версия v${d.version}. Откройте расширение для обновления.`);
+        await new Promise(r => chrome.storage.local.set({ [key]: true }, r));
+      }
+    } else {
+      await new Promise(r => chrome.storage.local.remove('pendingUpdate', r));
+    }
+  } catch { /* ignore */ }
+}
