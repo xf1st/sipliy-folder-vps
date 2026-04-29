@@ -38,6 +38,14 @@ chrome.alarms.onAlarm.addListener(alarm => {
   }
 });
 
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== 'add-url-download') return;
+  sendDownload(msg.url, { filename: msg.filename || '', forceAutoDownload: true })
+    .then(data => sendResponse({ ok: true, ...(data || {}) }))
+    .catch(e => sendResponse({ ok: false, error: e.message || 'Ошибка' }));
+  return true;
+});
+
 // ─── Получение всех аккаунтов ─────────────────────────────
 function getAllAccounts() {
   return new Promise(r => {
@@ -205,7 +213,7 @@ async function pollPendingDownloads() {
                 pendingGids[gid].status = 'complete';
                 pendingGids[gid].name   = match.name;
                 changed = true;
-                onComplete(cfg, match.name, match.size, gid);
+                onComplete(cfg, match.name, match.size, gid, pendingGids[gid]);
                 continue;
               }
             }
@@ -222,7 +230,7 @@ async function pollPendingDownloads() {
         changed = true;
 
         if (d.status === 'complete' && prevStatus !== 'complete') {
-          onComplete(cfg, d.name || info.name, d.size, gid);
+          onComplete(cfg, d.name || info.name, d.size, gid, pendingGids[gid]);
         } else if (d.status === 'error' && prevStatus !== 'error') {
           notify(`✕ Ошибка загрузки: ${trunc(d.name || info.name, 40)}`);
         }
@@ -239,8 +247,9 @@ async function pollPendingDownloads() {
   }
 }
 
-async function onComplete(cfg, name, size, gid) {
+async function onComplete(cfg, name, size, gid, info = {}) {
   const { autoDownload = true } = await localGet('autoDownload');
+  const shouldAutoDownload = info.forceAutoDownload || autoDownload;
   const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(name) + '?t=' + encodeURIComponent(cfg.token);
 
   const { readyFiles = [] } = await localGet('readyFiles');
@@ -252,7 +261,7 @@ async function onComplete(cfg, name, size, gid) {
   }
 
   let autoDlOk = false;
-  if (autoDownload) {
+  if (shouldAutoDownload) {
     try {
       await chrome.downloads.download({ url: dlUrl, filename: name, saveAs: false });
       autoDlOk = true;
@@ -319,11 +328,11 @@ chrome.contextMenus.onClicked.addListener((info) => {
   const url = urls[info.menuItemId];
   if (!url) return;
   if (!/^https?:\/\//i.test(url) && !/^magnet:/i.test(url)) { notify('✕ Неподдерживаемая ссылка'); return; }
-  sendDownload(url);
+  sendDownload(url).catch(() => {});
 });
 
 // ─── Отправка на VPS (активный аккаунт) ──────────────────
-async function sendDownload(url) {
+async function sendDownload(url, opts = {}) {
   const cfg = await getConfig();
   if (!cfg.serverUrl || !cfg.token) { notify('Настройте расширение — кликните на иконку'); return; }
   flashBadge('↑', '#a083d1');
@@ -333,17 +342,23 @@ async function sendDownload(url) {
     const res = await fetchExt(cfg, '/api/add-ext', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'url=' + encodeURIComponent(url),
+      body: 'url=' + encodeURIComponent(url) + (opts.filename ? '&filename=' + encodeURIComponent(opts.filename) : ''),
       signal: ctrl.signal,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error) { flashBadge('!', '#dc2626'); notify('✕ ' + (data.error || 'HTTP ' + res.status)); return; }
+    if (!res.ok || data.error) {
+      flashBadge('!', '#dc2626');
+      const msg = data.error || 'HTTP ' + res.status;
+      notify('✕ ' + msg);
+      throw new Error(msg);
+    }
 
-    const origName = trunc(decodeURIComponent(url.split('/').pop().split('?')[0]) || 'файл', 60);
+    const origName = trunc(opts.filename || decodeURIComponent(url.split('/').pop().split('?')[0]) || 'файл', 60);
     const { pendingGids = {} } = await localGet('pendingGids');
-    pendingGids[data.gid] = { gid: data.gid, name: origName, origName, status: 'active', addedAt: Date.now(), progress: 0, accountId: cfg.accountId };
+    pendingGids[data.gid] = { gid: data.gid, name: origName, origName, status: 'active', addedAt: Date.now(), progress: 0, accountId: cfg.accountId, forceAutoDownload: !!opts.forceAutoDownload };
     await localSet({ pendingGids });
     setupAlarm();
+    setTimeout(pollPendingDownloads, 1000);
 
     const { autoDownload = true } = await localGet('autoDownload');
     notify(autoDownload
@@ -351,9 +366,11 @@ async function sendDownload(url) {
       : `↑ Добавлено на VPS\nОткройте расширение для скачивания на ПК`
     );
     setTimeout(refreshBadge, 3000);
+    return { gid: data.gid, name: origName };
   } catch (e) {
     flashBadge('!', '#dc2626');
     notify('✕ ' + (e.name === 'AbortError' ? 'Сервер не отвечает (10с)' : e.message));
+    throw e;
   }
 }
 

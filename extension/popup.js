@@ -551,34 +551,14 @@ async function addManualUrlDownload() {
   btn.disabled = true;
   setManualUrlStatus('', 'Отправляю...');
   try {
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 12000);
-    const body = new URLSearchParams();
-    body.set('url', url);
-    if (filename) body.set('filename', filename);
-
-    const res = await fetch(cfg.serverUrl + '/api/add-ext', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + cfg.token,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: body.toString(),
-      signal: ctrl.signal
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
-
-    const name = filename || guessUrlName(url);
-    const { pendingGids = {} } = await new Promise(r => chrome.storage.local.get('pendingGids', r));
-    pendingGids[data.gid] = { gid: data.gid, name, origName: name, status: 'active', addedAt: Date.now(), progress: 0, accountId: cfg.accountId };
-    await new Promise(r => chrome.storage.local.set({ pendingGids }, r));
+    const data = await chrome.runtime.sendMessage({ type: 'add-url-download', url, filename });
+    if (!data || !data.ok) throw new Error((data && data.error) || 'Ошибка');
 
     $('manual-url-inp').value = '';
     $('manual-name-inp').value = '';
-    setManualUrlStatus('ok', 'Добавлено на VPS');
+    setManualUrlStatus('ok', 'Добавлено. Потом само скачается на ПК');
     clearTimeout(pollTimer);
-    loadDownloadsTab();
+    setTimeout(loadDownloadsTab, 350);
   } catch (e) {
     setManualUrlStatus('err', e.name === 'AbortError' ? 'Сервер не ответил' : (e.message || 'Ошибка'));
   } finally {

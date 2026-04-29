@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sipliy Folder VPS",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "Скачивайте файлы на VPS правым кликом. Следите за прогрессом и забирайте на ПК — прямо из расширения.",
   "minimum_chrome_version": "100",
   "permissions": [
