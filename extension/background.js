@@ -3,6 +3,12 @@
 const ICON = 'icons/icon-128.png';
 const POLL_ALARM = 'poll-vps';
 
+function normalizeUrl(u) {
+  u = (u || '').trim().replace(/\/+$/, '');
+  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
+  return u;
+}
+
 // ─── Инициализация ────────────────────────────────────────
 chrome.runtime.onInstalled.addListener((details) => {
   setupContextMenus();
@@ -35,29 +41,32 @@ chrome.alarms.onAlarm.addListener(alarm => {
 // ─── Получение всех аккаунтов ─────────────────────────────
 function getAllAccounts() {
   return new Promise(r => {
-    chrome.storage.sync.get(['accounts', 'activeAccountId', 'serverUrl', 'token'], d => {
-      const accounts = Array.isArray(d.accounts) ? d.accounts : [];
+    chrome.storage.sync.get(['accounts', 'activeAccountId', 'siteUrl', 'serverUrl', 'token'], d => {
+      let accounts = Array.isArray(d.accounts) ? d.accounts : [];
+      let siteUrl = normalizeUrl(d.siteUrl || d.serverUrl || accounts.find(a => a.url)?.url || '');
       // Migration: old single-account format
       if (!accounts.length && d.serverUrl && d.token) {
-        r([{ id: 'legacy', name: 'Мой VPS', url: d.serverUrl.replace(/\/+$/, ''), token: d.token }]);
+        siteUrl = normalizeUrl(d.serverUrl);
+        r([{ id: 'legacy', name: 'Мой аккаунт', url: siteUrl, token: d.token }]);
         return;
       }
-      r(accounts.map(a => ({ ...a, url: (a.url || '').replace(/\/+$/, '') })));
+      r(accounts.map(a => ({ ...a, url: normalizeUrl(siteUrl || a.url) })));
     });
   });
 }
 
 function getConfig() {
   return new Promise(r => {
-    chrome.storage.sync.get(['accounts', 'activeAccountId', 'serverUrl', 'token'], d => {
+    chrome.storage.sync.get(['accounts', 'activeAccountId', 'siteUrl', 'serverUrl', 'token'], d => {
       const accounts = Array.isArray(d.accounts) ? d.accounts : [];
+      const siteUrl = normalizeUrl(d.siteUrl || d.serverUrl || accounts.find(a => a.url)?.url || '');
       if (!accounts.length && d.serverUrl && d.token) {
-        r({ serverUrl: d.serverUrl.replace(/\/+$/, ''), token: d.token, accountId: 'legacy' });
+        r({ serverUrl: normalizeUrl(d.serverUrl), token: d.token, accountId: 'legacy' });
         return;
       }
       const acc = accounts.find(a => a.id === d.activeAccountId) || accounts[0] || null;
       if (!acc) r({ serverUrl: '', token: '', accountId: null });
-      else r({ serverUrl: acc.url.replace(/\/+$/, ''), token: acc.token, accountId: acc.id });
+      else r({ serverUrl: siteUrl, token: acc.token, accountId: acc.id });
     });
   });
 }

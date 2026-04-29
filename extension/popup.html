@@ -220,6 +220,9 @@
   <div id="accounts-view">
 
     <div style="font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:8px">Аккаунты</div>
+    <label for="site-url-inp" style="margin-top:0">CloudSpace сайт</label>
+    <input id="site-url-inp" type="url" placeholder="https://sipliyfolder.ru" autocomplete="off"/>
+    <p class="hint" style="margin-bottom:10px">Один сайт, разные аккаунты пользователей. У каждого аккаунта свой токен и своё хранилище.</p>
     <div id="accounts-list">
       <div class="empty-state" style="padding:16px 0"><div class="icon">🔐</div>Нет аккаунтов. Добавьте первый!</div>
     </div>
@@ -262,10 +265,7 @@
     <div id="form-title" style="font-weight:700;font-size:.9rem;margin-bottom:13px">Добавить аккаунт</div>
 
     <label for="acc-name-inp">Название</label>
-    <input id="acc-name-inp" type="text" placeholder="Мой VPS" autocomplete="off"/>
-
-    <label for="acc-url-inp">URL сервера</label>
-    <input id="acc-url-inp" type="url" placeholder="https://sipliyfolder.ru" autocomplete="off"/>
+    <input id="acc-name-inp" type="text" placeholder="Например: Sky или Admin" autocomplete="off"/>
 
     <label for="acc-token-inp">Токен расширения</label>
     <div class="input-wrap">

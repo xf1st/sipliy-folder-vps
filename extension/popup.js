@@ -34,25 +34,37 @@ function genId() {
 // ─── Account storage ──────────────────────────────────────
 async function loadAccountsData() {
   const d = await new Promise(r =>
-    chrome.storage.sync.get(['accounts', 'activeAccountId', 'serverUrl', 'token'], r)
+    chrome.storage.sync.get(['accounts', 'activeAccountId', 'siteUrl', 'serverUrl', 'token'], r)
   );
   let accounts = Array.isArray(d.accounts) ? d.accounts : [];
   let activeAccountId = d.activeAccountId || null;
+  let siteUrl = normalizeUrl(d.siteUrl || d.serverUrl || accounts.find(a => a.url)?.url || 'https://sipliyfolder.ru');
 
   // Migration: old single-account format → accounts array
   if (!accounts.length && d.serverUrl && d.token) {
     const id = genId();
-    accounts = [{ id, name: 'Мой VPS', url: d.serverUrl.replace(/\/+$/, ''), token: d.token }];
+    accounts = [{ id, name: 'Мой аккаунт', token: d.token }];
     activeAccountId = id;
-    await new Promise(r => chrome.storage.sync.set({ accounts, activeAccountId }, r));
+    siteUrl = normalizeUrl(d.serverUrl);
+    await new Promise(r => chrome.storage.sync.set({ accounts, activeAccountId, siteUrl }, r));
+  } else {
+    let changed = false;
+    accounts = accounts.map(a => {
+      if (a.url) changed = true;
+      const { url, ...rest } = a;
+      return rest;
+    });
+    if (changed || !d.siteUrl) await new Promise(r => chrome.storage.sync.set({ accounts, activeAccountId, siteUrl }, r));
   }
 
   if (!activeAccountId && accounts.length) activeAccountId = accounts[0].id;
-  return { accounts, activeAccountId };
+  return { accounts, activeAccountId, siteUrl };
 }
 
-async function saveAccountsData(accounts, activeAccountId) {
-  return new Promise(r => chrome.storage.sync.set({ accounts, activeAccountId }, r));
+async function saveAccountsData(accounts, activeAccountId, siteUrl) {
+  const payload = { accounts, activeAccountId };
+  if (siteUrl !== undefined) payload.siteUrl = normalizeUrl(siteUrl);
+  return new Promise(r => chrome.storage.sync.set(payload, r));
 }
 
 function getActiveAccount(accounts, activeAccountId) {
@@ -61,10 +73,10 @@ function getActiveAccount(accounts, activeAccountId) {
 
 // ─── Config for downloads (active account) ────────────────
 async function getConfig() {
-  const { accounts, activeAccountId } = await loadAccountsData();
+  const { accounts, activeAccountId, siteUrl } = await loadAccountsData();
   const acc = getActiveAccount(accounts, activeAccountId);
   if (!acc) return { serverUrl: '', token: '', accountId: null };
-  return { serverUrl: acc.url.replace(/\/+$/, ''), token: acc.token, accountId: acc.id };
+  return { serverUrl: siteUrl, token: acc.token, accountId: acc.id };
 }
 
 // ─── Tab switching ────────────────────────────────────────
@@ -92,14 +104,14 @@ function renderAccountsList(accounts, activeAccountId) {
     const dot = dotsCache[a.id];
     const dotClass = dot === true ? 'ok' : dot === false ? 'err' : '';
     return `<div class="account-card${isActive ? ' active' : ''}" data-id="${escHtml(a.id)}">
-      <div class="acc-avatar">${escHtml((a.name || a.url || '?')[0].toUpperCase())}</div>
+      <div class="acc-avatar">${escHtml((a.name || '?')[0].toUpperCase())}</div>
       <div class="acc-info">
         <div class="acc-name-row">
-          <span class="acc-name-text">${escHtml(a.name || a.url)}</span>
+          <span class="acc-name-text">${escHtml(a.name || 'Аккаунт')}</span>
           ${isActive ? '<span class="active-badge">Активный</span>' : ''}
           <span class="acc-dot ${dotClass}" data-dot-id="${escHtml(a.id)}"></span>
         </div>
-        <div class="acc-url">${escHtml(a.url)}</div>
+        <div class="acc-url">Пользователь CloudSpace</div>
       </div>
       <div class="acc-actions">
         <button class="acc-btn" data-action="edit" data-id="${escHtml(a.id)}">✏</button>
@@ -130,7 +142,7 @@ function renderAccountSwitcher(accounts, activeAccountId) {
   el.style.display = 'block';
   el.innerHTML = '<div class="switcher">' +
     accounts.map(a =>
-      `<div class="sw-pill${a.id === activeAccountId ? ' active' : ''}" data-switch-id="${escHtml(a.id)}">${escHtml(a.name || a.url)}</div>`
+      `<div class="sw-pill${a.id === activeAccountId ? ' active' : ''}" data-switch-id="${escHtml(a.id)}">${escHtml(a.name || 'Аккаунт')}</div>`
     ).join('') + '</div>';
 }
 
@@ -145,22 +157,23 @@ function updateHeaderSub(accounts, activeAccountId) {
   const acc = getActiveAccount(accounts, activeAccountId);
   $('hd-sub').textContent = !acc
     ? 'Скачивание правым кликом по ссылке'
-    : accounts.length > 1 ? (acc.name || acc.url) : (acc.url || 'Скачивание правым кликом по ссылке');
+    : (acc.name || 'Аккаунт CloudSpace');
 }
 
 // ─── Settings: Init & connection dots ─────────────────────
 async function initSettings() {
-  const { accounts, activeAccountId } = await loadAccountsData();
+  const { accounts, activeAccountId, siteUrl } = await loadAccountsData();
+  $('site-url-inp').value = siteUrl || '';
   renderAccountsList(accounts, activeAccountId);
   renderAccountSwitcher(accounts, activeAccountId);
   updateHeaderSub(accounts, activeAccountId);
-  checkAndUpdateDots(accounts);
-  return { accounts, activeAccountId };
+  checkAndUpdateDots(accounts, siteUrl);
+  return { accounts, activeAccountId, siteUrl };
 }
 
-async function checkAndUpdateDots(accounts) {
+async function checkAndUpdateDots(accounts, siteUrl) {
   for (const acc of accounts) {
-    testConn(acc.url, acc.token).then(r => {
+    testConn(siteUrl, acc.token).then(r => {
       dotsCache[acc.id] = r.ok;
       const dot = document.querySelector(`[data-dot-id="${CSS.escape(acc.id)}"]`);
       if (dot) dot.className = 'acc-dot ' + (r.ok ? 'ok' : 'err');
@@ -170,9 +183,9 @@ async function checkAndUpdateDots(accounts) {
 
 // ─── Settings: switchToAccount ────────────────────────────
 async function switchToAccount(id) {
-  const { accounts, activeAccountId } = await loadAccountsData();
+  const { accounts, activeAccountId, siteUrl } = await loadAccountsData();
   if (id === activeAccountId) return;
-  await saveAccountsData(accounts, id);
+  await saveAccountsData(accounts, id, siteUrl);
   await initSettings();
   if ($('panel-downloads').classList.contains('active')) {
     clearTimeout(pollTimer);
@@ -182,16 +195,16 @@ async function switchToAccount(id) {
 
 // ─── Settings: deleteAccount ──────────────────────────────
 async function deleteAccount(id) {
-  const { accounts, activeAccountId } = await loadAccountsData();
+  const { accounts, activeAccountId, siteUrl } = await loadAccountsData();
   const acc = accounts.find(a => a.id === id);
   if (!acc) return;
-  if (!confirm(`Удалить аккаунт «${acc.name || acc.url}»?`)) return;
+  if (!confirm(`Удалить аккаунт «${acc.name || 'Аккаунт'}»?`)) return;
 
   const newAccounts = accounts.filter(a => a.id !== id);
   const newActiveId = activeAccountId === id
     ? (newAccounts[0]?.id || null)
     : activeAccountId;
-  await saveAccountsData(newAccounts, newActiveId);
+  await saveAccountsData(newAccounts, newActiveId, siteUrl);
 
   delete dotsCache[id];
 
@@ -225,13 +238,11 @@ function openAccountForm(accountId = null) {
       const a = accounts.find(x => x.id === accountId);
       if (a) {
         $('acc-name-inp').value  = a.name  || '';
-        $('acc-url-inp').value   = a.url   || '';
         $('acc-token-inp').value = a.token || '';
       }
     });
   } else {
     $('acc-name-inp').value  = '';
-    $('acc-url-inp').value   = '';
     $('acc-token-inp').value = '';
   }
 }
@@ -257,13 +268,19 @@ $('acc-eye').addEventListener('click', () => {
 
 $('open-site-form').addEventListener('click', e => {
   e.preventDefault();
-  chrome.tabs.create({ url: normalizeUrl($('acc-url-inp').value) || 'https://sipliyfolder.ru' });
+  chrome.tabs.create({ url: normalizeUrl($('site-url-inp').value) || 'https://sipliyfolder.ru' });
 });
 
 $('add-account-btn').addEventListener('click', () => openAccountForm(null));
 
+$('site-url-inp').addEventListener('change', async () => {
+  const { accounts, activeAccountId } = await loadAccountsData();
+  await saveAccountsData(accounts, activeAccountId, $('site-url-inp').value);
+  checkAndUpdateDots(accounts, normalizeUrl($('site-url-inp').value));
+});
+
 $('form-test-btn').addEventListener('click', async () => {
-  const url   = normalizeUrl($('acc-url-inp').value);
+  const url   = normalizeUrl($('site-url-inp').value);
   const token = $('acc-token-inp').value.trim();
   if (!url || !token) { setFormStatus('err', '✕ Введите URL и токен'); return; }
   $('form-test-btn').disabled = true;
@@ -275,7 +292,7 @@ $('form-test-btn').addEventListener('click', async () => {
 
 $('form-save-btn').addEventListener('click', async () => {
   const name  = $('acc-name-inp').value.trim();
-  const url   = normalizeUrl($('acc-url-inp').value);
+  const url   = normalizeUrl($('site-url-inp').value);
   const token = $('acc-token-inp').value.trim();
   if (!url || !token) { setFormStatus('err', '✕ Заполните URL и токен'); return; }
 
@@ -283,13 +300,13 @@ $('form-save-btn').addEventListener('click', async () => {
 
   if (editingAccountId) {
     const idx = accounts.findIndex(a => a.id === editingAccountId);
-    if (idx >= 0) accounts[idx] = { ...accounts[idx], name: name || url, url, token };
-    await saveAccountsData(accounts, activeAccountId);
+    if (idx >= 0) accounts[idx] = { ...accounts[idx], name: name || 'Аккаунт', token };
+    await saveAccountsData(accounts, activeAccountId, url);
   } else {
-    const newAcc = { id: genId(), name: name || url, url, token };
+    const newAcc = { id: genId(), name: name || 'Аккаунт', token };
     accounts.push(newAcc);
     // First ever account → make it active
-    await saveAccountsData(accounts, accounts.length === 1 ? newAcc.id : activeAccountId);
+    await saveAccountsData(accounts, accounts.length === 1 ? newAcc.id : activeAccountId, url);
   }
 
   closeAccountForm();
@@ -347,9 +364,8 @@ $('test-dl-btn').addEventListener('click', async () => {
   } else {
     warn.style.display = 'flex';
     const isEdge = navigator.userAgent.includes('Edg/');
-    const { accounts, activeAccountId } = await loadAccountsData();
-    const acc = getActiveAccount(accounts, activeAccountId);
-    const serverUrl = acc ? escHtml(acc.url) : 'адрес вашего сервера';
+    const { siteUrl } = await loadAccountsData();
+    const serverUrl = escHtml(siteUrl || 'адрес вашего сервера');
     const browserName = isEdge ? 'Edge' : 'Chrome';
     if (errorType === 'no-permission') {
       inst.innerHTML = `<b>Причина:</b> расширению не выдано разрешение на загрузку файлов.<br>
@@ -443,7 +459,7 @@ async function renderDownloads() {
           <div class="ready-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
           <div class="ready-meta">${fmt(f.size)} · готово ${fmtDate(f.readyAt)}</div>
         </div>
-        <button class="btn-pc" data-url="${escHtml(encodeURIComponent(f.dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}">⬇ На ПК</button>
+        <button class="btn-pc" data-url="${escHtml(encodeURIComponent(f.dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}" data-account-id="${escHtml(f.accountId || activeAcc?.id || '')}">⬇ На ПК</button>
       </div>`).join('');
   } else {
     $('ready-section').style.display = 'none';
@@ -504,6 +520,7 @@ document.addEventListener('click', async e => {
   if (!btn) return;
   const url  = decodeURIComponent(btn.dataset.url);
   const name = decodeURIComponent(btn.dataset.name);
+  const accountId = btn.dataset.accountId || '';
   const orig = btn.textContent;
   btn.disabled = true; btn.textContent = '…';
   try {
@@ -511,7 +528,7 @@ document.addEventListener('click', async e => {
     btn.textContent = '✓ Начато';
     // Remove from readyFiles
     const { readyFiles = [] } = await new Promise(r => chrome.storage.local.get('readyFiles', r));
-    await new Promise(r => chrome.storage.local.set({ readyFiles: readyFiles.filter(f => f.name !== name) }, r));
+    await new Promise(r => chrome.storage.local.set({ readyFiles: readyFiles.filter(f => !(f.name === name && (!accountId || !f.accountId || f.accountId === accountId))) }, r));
     const card = document.getElementById('ri-' + encodeURIComponent(name));
     if (card) card.remove();
     if ($('ready-list') && !$('ready-list').children.length) $('ready-section').style.display = 'none';
