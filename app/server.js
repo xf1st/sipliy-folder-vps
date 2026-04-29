@@ -2633,7 +2633,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.select-check{width:16px;height:16px;accent-color:#a078ff;cursor:pointer;flex:0 0 auto}' +
   '#selection-bar{display:none;align-items:center;gap:10px;padding:10px 24px;border-bottom:1px solid #1f1f22;background:#17171a;flex-shrink:0}' +
   '#upload-panel{display:none;position:fixed;right:24px;bottom:24px;z-index:350;width:min(420px,calc(100vw - 48px));background:#1f1f22;border:1px solid #494454;border-radius:14px;padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.55);animation:slideUp .22s ease both}' +
-  '#toast{display:none;position:fixed;right:24px;top:24px;z-index:650;width:min(420px,calc(100vw - 48px));background:#1f1f22;border:1px solid #6d3bd7;border-radius:14px;padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.55);animation:slideUp .2s ease both}' +
+  '#toast{display:none;position:fixed;right:24px;bottom:24px;z-index:650;width:min(380px,calc(100vw - 48px));background:#1f1f22;border:1px solid #6d3bd7;border-radius:12px;padding:10px 14px;box-shadow:0 8px 32px rgba(0,0,0,.55);animation:slideUp .18s ease both}' +
   '.preview-panel{display:none;width:380px;max-width:38vw;border-left:1px solid #1f1f22;background:#151518;flex-shrink:0;flex-direction:column;overflow:hidden;transform-origin:right center}' +
   '.preview-panel.open{display:flex;animation:panelIn .22s cubic-bezier(.2,.8,.2,1) both}' +
   '.preview-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid #1f1f22;flex-shrink:0}' +
@@ -2807,7 +2807,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.bottom-nav-item.active{background:#211734;color:#d2bbff}' +
   '.bottom-nav-item .material-symbols-outlined{font-size:30px}' +
   '#upload-panel{left:20px!important;right:20px!important;bottom:104px!important;width:auto!important;border-radius:18px!important}' +
-  '#toast{left:20px!important;right:20px!important;top:76px!important;width:auto!important}' +
+  '#toast{left:20px!important;right:20px!important;bottom:24px!important;top:auto!important;width:auto!important}' +
   '#transfers-card{left:20px!important;right:20px!important;bottom:104px!important;width:auto!important;max-height:50vh}' +
   '#transfers-chip{right:20px!important;bottom:104px!important}' +
   '.preview-panel{position:fixed!important;left:0;right:0;bottom:0;z-index:70;width:100%!important;max-width:none!important;max-height:72dvh;border-left:0;border-top:1px solid #353437;border-radius:22px 22px 0 0;background:#1b1b1d}' +
@@ -2921,7 +2921,17 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="mv-bottom" class="mv-bottom"></div>' +
   '</div>' +
   '<div id="ctx-menu"></div>' +
-  '<div id="toast"><div id="toast-title" style="font-weight:700;font-size:13px;margin-bottom:6px"></div><div id="toast-body" style="font-size:12px;color:#cbc3d7;word-break:break-all"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn-ghost" data-action="open-toast-qr" style="padding:4px 9px">QR</button><button class="btn-ghost" data-action="copy-toast" style="padding:4px 9px">Копировать</button><button class="btn-ghost" data-action="hide-toast" style="padding:4px 9px">x</button></div></div>' +
+  '<div id="toast" style="display:flex;align-items:center;gap:10px">' +
+  '  <div style="flex:1;min-width:0">' +
+  '    <div id="toast-title" style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>' +
+  '    <div id="toast-body" style="font-size:11.5px;color:#cbc3d7;word-break:break-all;max-height:2.8em;overflow:hidden;line-height:1.4;margin-top:2px"></div>' +
+  '  </div>' +
+  '  <div style="display:flex;gap:5px;flex-shrink:0">' +
+  '    <button class="btn-ghost" data-action="open-toast-qr" style="padding:3px 8px;font-size:11px">QR</button>' +
+  '    <button class="btn-ghost" data-action="copy-toast" style="padding:3px 8px;font-size:11px">📋</button>' +
+  '    <button class="btn-ghost" data-action="hide-toast" style="padding:3px 8px;font-size:11px">✕</button>' +
+  '  </div>' +
+  '</div>' +
 
   /* ── DROP ZONE ── */
   '<div id="drop-zone">' +
