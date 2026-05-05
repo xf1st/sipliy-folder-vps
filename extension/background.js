@@ -3,7 +3,7 @@
 const ICON = 'icons/icon-128.png';
 const POLL_ALARM = 'poll-vps';
 const UPDATE_ALARM = 'check-update';
-const CURRENT_EXT_VERSION = '2.4.0';
+const CURRENT_EXT_VERSION = '2.4.1';
 
 function normalizeUrl(u) {
   u = (u || '').trim().replace(/\/+$/, '');
@@ -40,11 +40,27 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || msg.type !== 'add-url-download') return;
-  sendDownload(msg.url, { filename: msg.filename || '', forceAutoDownload: true })
-    .then(data => sendResponse({ ok: true, ...(data || {}) }))
-    .catch(e => sendResponse({ ok: false, error: e.message || 'Ошибка' }));
-  return true;
+  if (!msg) return;
+  if (msg.type === 'add-url-download') {
+    sendDownload(msg.url, { filename: msg.filename || '', forceAutoDownload: true })
+      .then(data => sendResponse({ ok: true, ...(data || {}) }))
+      .catch(e => sendResponse({ ok: false, error: e.message || 'Ошибка' }));
+    return true;
+  }
+  if (msg.type === 'capture-next-download') {
+    startDownloadCapture(msg.timeoutMs || 90000, msg.mode || 'direct')
+      .then(data => sendResponse({ ok: true, ...(data || {}) }))
+      .catch(e => sendResponse({ ok: false, error: e.message || 'Ошибка' }));
+    return true;
+  }
+  if (msg.type === 'cancel-download-capture') {
+    stopDownloadCapture('cancelled').then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg.type === 'get-download-capture') {
+    getCaptureState().then(data => sendResponse({ ok: true, capture: data.captureNext || null }));
+    return true;
+  }
 });
 
 // ─── Получение всех аккаунтов ─────────────────────────────
@@ -79,6 +95,138 @@ function getConfig() {
     });
   });
 }
+
+async function getCaptureState() {
+  return await localGet('captureNext');
+}
+
+async function startDownloadCapture(timeoutMs, mode = 'direct') {
+  const cfg = await getConfig();
+  if (!cfg.serverUrl || !cfg.token) throw new Error('Настройте аккаунт');
+  const captureNext = {
+    active: true,
+    accountId: cfg.accountId,
+    serverUrl: cfg.serverUrl,
+    mode: mode === 'relay' ? 'relay' : 'direct',
+    startedAt: Date.now(),
+    expiresAt: Date.now() + Math.max(15000, Math.min(timeoutMs || 90000, 180000)),
+  };
+  await localSet({ captureNext });
+  flashBadge('⏺', '#a083d1');
+  notify((captureNext.mode === 'relay' ? '⏺ Браузерный перехват включён' : '⏺ Перехват включён') + '\nТеперь нажмите настоящую кнопку Download на странице');
+  return { captureNext };
+}
+
+async function stopDownloadCapture(reason) {
+  const { captureNext = null } = await localGet('captureNext');
+  if (captureNext) {
+    captureNext.active = false;
+    captureNext.reason = reason || 'stopped';
+    captureNext.stoppedAt = Date.now();
+    await localSet({ captureNext });
+  }
+  refreshBadge();
+}
+
+function getDownloadFilename(item, url) {
+  const raw = item.filename || item.suggestedFilename || '';
+  const fromPath = raw.split(/[\\/]/).filter(Boolean).pop();
+  if (fromPath) return fromPath;
+  try {
+    const u = new URL(url);
+    return decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || '');
+  } catch {
+    return '';
+  }
+}
+
+async function buildCapturedHeaders(item, url) {
+  const headers = [];
+  const ref = item.referrer || item.referrerUrl || '';
+  if (ref) headers.push({ name: 'Referer', value: ref });
+  const ua = (self.navigator && self.navigator.userAgent) || 'Mozilla/5.0';
+  if (ua) headers.push({ name: 'User-Agent', value: ua });
+  try {
+    const cookies = await new Promise(resolve => chrome.cookies.getAll({ url }, resolve));
+    const cookieHeader = (cookies || []).map(c => c.name + '=' + c.value).join('; ');
+    if (cookieHeader) headers.push({ name: 'Cookie', value: cookieHeader });
+  } catch {}
+  return headers;
+}
+
+async function relayUploadToVps(url, opts = {}) {
+  const cfg = await getConfig();
+  if (!cfg.serverUrl || !cfg.token) throw new Error('Настройте аккаунт');
+  flashBadge('⇅', '#a083d1');
+  
+  const headers = {};
+  if (opts.headers) {
+    opts.headers.forEach(h => { headers[h.name] = h.value; });
+  }
+
+  const res = await fetch(url, { 
+    headers,
+    credentials: 'include' 
+  });
+  if (!res.ok) throw new Error('Browser fetch HTTP ' + res.status);
+  const blob = await res.blob();
+  let name = opts.filename || '';
+  const cd = res.headers.get('content-disposition') || '';
+  const m = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i);
+  if (!name && m) name = decodeURIComponent(m[1] || m[2] || '');
+  if (!name) name = getDownloadFilename({}, url) || 'download.bin';
+  const fd = new FormData();
+  fd.append('file', blob, name);
+  const up = await fetch(cfg.serverUrl + '/api/upload-ext', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + cfg.token },
+    body: fd,
+  });
+  const data = await up.json().catch(() => ({}));
+  if (!up.ok || data.error) throw new Error(data.error || ('Upload HTTP ' + up.status));
+  notify('✓ Файл загружен на VPS через браузер\n' + (data.name || name));
+  await syncVpsFiles();
+  return data;
+}
+
+chrome.downloads.onCreated.addListener(async (item) => {
+  const { captureNext = null } = await localGet('captureNext');
+  if (!captureNext || !captureNext.active) return;
+  if (Date.now() > captureNext.expiresAt) { await stopDownloadCapture('expired'); return; }
+  
+  const url = item.finalUrl || item.url || '';
+  // Игнорируем blob: и прочие внутренние схемы, если это не relay режим
+  if (!/^https?:\/\//i.test(url) && captureNext.mode !== 'relay') return;
+  
+  // Игнорируем скачивания с самого VPS сервера
+  if (captureNext.serverUrl && url.includes(captureNext.serverUrl + '/api/ext-dl/')) return;
+  
+  try {
+    // Пытаемся отменить как можно раньше
+    await chrome.downloads.cancel(item.id).catch(() => {});
+    await chrome.downloads.erase({ id: item.id }).catch(() => {});
+    
+    await stopDownloadCapture('captured');
+    
+    const filename = getDownloadFilename(item, url);
+    const headers = await buildCapturedHeaders(item, url);
+    
+    if (captureNext.mode === 'relay') {
+      notify('⇅ Поймал ссылку\nКачаю браузером и загружаю на VPS...');
+      relayUploadToVps(url, { filename, headers }).catch(e => {
+        notify('✕ Ошибка relay-загрузки: ' + e.message);
+      });
+    } else {
+      notify('⏫ Поймал одноразовую ссылку\nОтправляю на VPS...');
+      sendDownload(url, { filename, headers, forceAutoDownload: true }).catch(e => {
+        notify('✕ Ошибка отправки на VPS: ' + e.message);
+      });
+    }
+  } catch (e) {
+    await stopDownloadCapture('error');
+    notify('✕ Не удалось обработать перехваченную загрузку: ' + (e.message || 'ошибка'));
+  }
+});
 
 // ─── Синхронизация файлов VPS (по всем аккаунтам) ────────
 async function syncVpsFiles() {
@@ -319,12 +467,18 @@ function setupContextMenus() {
       ['dl-image',     'Скачать изображение на VPS',       ['image']],
       ['dl-video',     'Скачать видео/аудио на VPS',       ['video', 'audio']],
       ['dl-page',      'Скачать эту страницу на VPS',      ['page']],
+      ['capture-next',  'Перехватить следующую загрузку на VPS', ['page']],
+      ['capture-relay', 'Перехватить и загрузить браузером на VPS', ['page']],
       ['dl-selection', 'Скачать выделенный URL на VPS',    ['selection']],
     ].forEach(([id, title, contexts]) => chrome.contextMenus.create({ id, title, contexts }));
   });
 }
 
 chrome.contextMenus.onClicked.addListener((info) => {
+  if (info.menuItemId === 'capture-next' || info.menuItemId === 'capture-relay') {
+    startDownloadCapture(90000, info.menuItemId === 'capture-relay' ? 'relay' : 'direct').catch(e => notify('✕ ' + (e.message || 'Ошибка')));
+    return;
+  }
   const urls = { 'dl-link': info.linkUrl, 'dl-image': info.srcUrl, 'dl-video': info.srcUrl, 'dl-page': info.pageUrl, 'dl-selection': (info.selectionText || '').trim() };
   const url = urls[info.menuItemId];
   if (!url) return;
@@ -343,7 +497,9 @@ async function sendDownload(url, opts = {}) {
     const res = await fetchExt(cfg, '/api/add-ext', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'url=' + encodeURIComponent(url) + (opts.filename ? '&filename=' + encodeURIComponent(opts.filename) : ''),
+      body: 'url=' + encodeURIComponent(url)
+        + (opts.filename ? '&filename=' + encodeURIComponent(opts.filename) : '')
+        + (opts.headers ? '&headers=' + encodeURIComponent(JSON.stringify(opts.headers)) : ''),
       signal: ctrl.signal,
     });
     const data = await res.json().catch(() => ({}));
@@ -358,7 +514,7 @@ async function sendDownload(url, opts = {}) {
     const { pendingGids = {} } = await localGet('pendingGids');
     pendingGids[data.gid] = { gid: data.gid, name: origName, origName, status: 'active', addedAt: Date.now(), progress: 0, accountId: cfg.accountId, forceAutoDownload: !!opts.forceAutoDownload };
     await localSet({ pendingGids });
-    setupAlarm();
+    setupAlarms();
     setTimeout(pollPendingDownloads, 1000);
 
     const { autoDownload = true } = await localGet('autoDownload');

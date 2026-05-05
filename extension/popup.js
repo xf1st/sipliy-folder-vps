@@ -1,4 +1,4 @@
-// Sipliy Folder VPS — popup script v2.3 (multi-account)
+// Sipliy Folder VPS — popup script v2.4 (multi-account)
 
 const $ = id => document.getElementById(id);
 
@@ -266,9 +266,19 @@ $('acc-eye').addEventListener('click', () => {
   inp.type = inp.type === 'password' ? 'text' : 'password';
 });
 
-$('open-site-form').addEventListener('click', e => {
-  e.preventDefault();
-  chrome.tabs.create({ url: normalizeUrl($('site-url-inp').value) || 'https://sipliyfolder.ru' });
+// Клик по любой ссылке в попапе
+document.addEventListener('click', e => {
+  const a = e.target.closest('a');
+  if (a && a.getAttribute('href') !== '#') {
+    // Если есть реальная ссылка
+    return; 
+  }
+  if (a && (a.id === 'open-site-form' || a.id === 'open-help' || a.classList.contains('site-link'))) {
+    e.preventDefault();
+    const urlInp = $('site-url-inp');
+    const url = normalizeUrl(urlInp ? urlInp.value : '') || 'https://sipliyfolder.ru';
+    chrome.tabs.create({ url: a.id === 'open-help' ? chrome.runtime.getURL('welcome.html') : url });
+  }
 });
 
 $('add-account-btn').addEventListener('click', () => openAccountForm(null));
@@ -391,11 +401,6 @@ $('test-dl-btn').addEventListener('click', async () => {
   setTimeout(() => { btn.disabled = false; }, 1500);
 });
 
-$('open-help').addEventListener('click', e => {
-  e.preventDefault();
-  chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
-});
-
 // ─── Initialization ───────────────────────────────────────
 (async () => {
   const { accounts } = await initSettings();
@@ -475,17 +480,25 @@ async function renderDownloads() {
   } else {
     const dls = await dlRes.json().catch(() => []);
     const ongoing = dls.filter(d => d.status !== 'complete');
+    const errorCount = ongoing.filter(d => d.status === 'error').length;
     const countEl = $('dl-count');
-    ongoing.length > 0
-      ? (countEl.textContent = ongoing.length, countEl.classList.add('show'))
+    const activeCount = ongoing.filter(d => d.status === 'active' || d.status === 'waiting').length;
+    activeCount > 0
+      ? (countEl.textContent = activeCount, countEl.classList.add('show'))
       : countEl.classList.remove('show');
+
+    // Кнопка очистки ошибок
+    const purgeBtn = $('purge-errors-btn');
+    if (purgeBtn) purgeBtn.style.display = errorCount > 0 ? '' : 'none';
+
     activeEl.innerHTML = ongoing.length
       ? ongoing.map(d => {
           const speed = d.speed ? ' · ' + fmt(d.speed) + '/с' : '';
+          const displayName = d.name || (d.status === 'error' ? '(без имени)' : '...');
           return `<div class="dl-item">
             <div class="dl-top">
               <div style="min-width:0;flex:1">
-                <div class="dl-name" title="${escHtml(d.name)}">${escHtml(d.name)}</div>
+                <div class="dl-name" title="${escHtml(displayName)}">${escHtml(displayName)}</div>
                 <div class="dl-meta">${fmt(d.downloaded)} / ${fmt(d.size)}${speed}</div>
               </div>
               <span class="dl-badge ${d.status}">${SL[d.status]||d.status}${d.progress > 0 ? ' '+d.progress+'%' : ''}</span>
@@ -603,6 +616,80 @@ async function addManualUrlDownload() {
   }
 }
 
+function setCaptureStatus(kind, text) {
+  const el = $('capture-status');
+  if (!el) return;
+  el.className = 'url-status ' + (kind || '');
+  el.textContent = text || '';
+}
+
+async function refreshCaptureStatus() {
+  const btn = $('capture-next-btn');
+  const relay = $('capture-relay-btn');
+  const cancel = $('capture-cancel-btn');
+  if (!btn || !cancel) return;
+  // Читаем напрямую из storage — не зависим от того, работает ли SW
+  const { captureNext = null } = await new Promise(r => chrome.storage.local.get('captureNext', r));
+  const c = captureNext;
+  if (c && c.active && Date.now() < c.expiresAt) {
+    btn.disabled = true;
+    if (relay) relay.disabled = true;
+    cancel.style.display = '';
+    const sec = Math.max(0, Math.ceil((c.expiresAt - Date.now()) / 1000));
+    setCaptureStatus('', (c.mode === 'relay' ? 'Браузер: ' : 'VPS: ') + sec + 'с');
+  } else {
+    btn.disabled = false;
+    if (relay) relay.disabled = false;
+    cancel.style.display = 'none';
+    setCaptureStatus('', '');
+  }
+}
+
+async function startCaptureNextDownload(mode = 'direct') {
+  const btn = $('capture-next-btn');
+  const relayBtn = $('capture-relay-btn');
+  if (btn) btn.disabled = true;
+  if (relayBtn) relayBtn.disabled = true;
+  setCaptureStatus('', 'Включаю...');
+  try {
+    let data;
+    try {
+      data = await chrome.runtime.sendMessage({ type: 'capture-next-download', timeoutMs: 90000, mode });
+    } catch (_) {
+      data = null; // SW спит — перейдём к fallback
+    }
+    if (data && !data.ok) throw new Error(data.error || 'Ошибка');
+    if (!data || !data.captureNext) {
+      // Fallback: SW не ответил — пишем состояние напрямую в storage
+      const cfg = await getConfig();
+      if (!cfg.serverUrl || !cfg.token) throw new Error('Добавьте аккаунт');
+      const captureNext = {
+        active: true, accountId: cfg.accountId, serverUrl: cfg.serverUrl,
+        mode: mode === 'relay' ? 'relay' : 'direct',
+        startedAt: Date.now(), expiresAt: Date.now() + 90000,
+      };
+      await new Promise(r => chrome.storage.local.set({ captureNext }, r));
+    }
+    setCaptureStatus('ok', mode === 'relay' ? 'Кликни Download: браузер загрузит на VPS' : 'Теперь нажми Download на странице');
+    refreshCaptureStatus();
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    if (relayBtn) relayBtn.disabled = false;
+    setCaptureStatus('err', e.message || 'Ошибка');
+  }
+}
+
+async function cancelCaptureNextDownload() {
+  // Пишем отмену напрямую в storage + уведомляем SW если он жив
+  const { captureNext = null } = await new Promise(r => chrome.storage.local.get('captureNext', r));
+  if (captureNext) {
+    await new Promise(r => chrome.storage.local.set({ captureNext: { ...captureNext, active: false, reason: 'cancelled' } }, r));
+  }
+  try { chrome.runtime.sendMessage({ type: 'cancel-download-capture' }); } catch (_) {}
+  setCaptureStatus('', '');
+  refreshCaptureStatus();
+}
+
 // ─── Download button handler (event delegation, CSP-safe) ─
 document.addEventListener('click', async e => {
   const btn = e.target.closest('button[data-url][data-name]');
@@ -629,9 +716,26 @@ document.addEventListener('click', async e => {
 });
 
 $('refresh-btn').addEventListener('click', () => { clearTimeout(pollTimer); loadDownloadsTab(); });
+$('purge-errors-btn').addEventListener('click', async () => {
+  const btn = $('purge-errors-btn');
+  btn.disabled = true; btn.textContent = '⏳ Очищаю...';
+  try {
+    const cfg = await getConfig();
+    await fetch(cfg.serverUrl + '/api/purge-errors-ext', {
+      method: 'POST', headers: { 'Authorization': 'Bearer ' + cfg.token }
+    });
+  } catch (_) {}
+  clearTimeout(pollTimer);
+  loadDownloadsTab();
+});
 $('manual-url-btn').addEventListener('click', addManualUrlDownload);
 $('manual-url-inp').addEventListener('keydown', e => { if (e.key === 'Enter') addManualUrlDownload(); });
 $('manual-name-inp').addEventListener('keydown', e => { if (e.key === 'Enter') addManualUrlDownload(); });
+$('capture-next-btn')?.addEventListener('click', () => startCaptureNextDownload('direct'));
+$('capture-relay-btn')?.addEventListener('click', () => startCaptureNextDownload('relay'));
+$('capture-cancel-btn')?.addEventListener('click', cancelCaptureNextDownload);
+refreshCaptureStatus();
+setInterval(refreshCaptureStatus, 1000);
 window.addEventListener('unload', () => clearTimeout(pollTimer));
 
 // ─── QR / Share modal ─────────────────────────────────────
@@ -742,7 +846,7 @@ document.addEventListener('click', e => {
 });
 
 // ─── OTA version check ────────────────────────────────────
-const CURRENT_VERSION = '2.4.0';
+const CURRENT_VERSION = '2.4.1';
 
 function versionNewer(a, b) {
   const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
