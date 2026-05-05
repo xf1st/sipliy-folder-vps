@@ -846,7 +846,7 @@ document.addEventListener('click', e => {
 });
 
 // ─── OTA version check ────────────────────────────────────
-const CURRENT_VERSION = '2.4.1';
+const CURRENT_VERSION = chrome.runtime.getManifest().version;
 
 function versionNewer(a, b) {
   const pa = a.split('.').map(Number), pb = b.split('.').map(Number);

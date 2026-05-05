@@ -3,7 +3,7 @@
 const ICON = 'icons/icon-128.png';
 const POLL_ALARM = 'poll-vps';
 const UPDATE_ALARM = 'check-update';
-const CURRENT_EXT_VERSION = '2.4.1';
+const CURRENT_EXT_VERSION = chrome.runtime.getManifest().version;
 
 function normalizeUrl(u) {
   u = (u || '').trim().replace(/\/+$/, '');
@@ -189,46 +189,62 @@ async function relayUploadToVps(url, opts = {}) {
   return data;
 }
 
-chrome.downloads.onCreated.addListener(async (item) => {
+async function handleCapturedDownloadItem(item) {
   const { captureNext = null } = await localGet('captureNext');
-  if (!captureNext || !captureNext.active) return;
-  if (Date.now() > captureNext.expiresAt) { await stopDownloadCapture('expired'); return; }
-  
+  if (!captureNext || !captureNext.active) return false;
+  if (captureNext.handlingDownloadId === item.id) return true;
+  if (Date.now() > captureNext.expiresAt) { await stopDownloadCapture('expired'); return true; }
+
   const url = item.finalUrl || item.url || '';
-  // Игнорируем blob: и прочие внутренние схемы, если это не relay режим
-  if (!/^https?:\/\//i.test(url) && captureNext.mode !== 'relay') return;
-  
-  // Игнорируем скачивания с самого VPS сервера
-  if (captureNext.serverUrl && url.includes(captureNext.serverUrl + '/api/ext-dl/')) return;
-  
+  if (!/^https?:\/\//i.test(url)) return false;
+  if (captureNext.serverUrl && url.includes(captureNext.serverUrl + '/api/ext-dl/')) return false;
+
+  captureNext.handlingDownloadId = item.id;
+  await localSet({ captureNext });
+
   try {
-    // Пытаемся отменить как можно раньше
     await chrome.downloads.cancel(item.id).catch(() => {});
     await chrome.downloads.erase({ id: item.id }).catch(() => {});
-    
     await stopDownloadCapture('captured');
-    
+
     const filename = getDownloadFilename(item, url);
     const headers = await buildCapturedHeaders(item, url);
-    
+
     if (captureNext.mode === 'relay') {
-      notify('⇅ Поймал ссылку\nКачаю браузером и загружаю на VPS...');
-      relayUploadToVps(url, { filename, headers }).catch(e => {
-        notify('✕ Ошибка relay-загрузки: ' + e.message);
-      });
+      notify('?????? ??????\n????? ????????? ? ???????? ?? VPS...');
+      relayUploadToVps(url, { filename, headers }).catch(e => notify('?????? relay-????????: ' + e.message));
     } else {
-      notify('⏫ Поймал одноразовую ссылку\nОтправляю на VPS...');
-      sendDownload(url, { filename, headers, forceAutoDownload: true }).catch(e => {
-        notify('✕ Ошибка отправки на VPS: ' + e.message);
-      });
+      notify('?????? ????????\n????????? ?????? ?? VPS...');
+      sendDownload(url, { filename, headers, forceAutoDownload: true }).catch(e => notify('?????? ???????? ?? VPS: ' + e.message));
     }
+    return true;
   } catch (e) {
     await stopDownloadCapture('error');
-    notify('✕ Не удалось обработать перехваченную загрузку: ' + (e.message || 'ошибка'));
+    notify('?? ??????? ?????????? ????????????? ????????: ' + (e.message || '??????'));
+    return true;
+  }
+}
+
+chrome.downloads.onCreated.addListener(async (item) => {
+  const handled = await handleCapturedDownloadItem(item);
+  if (!handled) {
+    const { captureNext = null } = await localGet('captureNext');
+    if (captureNext && captureNext.active) {
+      captureNext.pendingDownloadId = item.id;
+      await localSet({ captureNext });
+    }
   }
 });
 
-// ─── Синхронизация файлов VPS (по всем аккаунтам) ────────
+chrome.downloads.onChanged.addListener(async (delta) => {
+  const { captureNext = null } = await localGet('captureNext');
+  if (!captureNext || !captureNext.active) return;
+  if (captureNext.pendingDownloadId && captureNext.pendingDownloadId !== delta.id) return;
+  if (!delta.url && !delta.finalUrl && !delta.filename && !delta.state) return;
+  const items = await chrome.downloads.search({ id: delta.id }).catch(() => []);
+  if (items && items[0]) await handleCapturedDownloadItem(items[0]);
+});
+
 async function syncVpsFiles() {
   const accounts = await getAllAccounts();
   for (const acc of accounts) {
