@@ -1137,6 +1137,55 @@ function fmZipItems(username, items, downloadName, cb, shareOptions) {
   });
 }
 
+function fmArchiveEntryName(entryPath) {
+  return path.basename(String(entryPath || '').replace(/\\/g, '/')) || 'archive-entry';
+}
+
+function fmParse7zList(stdout, archivePath) {
+  const entries = [];
+  let cur = null;
+  String(stdout || '').split(/\r?\n/).forEach(line => {
+    const m = line.match(/^([^=]+) = (.*)$/);
+    if (!m) return;
+    const key = m[1].trim();
+    const val = m[2];
+    if (key === 'Path') {
+      if (cur && cur.path && cur.path !== cur.archivePath) entries.push(cur);
+      cur = { path: val };
+      return;
+    }
+    if (!cur) return;
+    if (key === 'Size') cur.size = parseInt(val, 10) || 0;
+    else if (key === 'Packed Size') cur.packedSize = parseInt(val, 10) || 0;
+    else if (key === 'Modified') cur.modified = val;
+    else if (key === 'Attributes') cur.isDir = val.indexOf('D') !== -1;
+  });
+  if (cur && cur.path && cur.path !== cur.archivePath) entries.push(cur);
+  const archiveBase = path.basename(archivePath || '');
+  return entries
+    .filter(x => x.path && x.path !== archivePath && x.path !== archiveBase && !x.path.endsWith('/'))
+    .map(x => ({
+      path: x.path,
+      name: fmArchiveEntryName(x.path),
+      size: x.size || 0,
+      packedSize: x.packedSize || 0,
+      modified: x.modified || null,
+      isDir: !!x.isDir,
+    }));
+}
+
+function fmRun7z(args, cb) {
+  execFile('7z', args, { timeout: 120000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    if (!err) return cb(null, stdout);
+    execFile('7zz', args, { timeout: 120000, maxBuffer: 16 * 1024 * 1024 }, (err2, stdout2, stderr2) => {
+      if (!err2) return cb(null, stdout2);
+      const e = new Error((stderr2 || stderr || err2.message || err.message || '7z failed').trim());
+      e.code = err2.code || err.code;
+      cb(e);
+    });
+  });
+}
+
 // GET /api/fm/list?path=
 app.get('/api/fm/list', auth, (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
@@ -1366,6 +1415,89 @@ app.get('/api/fm/preview', auth, (req, res) => {
     return;
   }
   res.sendFile(full);
+});
+
+app.get('/api/fm/doc-preview', auth, async (req, res) => {
+  const full = fmResolve(req.session.user, req.query.path || '');
+  if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).json({ error: 'Not found' });
+  const ext = path.extname(full).toLowerCase();
+  try {
+    if (ext === '.docx') {
+      let mammoth;
+      try { mammoth = require('mammoth'); }
+      catch { return res.status(501).json({ error: 'mammoth dependency is not installed' }); }
+      const out = await mammoth.convertToHtml({ path: full }, {
+        styleMap: [
+          "p[style-name='Title'] => h1:fresh",
+          "p[style-name='Subtitle'] => h2:fresh",
+        ],
+      });
+      return res.json({ ok: true, type: 'docx', html: out.value || '<p></p>', messages: out.messages || [] });
+    }
+    if (['.xlsx', '.csv'].includes(ext)) {
+      let ExcelJS;
+      try { ExcelJS = require('exceljs'); }
+      catch { return res.status(501).json({ error: 'exceljs dependency is not installed' }); }
+      const wb = new ExcelJS.Workbook();
+      if (ext === '.csv') await wb.csv.readFile(full);
+      else await wb.xlsx.readFile(full);
+      const sheets = wb.worksheets.slice(0, 8).map(ws => {
+        let html = '<table><tbody>';
+        const maxRow = Math.min(ws.rowCount, 120);
+        const maxCol = Math.min(ws.columnCount, 40);
+        for (let r = 1; r <= maxRow; r++) {
+          html += '<tr>';
+          const row = ws.getRow(r);
+          for (let c = 1; c <= maxCol; c++) {
+            const cell = row.getCell(c);
+            const raw = cell.text || (cell.value == null ? '' : String(cell.value));
+            html += '<td>' + String(raw).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch])) + '</td>';
+          }
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+        return { name: ws.name || 'Sheet', html };
+      });
+      return res.json({ ok: true, type: 'sheet', sheets });
+    }
+    return res.status(415).json({ error: 'Unsupported document type' });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Preview failed' });
+  }
+});
+
+app.get('/api/fm/archive/list', auth, (req, res) => {
+  const full = fmResolve(req.session.user, req.query.path || '');
+  if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).json({ error: 'Not found' });
+  const ext = path.extname(full).toLowerCase();
+  if (!['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz'].includes(ext)) return res.status(415).json({ error: 'Unsupported archive type' });
+  fmRun7z(['l', '-slt', full], (err, stdout) => {
+    if (err) return res.status(501).json({ error: '7z is not installed or cannot read this archive', details: err.message });
+    const entries = fmParse7zList(stdout, full).slice(0, 2000);
+    res.json({ ok: true, entries });
+  });
+});
+
+app.get('/api/fm/archive/download', auth, (req, res) => {
+  const full = fmResolve(req.session.user, req.query.path || '');
+  const entry = String(req.query.entry || '');
+  if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory() || !entry) return res.status(404).send('Not found');
+  if (path.isAbsolute(entry) || entry.includes('..')) return res.status(403).send('Invalid archive entry');
+  const filename = fmArchiveEntryName(entry);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', 'attachment; filename="' + encodeURIComponent(filename).replace(/%/g, '') + '"; filename*=UTF-8\'\'' + encodeURIComponent(filename));
+  const child = spawn('7z', ['x', '-so', full, entry], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let failed = false;
+  child.on('error', () => {
+    if (res.headersSent) return res.destroy();
+    failed = true;
+    res.status(501).send('7z is not installed');
+  });
+  child.stderr.on('data', () => {});
+  child.stdout.pipe(res);
+  child.on('close', code => {
+    if (code !== 0 && !failed) res.destroy();
+  });
 });
 
 app.get('/api/fm/meta', auth, (req, res) => {
@@ -2822,6 +2954,14 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.preview-media-wrap{width:100%;min-height:260px;display:flex;align-items:center;justify-content:center}' +
   '.preview-media-wrap:fullscreen{background:#050506;padding:24px}' +
   '.preview-media-wrap:fullscreen .preview-media{max-width:100vw;max-height:100vh}' +
+  '.doc-preview{font-size:13px;line-height:1.55;color:#e4e1e6;background:#17171a;border:1px solid #353437;border-radius:14px;padding:14px;overflow:auto}' +
+  '.doc-preview h1,.doc-preview h2,.doc-preview h3{margin:0 0 10px;color:#fff;line-height:1.2}' +
+  '.doc-preview table,.archive-table{width:100%;border-collapse:collapse;font-size:12px}' +
+  '.doc-preview td,.doc-preview th,.archive-table td,.archive-table th{border-bottom:1px solid #353437;padding:8px;text-align:left;vertical-align:top}' +
+  '.doc-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}' +
+  '.doc-tab{border:1px solid #494454;background:#1f1f22;color:#e4e1e6;border-radius:999px;padding:6px 10px;font-weight:800;font-size:12px;cursor:pointer}' +
+  '.archive-path{max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e4e1e6}' +
+  '.archive-dir{color:#d2bbff;font-weight:800}' +
   '.media-viewer{position:fixed;inset:0;z-index:900;background:rgba(5,5,7,.96);display:none;flex-direction:column;color:#fff}' +
   '.media-viewer.open{display:flex;animation:viewerIn .2s cubic-bezier(.2,.8,.2,1) both}' +
   '.mv-top{height:64px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(20,20,24,.72);backdrop-filter:blur(18px)}' +
@@ -2903,6 +3043,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'body.light .preview-head{border-bottom-color:#e2d9f3}' +
   'body.light #preview-title{color:#17151c}' +
   'body.light #preview-info{background:#faf8ff;border-top-color:#e2d9f3}' +
+  'body.light .doc-preview{background:#fff;color:#17151c;border-color:#e2d9f3}' +
+  'body.light .doc-preview h1,body.light .doc-preview h2,body.light .doc-preview h3{color:#17151c}' +
+  'body.light .doc-preview td,body.light .doc-preview th,body.light .archive-table td,body.light .archive-table th{border-bottom-color:#e2d9f3}' +
+  'body.light .doc-tab{background:#faf8ff;border-color:#e2d9f3;color:#17151c}' +
+  'body.light .archive-path{color:#17151c}' +
   'body.light .meta-row{border-bottom-color:#e8e0f4}' +
   'body.light .meta-lbl{color:#9b91b4}' +
   'body.light .meta-val{color:#17151c}' +
@@ -3369,8 +3514,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function setTransfersUi(count){var card=document.getElementById("transfers-card"),chip=document.getElementById("transfers-chip"),txt=document.getElementById("transfers-chip-text");if(!card||!chip)return;if(count>0){txt.textContent=count+" активн.";if(transfersMinimized){card.style.display="none";chip.classList.add("active");}else{card.style.display="block";chip.classList.remove("active");}}else{card.style.display="none";chip.classList.remove("active");}}' +
   'function applyTheme(){var light=localStorage.getItem("fm-theme")==="light";document.body.classList.toggle("light",light);}' +
   'function toggleTheme(){localStorage.setItem("fm-theme",document.body.classList.contains("light")?"dark":"light");applyTheme();}' +
-  'function fileKind(name){var ext=(name.split(".").pop()||"").toLowerCase();if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext))return"image";if(["mp4","webm","ogg","mov","mkv"].includes(ext))return"video";if(["mp3","wav","m4a","flac","aac","oga"].includes(ext))return"audio";if(ext==="pdf")return"pdf";if(["zip","rar","7z","tar","gz"].includes(ext))return"archive";if(["exe","msi","apk","deb"].includes(ext))return"app";if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf"].includes(ext))return"text";return"file";}' +
-  'function fileThumb(name,fp,isDir){if(isDir)return \'<div class="file-thumb"><span class="material-symbols-outlined">folder</span></div>\';var k=fileKind(name);var ext=(name.split(".").pop()||"").toLowerCase();if(k==="image"||ext==="exe"||k==="video"){var fb=ext==="exe"?"deployed_code":k==="video"?"movie":"image";return \'<div class="file-thumb"><img src="/api/fm/preview?path=\'+encodeURIComponent(fp)+\'&thumb=1" onerror="this.outerHTML=\'+String.fromCharCode(39)+\'<span class=material-symbols-outlined>\'+fb+\'</span>\'+String.fromCharCode(39)+\'"></div>\';}var icons={video:"movie",audio:"audio_file",pdf:"picture_as_pdf",archive:"folder_zip",app:"deployed_code",text:"article",file:"draft"};return \'<div class="file-thumb"><span class="material-symbols-outlined">\'+(icons[k]||"draft")+\'</span></div>\';}' +
+  'function fileKind(name){var ext=(name.split(".").pop()||"").toLowerCase();if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext))return"image";if(["mp4","webm","ogg","mov","mkv"].includes(ext))return"video";if(["mp3","wav","m4a","flac","aac","oga"].includes(ext))return"audio";if(ext==="pdf")return"pdf";if(["docx","xlsx","xls","ods","csv"].includes(ext))return"office";if(["zip","rar","7z","tar","gz"].includes(ext))return"archive";if(["exe","msi","apk","deb"].includes(ext))return"app";if(["txt","log","md","json","js","css","html","xml","yml","yaml","ini","conf"].includes(ext))return"text";return"file";}' +
+  'function fileThumb(name,fp,isDir){if(isDir)return \'<div class="file-thumb"><span class="material-symbols-outlined">folder</span></div>\';var k=fileKind(name);var ext=(name.split(".").pop()||"").toLowerCase();if(k==="image"||ext==="exe"||k==="video"){var fb=ext==="exe"?"deployed_code":k==="video"?"movie":"image";return \'<div class="file-thumb"><img src="/api/fm/preview?path=\'+encodeURIComponent(fp)+\'&thumb=1" onerror="this.outerHTML=\'+String.fromCharCode(39)+\'<span class=material-symbols-outlined>\'+fb+\'</span>\'+String.fromCharCode(39)+\'"></div>\';}var icons={video:"movie",audio:"audio_file",pdf:"picture_as_pdf",office:"table_view",archive:"folder_zip",app:"deployed_code",text:"article",file:"draft"};return \'<div class="file-thumb"><span class="material-symbols-outlined">\'+(icons[k]||"draft")+\'</span></div>\';}' +
   'function makeZip(items,name,startDownload){return fetch("/api/fm/zip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:items,name:name||"cloudspace.zip"})}).then(function(r){return r.json();}).then(function(d){if(!d.ok)throw new Error(d.error||"Ошибка архива");if(startDownload)window.location.href=d.url;return d;});}' +
   'function downloadSelected(){var items=selectedList();if(!items.length)return;if(items.some(function(x){return x.isDir;})||items.length>5){zipSelected();return;}items.forEach(function(it,i){setTimeout(function(){var a=document.createElement("a");a.href="/api/fm/download?path="+encodeURIComponent(it.fp);a.download=it.name;document.body.appendChild(a);a.click();a.remove();},i*350);});}' +
   'function zipSelected(){var items=selectedPayload();if(!items.length)return;makeZip(items,"cloudspace.zip",true).catch(function(e){alert(e.message);});}' +
@@ -3578,6 +3723,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function fitPlyrToVideo(media,player){if(!media||!player)return;var container=player.elements&&player.elements.container;if(!container)return;function fit(){var vw=media.videoWidth||0,vh=media.videoHeight||0;if(!vw||!vh)return;var host=media.closest(".preview-media-wrap")||media.closest(".mv-stage")||container.parentElement;if(!host)return;var maxW=host.clientWidth||window.innerWidth,maxH=host.clientHeight||Math.round(window.innerHeight*.72);if(host.classList&&host.classList.contains("mv-stage"))maxH=Math.max(220,maxH-4);else maxH=Math.min(maxH||Math.round(window.innerHeight*.72),Math.round(window.innerHeight*.72));var ratio=vw/vh,w=maxW,h=w/ratio;if(h>maxH){h=maxH;w=h*ratio;}container.style.width=Math.max(180,Math.floor(w))+"px";container.style.maxWidth="100%";container.style.aspectRatio=vw+" / "+vh;var wrap=container.querySelector(".plyr__video-wrapper");if(wrap){wrap.style.aspectRatio=vw+" / "+vh;wrap.style.height=Math.floor(h)+"px";}media.style.objectFit="contain";}media.addEventListener("loadedmetadata",fit,{once:false});window.addEventListener("resize",fit);setTimeout(fit,80);setTimeout(fit,400);}\n' +
   'function initPlyr(selector,isVideo,key){if(typeof Plyr==="undefined")return null;var opts={controls:isVideo?["play-large","play","progress","current-time","duration","mute","volume","captions","settings","pip","airplay","fullscreen"]:["play","progress","current-time","duration","mute","volume"],settings:["captions","quality","speed","loop"],keyboard:{focused:true,global:false},tooltips:{controls:true,seek:true}};var p=new Plyr(selector,opts);if(isVideo)fitPlyrToVideo(document.querySelector(selector),p);p.on("ready",function(e){var t=localStorage.getItem(key);if(t)e.detail.plyr.currentTime=parseFloat(t);});p.on("timeupdate",function(e){localStorage.setItem(key,e.detail.plyr.currentTime);});return p;}\n' +
   'function openPreview(fp,name,isDir){if(isDir){navigateTo(fp);return;}if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}previewFp=fp;previewName=name;previewKind="";previewSrc="";var panel=document.getElementById("preview-panel");var body=document.getElementById("preview-body");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");body.innerHTML="";renderPreviewInfo(fp,name);var ext=(name.split(".").pop()||"").toLowerCase();var src="/api/fm/preview?path="+encodeURIComponent(fp);if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext)){previewKind="image";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(["mp4","webm","ogg","mov","mkv"].includes(ext)){previewKind="video";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video id="preview-plyr" src="${src}" playsinline controls></video></div>`;setTimeout(function(){try{window.previewPlyrInstance=initPlyr("#preview-plyr",true,"plyr_time_"+src);}catch(e){console.error(e);}},50);return;}if(["mp3","wav","m4a","flac","aac","oga"].includes(ext)){previewKind="audio";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><audio id="preview-plyr" src="${src}" playsinline controls></audio></div>`;setTimeout(function(){try{window.previewPlyrInstance=initPlyr("#preview-plyr",false,"plyr_time_"+src);}catch(e){console.error(e);}},50);return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
+  'function openPreviewShell(fp,name){if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}previewFp=fp;previewName=name;previewKind="";previewSrc="";var panel=document.getElementById("preview-panel"),body=document.getElementById("preview-body");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");body.innerHTML="";renderPreviewInfo(fp,name);return body;}' +
+  'function renderDocPreview(fp,name){var body=openPreviewShell(fp,name);body.innerHTML=\'<div style="color:#958ea0;padding:20px">Загрузка документа...</div>\';fetch("/api/fm/doc-preview?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(d){if(!d.ok){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">\'+H(d.error||"Не удалось открыть документ")+\'</div>\';return;}if(d.type==="sheet"){var sheets=d.sheets||[];if(!sheets.length){body.innerHTML=\'<div style="padding:24px;color:#958ea0">В таблице нет листов</div>\';return;}var h=\'<div class="doc-tabs">\';for(var i=0;i<sheets.length;i++)h+=\'<button class="doc-tab" data-sheet="\'+i+\'">\'+H(sheets[i].name)+\'</button>\';h+=\'</div><div id="sheet-preview" class="doc-preview">\'+(sheets[0].html||"")+\'</div>\';body.innerHTML=h;body.querySelectorAll("[data-sheet]").forEach(function(btn){btn.addEventListener("click",function(){var idx=parseInt(btn.dataset.sheet,10)||0;document.getElementById("sheet-preview").innerHTML=sheets[idx].html||"";});});return;}body.innerHTML=\'<div class="doc-preview">\'+(d.html||"")+\'</div>\';}).catch(function(){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">Ошибка предпросмотра</div>\';});}' +
+  'function renderArchivePreview(fp,name){var body=openPreviewShell(fp,name);body.innerHTML=\'<div style="color:#958ea0;padding:20px">Читаю архив...</div>\';fetch("/api/fm/archive/list?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(d){if(!d.ok){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">\'+H(d.error||"Не удалось открыть архив")+\'<div style="margin-top:8px;color:#958ea0;font-size:12px">\'+H(d.details||"")+\'</div></div>\';return;}var items=d.entries||[];if(!items.length){body.innerHTML=\'<div style="padding:24px;color:#958ea0">Архив пуст</div>\';return;}var h=\'<div style="display:flex;justify-content:space-between;gap:10px;margin-bottom:10px;color:#958ea0;font-size:12px"><span>\'+items.length+\' items</span><a class="btn-ghost" href="/api/fm/download?path=\'+encodeURIComponent(fp)+\'" download style="text-decoration:none;padding:4px 10px;min-height:28px">Скачать архив</a></div><table class="archive-table"><tbody>\';items.forEach(function(x){var icon=x.isDir?"folder":"draft";var cls=x.isDir?"archive-path archive-dir":"archive-path";h+=\'<tr><td style="width:28px"><span class="material-symbols-outlined" style="font-size:18px">\'+icon+\'</span></td><td><div class="\'+cls+\'" title="\'+H(x.path)+\'">\'+H(x.path)+\'</div></td><td style="width:76px;color:#958ea0;white-space:nowrap">\'+(x.isDir?"":fmtSize(x.size||0))+\'</td><td style="width:42px;text-align:right">\'+(x.isDir?"":\'<a class="btn-ghost" href="/api/fm/archive/download?path=\'+encodeURIComponent(fp)+\'&entry=\'+encodeURIComponent(x.path)+\'" download style="padding:3px 8px;min-height:24px;text-decoration:none">↓</a>\')+\'</td></tr>\';});h+=\'</tbody></table>\';body.innerHTML=h;}).catch(function(){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">Ошибка чтения архива</div>\';});}' +
+  'var cloudBasicOpenPreview=openPreview;openPreview=function(fp,name,isDir){if(isDir){navigateTo(fp);return;}var ext=(name.split(".").pop()||"").toLowerCase();if(["docx","xlsx","csv"].includes(ext))return renderDocPreview(fp,name);if(["zip","rar","7z","tar","gz","bz2","xz"].includes(ext))return renderArchivePreview(fp,name);return cloudBasicOpenPreview(fp,name,isDir);};' +
   'window.plyrInstance = null;' +
   'window.previewPlyrInstance = null;' +
   'function closeMediaViewer(){' +
