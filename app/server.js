@@ -862,7 +862,7 @@ app.post('/api/ext/share', extCors, authToken, (req, res) => {
 });
 
 // Версия расширения (без авторизации — для OTA проверки)
-const EXT_VERSION = '2.4.3';
+const EXT_VERSION = '2.4.4';
 app.get('/api/ext/version', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').json({
     version: EXT_VERSION,
