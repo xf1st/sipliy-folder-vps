@@ -691,7 +691,7 @@ app.patch('/api/me', auth, (req, res) => {
 app.delete('/api/share/:token', auth, (req, res) => {
   const shares = loadShares();
   const s = shares[req.params.token];
-  if (s && s.user === req.session.user) {
+  if (s && shareOwner(s) === req.session.user) {
     delete shares[req.params.token];
     saveShares(shares);
     return res.json({ ok: true });
@@ -708,7 +708,8 @@ app.get('/share/:token', (req, res) => {
     saveShares(shares);
     return res.status(404).send(shareNotFoundPage());
   }
-  const file = s.path ? fmResolve(s.user, s.path) : path.join(userDir(s.user), path.basename(s.file));
+  const file = shareFilePath(s);
+  if (!file) return res.status(404).send(shareNotFoundPage());
   if (!fs.existsSync(file)) return res.status(404).send(shareNotFoundPage());
   
   if (s.preview && !req.query.dl) {
@@ -725,8 +726,8 @@ app.get('/share/:token', (req, res) => {
 app.get('/api/shares', auth, (req, res) => {
   const shares = loadShares();
   const mine = Object.entries(shares)
-    .filter(([, s]) => s.user === req.session.user)
-    .map(([token, s]) => ({ token, file: s.file || s.path || s.downloadName, created: s.created, expiresAt: s.expiresAt || null, downloads: s.downloads || 0, maxDownloads: s.maxDownloads || null }));
+    .filter(([, s]) => shareOwner(s) === req.session.user)
+    .map(([token, s]) => ({ token, file: s.file || s.path || s.downloadName, created: shareCreated(s), expiresAt: s.expiresAt || null, downloads: s.downloads || 0, maxDownloads: s.maxDownloads || null }));
   res.json(mine);
 });
 
@@ -832,11 +833,12 @@ app.get('/api/files-ext', extCors, authToken, (req, res) => {
 // Публичные ссылки файла для расширения
 app.get('/api/ext/shares', extCors, authToken, (req, res) => {
   const filePath = (req.query.path || '').replace(/^\/+/, '');
-  const fullPath = path.join(userDir(req.tokenUser), filePath);
+  const fullPath = fmResolve(req.tokenUser, filePath);
+  if (!fullPath) return res.set(EXT_CORS).status(403).json({ ok: false, links: [], error: 'Invalid path' });
   const shares = loadShares();
   const now = Date.now();
   const links = Object.entries(shares)
-    .filter(([, v]) => v.path === fullPath && v.username === req.tokenUser && (!v.expiresAt || v.expiresAt > now))
+    .filter(([, v]) => sharePathMatches(v, req.tokenUser, filePath, fullPath) && (!v.expiresAt || new Date(v.expiresAt).getTime() > now))
     .map(([token]) => ({
       token,
       url: '/share/' + token,
@@ -848,11 +850,12 @@ app.get('/api/ext/shares', extCors, authToken, (req, res) => {
 // Создать публичную ссылку из расширения
 app.post('/api/ext/share', extCors, authToken, (req, res) => {
   const filePath = (req.body.path || '').replace(/^\/+/, '');
-  const fullPath = path.join(userDir(req.tokenUser), filePath);
+  const fullPath = fmResolve(req.tokenUser, filePath);
+  if (!fullPath) return res.set(EXT_CORS).status(403).json({ ok: false, error: 'Invalid path' });
   if (!fs.existsSync(fullPath)) return res.set(EXT_CORS).json({ ok: false, error: 'Файл не найден' });
   const token = crypto.randomUUID();
   const shares = loadShares();
-  shares[token] = { path: fullPath, username: req.tokenUser, createdAt: Date.now(), preview: true };
+  shares[token] = { path: filePath, user: req.tokenUser, created: new Date().toISOString(), kind: 'ext-file', preview: true };
   saveShares(shares);
   const fullUrl = req.protocol + '://' + req.get('host') + '/share/' + token;
   res.set(EXT_CORS).json({ ok: true, token, url: '/share/' + token, fullUrl });
@@ -1045,7 +1048,7 @@ app.post('/api/speedtest/upload', auth, express.raw({ type: 'application/octet-s
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, userDir(req.session.user)),
   filename: (req, file, cb) => {
-    const name = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    const name = path.basename(Buffer.from(file.originalname, 'latin1').toString('utf8')).replace(/[/\\]/g, '_');
     cb(null, name);
   },
 });
@@ -1067,11 +1070,43 @@ app.listen(PORT, () => console.log('Running on port ' + PORT));
 
 // ─── File Manager helper ─────────────────────────────────
 function fmResolve(username, relPath) {
+  if (!username) return null;
   const base = userDir(username);
   const rel = (relPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
   const full = path.resolve(path.join(base, rel));
-  if (full !== base && !full.startsWith(base + '/')) return null;
+  const inside = path.relative(base, full);
+  if (inside && (inside.startsWith('..') || path.isAbsolute(inside))) return null;
   return full;
+}
+
+function shareOwner(s) {
+  return s && (s.user || s.username || null);
+}
+
+function shareCreated(s) {
+  return s && (s.created || (s.createdAt ? new Date(s.createdAt).toISOString() : null));
+}
+
+function sharePathMatches(s, username, relPath, fullPath) {
+  if (!s || shareOwner(s) !== username) return false;
+  const stored = s.path || '';
+  return stored === relPath || stored === fullPath || s.file === path.basename(relPath || fullPath || '');
+}
+
+function shareFilePath(s) {
+  const owner = shareOwner(s);
+  if (!owner) return null;
+  if (s.path) {
+    if (path.isAbsolute(s.path)) {
+      const base = userDir(owner);
+      const full = path.resolve(s.path);
+      const inside = path.relative(base, full);
+      return inside && (inside.startsWith('..') || path.isAbsolute(inside)) ? null : full;
+    }
+    return fmResolve(owner, s.path);
+  }
+  if (s.file) return path.join(userDir(owner), path.basename(s.file));
+  return null;
 }
 
 function fmRelative(username, fullPath) {
@@ -1273,6 +1308,19 @@ app.post('/api/fm/move', auth, (req, res) => {
   const to   = fmResolve(req.session.user, req.body.to);
   if (!from || !to) return res.status(403).json({ error: 'Invalid path' });
   if (!fs.existsSync(from)) return res.status(404).json({ error: 'Not found' });
+  if (from === to) return res.json({ ok: true });
+  if (fs.existsSync(to)) return res.status(409).json({ error: 'Уже существует' });
+  try {
+    const stat = fs.statSync(from);
+    if (stat.isDirectory()) {
+      const inside = path.relative(from, to);
+      if (inside && !inside.startsWith('..') && !path.isAbsolute(inside)) {
+        return res.status(400).json({ error: 'Нельзя переместить папку внутрь самой себя' });
+      }
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
   try { fs.renameSync(from, to); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1508,11 +1556,11 @@ app.get('/api/fm/meta', auth, (req, res) => {
     const stat = fs.statSync(full);
     const shares = loadShares();
     const publicLinks = Object.entries(shares)
-      .filter(([, s]) => s.user === req.session.user && (s.path === rel || s.file === path.basename(rel)))
+      .filter(([, s]) => sharePathMatches(s, req.session.user, rel, full))
       .map(([token, s]) => ({
         token,
         url: '/share/' + token,
-        created: s.created,
+        created: shareCreated(s),
         expiresAt: s.expiresAt || null,
         downloads: s.downloads || 0,
         maxDownloads: s.maxDownloads || null,
@@ -1654,11 +1702,11 @@ app.get('/api/fm/shares', auth, (req, res) => {
   const rel = picked[0].rel;
   const shares = loadShares();
   const list = Object.entries(shares)
-    .filter(([, s]) => s && s.user === req.session.user && (s.path === rel || s.file === path.basename(rel)))
+    .filter(([, s]) => sharePathMatches(s, req.session.user, rel, picked[0].full))
     .map(([token, s]) => ({
       token,
       url: '/share/' + token,
-      created: s.created || null,
+      created: shareCreated(s),
       expiresAt: s.expiresAt || null,
       downloads: s.downloads || 0,
       maxDownloads: s.maxDownloads || null,
@@ -1671,7 +1719,7 @@ app.get('/api/fm/shares', auth, (req, res) => {
 app.patch('/api/fm/share/:token', auth, (req, res) => {
   const shares = loadShares();
   const share = shares[req.params.token];
-  if (!share || share.user !== req.session.user) return res.status(404).json({ error: 'Not found' });
+  if (!share || shareOwner(share) !== req.session.user) return res.status(404).json({ error: 'Not found' });
   const maxDownloadsRaw = parseInt(req.body.maxDownloads, 10);
   const expiresInRaw = parseInt(req.body.expiresIn, 10);
   share.maxDownloads = Number.isFinite(maxDownloadsRaw) && maxDownloadsRaw > 0 ? maxDownloadsRaw : null;
@@ -1683,7 +1731,7 @@ app.patch('/api/fm/share/:token', auth, (req, res) => {
     ok: true,
     token: req.params.token,
     url: '/share/' + req.params.token,
-    created: share.created || null,
+    created: shareCreated(share),
     expiresAt: share.expiresAt || null,
     downloads: share.downloads || 0,
     maxDownloads: share.maxDownloads || null,
@@ -1700,7 +1748,7 @@ const fmUploader = multer({
       if (!fs.existsSync(fp)) fs.mkdirSync(fp, { recursive: true });
       cb(null, fp);
     },
-    filename: (req, file, cb) => cb(null, Buffer.from(file.originalname, 'latin1').toString('utf8')),
+    filename: (req, file, cb) => cb(null, path.basename(Buffer.from(file.originalname, 'latin1').toString('utf8')).replace(/[/\\]/g, '_')),
   }),
   limits: { fileSize: 500 * 1024 * 1024 },
 });
@@ -1827,7 +1875,7 @@ const HEAD = `<meta charset="UTF-8"/>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
 <script>
-tailwind.config={darkMode:'class',theme:{extend:{colors:{"background":"rgb(var(--c-bg)/<alpha-value>)","surface":"rgb(var(--c-bg)/<alpha-value>)","surface-container-lowest":"rgb(var(--c-s0)/<alpha-value>)","surface-container-low":"rgb(var(--c-s1)/<alpha-value>)","surface-container":"rgb(var(--c-s2)/<alpha-value>)","surface-container-high":"rgb(var(--c-s3)/<alpha-value>)","surface-container-highest":"rgb(var(--c-s4)/<alpha-value>)","surface-variant":"rgb(var(--c-sv)/<alpha-value>)","primary":"rgb(var(--c-p)/<alpha-value>)","primary-container":"rgb(var(--c-pc)/<alpha-value>)","on-primary":"rgb(var(--c-op)/<alpha-value>)","on-primary-container":"rgb(var(--c-opc)/<alpha-value>)","primary-fixed-dim":"rgb(var(--c-pfd)/<alpha-value>)","secondary":"rgb(var(--c-sec)/<alpha-value>)","secondary-container":"rgb(var(--c-secc)/<alpha-value>)","on-secondary-container":"rgb(var(--c-osec)/<alpha-value>)","outline":"rgb(var(--c-out)/<alpha-value>)","outline-variant":"rgb(var(--c-outv)/<alpha-value>)","on-surface":"rgb(var(--c-os)/<alpha-value>)","on-surface-variant":"rgb(var(--c-osv)/<alpha-value>)","error":"rgb(var(--c-err)/<alpha-value>)","tertiary":"rgb(var(--c-ter)/<alpha-value>)"},fontFamily:{headline:["Plus Jakarta Sans"],body:["Manrope"],label:["Manrope"]},borderRadius:{"xl":"0.75rem","2xl":"1rem","3xl":"1.5rem","4xl":"2rem","full":"9999px"}}}}
+if(window.tailwind)tailwind.config={darkMode:'class',theme:{extend:{colors:{"background":"rgb(var(--c-bg)/<alpha-value>)","surface":"rgb(var(--c-bg)/<alpha-value>)","surface-container-lowest":"rgb(var(--c-s0)/<alpha-value>)","surface-container-low":"rgb(var(--c-s1)/<alpha-value>)","surface-container":"rgb(var(--c-s2)/<alpha-value>)","surface-container-high":"rgb(var(--c-s3)/<alpha-value>)","surface-container-highest":"rgb(var(--c-s4)/<alpha-value>)","surface-variant":"rgb(var(--c-sv)/<alpha-value>)","primary":"rgb(var(--c-p)/<alpha-value>)","primary-container":"rgb(var(--c-pc)/<alpha-value>)","on-primary":"rgb(var(--c-op)/<alpha-value>)","on-primary-container":"rgb(var(--c-opc)/<alpha-value>)","primary-fixed-dim":"rgb(var(--c-pfd)/<alpha-value>)","secondary":"rgb(var(--c-sec)/<alpha-value>)","secondary-container":"rgb(var(--c-secc)/<alpha-value>)","on-secondary-container":"rgb(var(--c-osec)/<alpha-value>)","outline":"rgb(var(--c-out)/<alpha-value>)","outline-variant":"rgb(var(--c-outv)/<alpha-value>)","on-surface":"rgb(var(--c-os)/<alpha-value>)","on-surface-variant":"rgb(var(--c-osv)/<alpha-value>)","error":"rgb(var(--c-err)/<alpha-value>)","tertiary":"rgb(var(--c-ter)/<alpha-value>)"},fontFamily:{headline:["Plus Jakarta Sans"],body:["Manrope"],label:["Manrope"]},borderRadius:{"xl":"0.75rem","2xl":"1rem","3xl":"1.5rem","4xl":"2rem","full":"9999px"}}}}
 </script>
 <style>
 :root{
@@ -2860,10 +2908,14 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">' +
   '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/plyr@3.7.8/dist/plyr.css">' +
   '<script src="https://cdn.jsdelivr.net/npm/plyr@3.7.8/dist/plyr.polyfilled.js"></script>' +
+  '<script>window.addEventListener("load",function(){var s=document.createElement("span");s.className="material-symbols-outlined";s.textContent="settings";s.style.cssText="position:absolute;visibility:hidden;font-size:24px;max-width:none;width:auto";document.body.appendChild(s);if(s.offsetWidth>36)document.documentElement.classList.add("no-symbol-font");s.remove();});</script>' +
   '<style>' +
   '*{box-sizing:border-box}' +
   'body{font-family:Manrope,sans-serif;background:#131315;color:#e5e1e4;letter-spacing:0;}' +
-  '.material-symbols-outlined{font-variation-settings:"FILL" 0,"wght" 500,"GRAD" 0,"opsz" 24;line-height:1;vertical-align:middle}' +
+  '.material-symbols-outlined{font-family:"Material Symbols Outlined";font-variation-settings:"FILL" 0,"wght" 500,"GRAD" 0,"opsz" 24;line-height:1;vertical-align:middle;display:inline-flex;align-items:center;justify-content:center;max-width:1.25em;overflow:hidden;white-space:nowrap;text-transform:none}' +
+  '.no-symbol-font .material-symbols-outlined{font-size:0!important;width:1.25em;min-width:1.25em;color:transparent!important}' +
+  'body.flex{display:flex}' +
+  '.flex{display:flex}.flex-col{flex-direction:column}.flex-1{flex:1 1 0%}.items-center{align-items:center}.justify-center{justify-content:center}.justify-between{justify-content:space-between}.gap-2{gap:8px}.gap-3{gap:12px}.sticky{position:sticky}.top-0{top:0}.h-screen{height:100vh}.overflow-y-auto{overflow-y:auto}.px-4{padding-left:16px;padding-right:16px}.py-6{padding-top:24px;padding-bottom:24px}.mb-6{margin-bottom:24px}' +
   '::-webkit-scrollbar{width:6px;height:6px}' +
   '::-webkit-scrollbar-track{background:#1b1b1e}' +
   '::-webkit-scrollbar-thumb{background:#494454;border-radius:9999px}' +
