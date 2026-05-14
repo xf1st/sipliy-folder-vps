@@ -69,6 +69,7 @@ const VT_API = 'https://www.virustotal.com/api/v3';
 
 const app = express();
 const PORT = 3000;
+const SITE_VERSION = '2.4.4';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -3286,6 +3287,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div style="min-width:0;flex:1"><div id="profile-label-sidebar" style="font-size:14px;font-weight:900;color:#e4e1e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + safeProfileLabel + '</div><div id="profile-meta-sidebar" style="font-size:11px;color:#958ea0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@' + safeUsername + ' &middot; ' + safeProfileRole + '</div></div>' +
   '<button class="btn-ghost" data-action="nav-settings" title="Профиль" style="width:34px;height:34px;min-height:34px;padding:0;display:flex;align-items:center;justify-content:center"><span class="material-symbols-outlined" style="font-size:20px">manage_accounts</span></button>' +
   '</div>' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;padding:7px 9px;border:1px solid rgba(160,120,255,.22);border-radius:10px;background:rgba(14,14,16,.38)"><span style="font-size:10px;color:#958ea0;text-transform:uppercase;letter-spacing:.08em;font-weight:900">Версия сайта</span><span style="font-size:11px;color:#d2bbff;font-weight:900">v' + SITE_VERSION + '</span></div>' +
   '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px"><span style="font-size:11px;color:#958ea0">Диск</span><span style="font-size:11px;color:#cbc3d7" id="disk-label">Загрузка...</span></div>' +
   '<div class="disk-bar"><div class="disk-fill" id="disk-fill" style="width:0%"></div></div>' +
   '</div>' +
