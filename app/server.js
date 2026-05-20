@@ -69,7 +69,7 @@ const VT_API = 'https://www.virustotal.com/api/v3';
 
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.4.4';
+const SITE_VERSION = '2.4.5';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -863,7 +863,7 @@ app.post('/api/ext/share', extCors, authToken, (req, res) => {
 });
 
 // Версия расширения (без авторизации — для OTA проверки)
-const EXT_VERSION = '2.4.4';
+const EXT_VERSION = '2.4.5';
 app.get('/api/ext/version', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').json({
     version: EXT_VERSION,
@@ -3646,7 +3646,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   "  h+='</section>';" +
   "  h+='<section style=\"display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,.75fr);gap:18px;margin-top:18px\">';" +
   "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px\"><div style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px\"><div><div style=\"font-size:18px;font-weight:900;color:#fff\">Недавние файлы</div><div style=\"font-size:12px;color:#958ea0;margin-top:2px\">То, что пригодится открыть следующим</div></div><button class=\"btn-ghost\" data-action=\"nav-recent\">Все</button></div><div id=\"dash-recent-list\" style=\"display:flex;flex-direction:column;gap:8px\"><div style=\"color:#494454;font-size:13px\">Загрузка...</div></div></div>';" +
-  "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px\"><div style=\"font-size:18px;font-weight:900;color:#fff;margin-bottom:14px\">Сейчас</div><div style=\"display:grid;gap:10px\"><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Активные загрузки</span><b id=\"dash-active-count\">0</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>История URL</span><b id=\"dash-history-count\">...</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Текущий режим</span><b>Cloud</b></div></div></div>';" +
+  "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px\"><div style=\"font-size:18px;font-weight:900;color:#fff;margin-bottom:14px\">Сейчас</div><div style=\"display:grid;gap:10px\"><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Активные загрузки</span><b id=\"dash-active-count\">0</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>История URL</span><b id=\"dash-history-count\">...</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Текущий режим</span><b>Cloud</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Версия сайта</span><b style=\"color:#d2bbff\">v' + SITE_VERSION + '</b></div></div></div>';" +
   "  h+='</section>';" +
   "  document.getElementById(\"file-area\").innerHTML=h;" +
   "  fetch(\"/api/fm/list?path=\").then(function(r){return r.json();}).then(function(d){" +
