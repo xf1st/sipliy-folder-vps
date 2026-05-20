@@ -4,17 +4,32 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
+const root = __dirname;
+
+let localConfig = {};
+try {
+  const configPath = path.join(root, 'deploy.config.js');
+  if (fs.existsSync(configPath)) {
+    localConfig = require(configPath);
+  }
+} catch (e) {
+  console.warn('Предупреждение при загрузке deploy.config.js:', e.message);
+}
+
 const config = {
-  host: process.env.DEPLOY_HOST || '77.73.135.98',
-  port: Number(process.env.DEPLOY_PORT || 22),
-  username: process.env.DEPLOY_USER || 'root',
-  password: process.env.DEPLOY_PASSWORD || '0UAxHGujXbxP',
-  appDir: process.env.DEPLOY_APP_DIR || '/opt/vps-downloader',
-  service: process.env.DEPLOY_SERVICE || 'vps-downloader',
+  host: process.env.DEPLOY_HOST || localConfig.host || '77.73.135.98',
+  port: Number(process.env.DEPLOY_PORT || localConfig.port || 22),
+  username: process.env.DEPLOY_USER || localConfig.username || 'root',
+  password: process.env.DEPLOY_PASSWORD || localConfig.password,
+  appDir: process.env.DEPLOY_APP_DIR || localConfig.appDir || '/opt/vps-downloader',
+  service: process.env.DEPLOY_SERVICE || localConfig.service || 'vps-downloader',
   readyTimeout: 30000,
 };
 
-const root = __dirname;
+if (!config.password) {
+  console.error('Ошибка: Пароль для деплоя не найден. Задайте переменную окружения DEPLOY_PASSWORD или создайте файл deploy.config.js с паролем.');
+  process.exit(1);
+}
 const tmpZip = path.join(os.tmpdir(), `sipliyfolder-extension-${Date.now()}.zip`);
 
 function mustRead(file) {

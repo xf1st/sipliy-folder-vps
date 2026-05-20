@@ -1,0 +1,33 @@
+name: CI/CD Auto-Deploy to VPS
+
+on:
+  push:
+    branches:
+      - master  # Автоматический запуск при пуше в ветку master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install local dependencies
+        run: npm ci
+
+      - name: Run Deploy Script
+        env:
+          DEPLOY_HOST: '77.73.135.98'
+          DEPLOY_PORT: '22'
+          DEPLOY_USER: 'root'
+          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+          DEPLOY_APP_DIR: '/opt/vps-downloader'
+          DEPLOY_SERVICE: 'vps-downloader'
+        run: node deploy-systemd.js
