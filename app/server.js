@@ -85,6 +85,45 @@ function loadUsers() {
 }
 function saveUsers(u) { fs.writeFileSync(USERS_FILE, JSON.stringify(u, null, 2)); }
 function isAdmin(username) { const u = loadUsers(); return u[username] && u[username].isAdmin; }
+
+const UPLOADS_FILE = '/opt/vps-downloader/uploads.json';
+function loadUploads() {
+  try { return JSON.parse(fs.readFileSync(UPLOADS_FILE, 'utf8')); }
+  catch { return {}; }
+}
+function saveUploads(u) {
+  try { fs.writeFileSync(UPLOADS_FILE, JSON.stringify(u, null, 2)); } catch (e) {}
+}
+function registerUploadedFile(username, filename) {
+  if (!username || !filename) return;
+  try {
+    const u = loadUploads();
+    if (!u[username]) u[username] = {};
+    u[username][filename] = true;
+    saveUploads(u);
+  } catch (e) {
+    console.error('Error saving uploads:', e);
+  }
+}
+function isUploadedFile(username, filename) {
+  if (!username || !filename) return false;
+  try {
+    const u = loadUploads();
+    return !!(u[username] && u[username][filename]);
+  } catch (e) {
+    return false;
+  }
+}
+function removeUploadedFile(username, filename) {
+  if (!username || !filename) return;
+  try {
+    const u = loadUploads();
+    if (u[username] && u[username][filename]) {
+      delete u[username][filename];
+      saveUploads(u);
+    }
+  } catch (e) {}
+}
 function htmlEscape(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
@@ -780,6 +819,7 @@ app.post('/api/upload-ext', extCors, authToken, (req, res) => {
   extUpload.single('file')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'No file' });
+    registerUploadedFile(req.tokenUser, req.file.filename);
     res.json({ ok: true, name: req.file.filename, size: req.file.size });
   });
 });
@@ -824,7 +864,19 @@ app.get('/api/files-ext', extCors, authToken, (req, res) => {
   const dir = userDir(req.tokenUser);
   try {
     const files = fs.readdirSync(dir)
-      .map(name => { const s = fs.statSync(path.join(dir, name)); return { name, size: s.size, mtime: s.mtime, path: '/' + name }; })
+      .filter(name => {
+        try { return fs.statSync(path.join(dir, name)).isFile(); } catch { return false; }
+      })
+      .map(name => {
+        const s = fs.statSync(path.join(dir, name));
+        return {
+          name,
+          size: s.size,
+          mtime: s.mtime,
+          path: '/' + name,
+          source: isUploadedFile(req.tokenUser, name) ? 'upload' : 'download'
+        };
+      })
       .sort((a, b) => new Date(b.mtime) - new Date(a.mtime))
       .slice(0, 30);
     res.json(files);
@@ -1057,13 +1109,19 @@ const upload = multer({ storage, limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 
 app.post('/api/upload', auth, upload.array('files', 50), (req, res) => {
   if (!req.files || !req.files.length) return res.status(400).json({ error: 'Нет файлов' });
+  req.files.forEach(f => registerUploadedFile(req.session.user, f.filename));
   res.json({ ok: true, files: req.files.map(f => ({ name: f.filename, size: f.size })) });
 });
 
 app.delete('/api/files/:file', auth, (req, res) => {
   const dir = userDir(req.session.user);
-  const file = path.join(dir, path.basename(req.params.file));
-  try { fs.unlinkSync(file); res.json({ ok: true }); }
+  const baseName = path.basename(req.params.file);
+  const file = path.join(dir, baseName);
+  try {
+    fs.unlinkSync(file);
+    removeUploadedFile(req.session.user, baseName);
+    res.json({ ok: true });
+  }
   catch { res.status(404).json({ error: 'Not found' }); }
 });
 
@@ -1297,8 +1355,13 @@ app.delete('/api/fm/delete', auth, (req, res) => {
   if (!fs.existsSync(full)) return res.status(404).json({ error: 'Not found' });
   try {
     const stat = fs.statSync(full);
-    if (stat.isDirectory()) fs.rmSync(full, { recursive: true, force: true });
-    else fs.unlinkSync(full);
+    const baseName = path.basename(full);
+    if (stat.isDirectory()) {
+      fs.rmSync(full, { recursive: true, force: true });
+    } else {
+      fs.unlinkSync(full);
+      removeUploadedFile(req.session.user, baseName);
+    }
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1382,17 +1445,22 @@ app.get('/api/fm/preview', auth, (req, res) => {
   const ext = path.extname(full).toLowerCase();
 
   if (ext === '.exe') {
-    const { exec } = require('child_process');
-    const tmpFile = '/tmp/icon-' + Date.now() + '-' + Math.random().toString(36).substring(7) + '.ico';
-    const safeFull = full.replace(/"/g, '\\"');
-    const cmd = `NAME=$(wrestool -l -t 14 "${safeFull}" 2>/dev/null | head -n 1 | sed -E 's/.*--name=([^ ]+).*/\\1/'); if [ -n "$NAME" ]; then wrestool -x -t 14 --name="$NAME" "${safeFull}" > "${tmpFile}" 2>/dev/null; fi`;
-    exec(cmd, (err) => {
-      if (!fs.existsSync(tmpFile) || fs.statSync(tmpFile).size === 0) {
-        if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
-        return res.status(404).send('Icon not found');
-      }
-      res.sendFile(tmpFile, { headers: { 'Content-Type': 'image/x-icon' } }, () => {
-        fs.unlinkSync(tmpFile);
+    const os = require('os');
+    const tmpFile = path.join(os.tmpdir(), 'icon-' + Date.now() + '-' + Math.random().toString(36).substring(7) + '.ico');
+    execFile('wrestool', ['-l', '-t', '14', full], (err, stdout) => {
+      if (err || !stdout) return res.status(404).send('Icon not found');
+      const match = stdout.match(/--name=(?:"([^"]+)"|([^\s]+))/);
+      const name = match ? (match[1] || match[2]) : null;
+      if (!name) return res.status(404).send('Icon not found');
+
+      execFile('wrestool', ['-x', '-t', '14', '--name=' + name, full], { encoding: 'buffer' }, (err, stdoutBuffer) => {
+        if (err || !stdoutBuffer) return res.status(404).send('Icon extraction failed');
+        fs.writeFile(tmpFile, stdoutBuffer, (err) => {
+          if (err) return res.status(500).send('Save failed');
+          res.sendFile(tmpFile, { headers: { 'Content-Type': 'image/x-icon' } }, () => {
+            try { fs.unlinkSync(tmpFile); } catch {}
+          });
+        });
       });
     });
     return;
@@ -1757,6 +1825,7 @@ app.post('/api/fm/upload', auth, (req, res) => {
   fmUploader.array('files', 50)(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.files || !req.files.length) return res.status(400).json({ error: 'Нет файлов' });
+    req.files.forEach(f => registerUploadedFile(req.session.user, f.filename));
     res.json({ ok: true, files: req.files.map(f => ({ name: f.filename, size: f.size })) });
   });
 });
@@ -1773,7 +1842,12 @@ function runCleanup() {
     try {
       fs.readdirSync(dir).forEach(function(name) {
         const file = path.join(dir, name);
-        try { if (fs.statSync(file).mtimeMs < cutoff) fs.unlinkSync(file); } catch {}
+        try {
+          if (fs.statSync(file).mtimeMs < cutoff) {
+            fs.unlinkSync(file);
+            removeUploadedFile(username, name);
+          }
+        } catch {}
       });
     } catch {}
   });
@@ -2991,7 +3065,9 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.speed-metric{border:1px solid #353437;border-radius:14px;padding:10px;background:#17171a;min-width:0}' +
   '.speed-metric b{display:block;color:#fff;font-size:18px;line-height:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
   '.speed-metric span{display:block;color:#958ea0;font-size:11px;margin-top:3px}' +
-  '.preview-panel{display:none;width:380px;max-width:38vw;border-left:1px solid #1f1f22;background:#151518;flex-shrink:0;flex-direction:column;overflow:hidden;transform-origin:right center}' +
+  '.preview-panel{display:none;width:380px;max-width:38vw;border-left:1px solid #1f1f22;background:#151518;flex-shrink:0;flex-direction:column;overflow:hidden;transform-origin:right center;position:relative!important}' +
+  '.preview-resizer{position:absolute;left:0;top:0;bottom:0;width:6px;cursor:col-resize;z-index:100;background:transparent;transition:background 0.2s}' +
+  '.preview-resizer:hover,.preview-resizer.dragging{background:rgba(160,120,255,0.4)}' +
   '.preview-panel.open{display:flex;animation:panelIn .22s cubic-bezier(.2,.8,.2,1) both}' +
   '.preview-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid #1f1f22;flex-shrink:0}' +
   '.preview-body{padding:14px;overflow:auto;flex:1;min-height:0}' +
@@ -3345,6 +3421,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<button class="bottom-nav-item" data-action="upload-btn"><span class="material-symbols-outlined">upload</span><span>Upload</span></button>' +
   '</nav>' +
   '<aside id="preview-panel" class="preview-panel">' +
+  '<div id="preview-resizer" class="preview-resizer"></div>' +
   '<div class="preview-head">' +
   '<div id="preview-title" style="font-weight:700;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Предпросмотр</div>' +
   '<button class="btn-ghost" data-action="fullscreen-preview" style="padding:5px 9px" title="На весь экран"><span class="material-symbols-outlined">fullscreen</span></button>' +
@@ -3638,14 +3715,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px;background:linear-gradient(180deg,#191d1a,#151716)\"><div style=\"font-size:12px;color:#8ff0a4;font-weight:900;text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px\">Диск</div><div style=\"display:flex;align-items:flex-end;justify-content:space-between;gap:12px\"><div id=\"dash-disk-big\" style=\"font-size:30px;font-weight:900;color:#fff\">...</div><div id=\"dash-disk-small\" style=\"font-size:12px;color:#a9a1b8;text-align:right\">Загрузка</div></div><div class=\"disk-bar\" style=\"margin-top:18px;height:8px\"><div class=\"disk-fill\" id=\"dash-disk-fill\" style=\"width:0%\"></div></div></div>';" +
   "  h+='</div>';" +
   "  h+='</section>';" +
-  "  h+='<section style=\"display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:18px\">';" +
-  "  h+=dashActionCard(\"schedule\",\"Недавние\",\"Последние файлы и быстрый возврат\",\"nav-recent\",\"#d2bbff\");" +
+  "  h+='<section style=\"display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:18px\">';" +
   "  h+=dashActionCard(\"history\",\"История URL\",\"Повторы и медиа-задачи\",\"nav-url-history\",\"#ffd166\");" +
   "  h+=dashActionCard(\"settings\",\"Настройки\",\"Пароль, токен, аккаунты\",\"nav-settings\",\"#8ff0a4\");" +
   "  h+=dashActionCard(\"create_new_folder\",\"Новая папка\",\"Сразу перейти в файлы\",\"nav-files\",\"#9ddcff\");" +
   "  h+='</section>';" +
-  "  h+='<section style=\"display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,.75fr);gap:18px;margin-top:18px\">';" +
-  "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px\"><div style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px\"><div><div style=\"font-size:18px;font-weight:900;color:#fff\">Недавние файлы</div><div style=\"font-size:12px;color:#958ea0;margin-top:2px\">То, что пригодится открыть следующим</div></div><button class=\"btn-ghost\" data-action=\"nav-recent\">Все</button></div><div id=\"dash-recent-list\" style=\"display:flex;flex-direction:column;gap:8px\"><div style=\"color:#494454;font-size:13px\">Загрузка...</div></div></div>';" +
+  "  h+='<section style=\"display:grid;grid-template-columns:minmax(0,1fr);gap:18px;margin-top:18px\">';" +
   "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px\"><div style=\"font-size:18px;font-weight:900;color:#fff;margin-bottom:14px\">Сейчас</div><div style=\"display:grid;gap:10px\"><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Активные загрузки</span><b id=\"dash-active-count\">0</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>История URL</span><b id=\"dash-history-count\">...</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Текущий режим</span><b>Cloud</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Версия сайта</span><b style=\"color:#d2bbff\">v' + SITE_VERSION + '</b></div></div></div>';" +
   "  h+='</section>';" +
   "  document.getElementById(\"file-area\").innerHTML=h;" +
@@ -3785,22 +3860,57 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'window.previewPlyrInstance = null;' +
   'function closeMediaViewer(){' +
   '  var v=document.getElementById("media-viewer");' +
-  '  if(window.plyrInstance){ window.plyrInstance.destroy(); window.plyrInstance=null; }' +
+  '  var startPreviewPlayback=false,lastTime=0;' +
   '  var media=document.getElementById("mv-media");' +
-  '  if(media&&media.pause)media.pause();' +
+  '  if(media){' +
+  '    lastTime=media.currentTime||0;' +
+  '    startPreviewPlayback=!media.paused;' +
+  '    try{media.pause();}catch(e){}' +
+  '  }' +
+  '  if(window.plyrInstance){' +
+  '    if(lastTime===0) lastTime=window.plyrInstance.currentTime||0;' +
+  '    if(!startPreviewPlayback) startPreviewPlayback=window.plyrInstance.playing||false;' +
+  '    try{window.plyrInstance.destroy();}catch(e){}window.plyrInstance=null;' +
+  '  }' +
   '  v.classList.remove("open");' +
   '  document.getElementById("mv-stage").innerHTML="";' +
   '  document.getElementById("mv-bottom").innerHTML="";' +
+  '  var smallMedia=document.getElementById("preview-plyr");' +
+  '  if(smallMedia){' +
+  '    smallMedia.currentTime=lastTime;' +
+  '    if(startPreviewPlayback){' +
+  '      setTimeout(function(){try{smallMedia.play();}catch(e){}},50);' +
+  '    }' +
+  '  }' +
+  '  if(window.previewPlyrInstance){' +
+  '    window.previewPlyrInstance.currentTime=lastTime;' +
+  '    if(startPreviewPlayback){' +
+  '      setTimeout(function(){try{window.previewPlyrInstance.play();}catch(e){}},50);' +
+  '    }' +
+  '  }' +
   '}' +
   'function openMediaViewer(){' +
   '  if(!previewSrc||!previewKind)return;' +
   '  mvZoom=1; document.getElementById("mv-title").textContent=previewName||"Media";' +
   '  var v=document.getElementById("media-viewer"),stage=document.getElementById("mv-stage"),bottom=document.getElementById("mv-bottom");' +
+  '  var startPlayback=false,startTime=0;' +
+  '  var smallMedia=document.getElementById("preview-plyr");' +
+  '  if(smallMedia){' +
+  '    startTime=smallMedia.currentTime||0;' +
+  '    startPlayback=!smallMedia.paused;' +
+  '    try{smallMedia.pause();}catch(e){}' +
+  '  }' +
+  '  if(window.previewPlyrInstance){' +
+  '    if(startTime===0) startTime=window.previewPlyrInstance.currentTime||0;' +
+  '    if(!startPlayback) startPlayback=window.previewPlyrInstance.playing||false;' +
+  '    try{window.previewPlyrInstance.pause();}catch(e){}' +
+  '  }' +
   '  if(previewKind==="image"){' +
   '    stage.innerHTML=`<img id="mv-media" src="${previewSrc}" alt="${H(previewName)}">`;' +
   '    bottom.innerHTML=\'<button class="mv-icon" data-action="mv-zoom-out"><span class="material-symbols-outlined">zoom_out</span></button><button class="mv-icon" data-action="mv-fit"><span class="material-symbols-outlined">fit_screen</span></button><button class="mv-icon" data-action="mv-zoom-in"><span class="material-symbols-outlined">zoom_in</span></button><div style="flex:1"></div><div class="mv-time">Image viewer</div>\';' +
   '  } else {' +
-  '    stage.innerHTML=`<${previewKind==="audio"?"audio":"video"} id="mv-media" src="${previewSrc}" playsinline controls style="max-height:100%"></${previewKind==="audio"?"audio":"video"}>`;' +
+  '    var autoplayAttr=startPlayback?"autoplay":"";' +
+  '    stage.innerHTML=`<\\${previewKind==="audio"?"audio":"video"} id="mv-media" src="\\${previewSrc}" playsinline controls style="max-height:100%" \${autoplayAttr}></\\${previewKind==="audio"?"audio":"video"}>`;' +
   '    bottom.innerHTML="";' +
   '    setTimeout(function() {' +
   '      if(typeof Plyr === "undefined") { console.error("Plyr is not loaded!"); return; }' +
@@ -3817,7 +3927,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '        window.plyrInstance.on("ready", function(e){ ' +
   '           console.log("Plyr Ready event");' +
   '           var savedTime = localStorage.getItem("plyr_time_" + previewSrc);' +
-  '           if(savedTime) e.detail.plyr.currentTime = parseFloat(savedTime);' +
+  '           var useTime = startTime > 0 ? startTime : (savedTime ? parseFloat(savedTime) : 0);' +
+  '           e.detail.plyr.currentTime = useTime;' +
+  '           if (startPlayback) {' +
+  '             setTimeout(function() { try { e.detail.plyr.play(); } catch(err) {} }, 50);' +
+  '           }' +
   '        });' +
   '        window.plyrInstance.on("timeupdate", function(e){ ' +
   '           localStorage.setItem("plyr_time_" + previewSrc, e.detail.plyr.currentTime);' +
@@ -4188,6 +4302,43 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'document.addEventListener("keydown",function(e){if(e.key==="Enter"&&document.activeElement&&["dash-url-inp","dash-name-inp"].includes(document.activeElement.id)){addDashboardUrlDownload();}});' +
   'window.addEventListener("beforeunload",function(e){if(uploadBusy){e.preventDefault();e.returnValue="";return "";}});' +
 
+  '(function(){' +
+  '  var resizer=document.getElementById("preview-resizer");' +
+  '  var panel=document.getElementById("preview-panel");' +
+  '  if(!resizer||!panel)return;' +
+  '  var isDragging=false;' +
+  '  resizer.addEventListener("mousedown",function(e){' +
+  '    if(window.innerWidth<=768)return;' +
+  '    isDragging=true;' +
+  '    resizer.classList.add("dragging");' +
+  '    document.body.style.cursor="col-resize";' +
+  '    document.body.style.userSelect="none";' +
+  '    e.preventDefault();' +
+  '  });' +
+  '  window.addEventListener("mousemove",function(e){' +
+  '    if(!isDragging)return;' +
+  '    var width=window.innerWidth-e.clientX;' +
+  '    if(width<240)width=240;' +
+  '    if(width>window.innerWidth*0.8)width=window.innerWidth*0.8;' +
+  '    panel.style.width=width+"px";' +
+  '    panel.style.maxWidth="none";' +
+  '    window.dispatchEvent(new Event("resize"));' +
+  '  });' +
+  '  window.addEventListener("mouseup",function(){' +
+  '    if(!isDragging)return;' +
+  '    isDragging=false;' +
+  '    resizer.classList.remove("dragging");' +
+  '    document.body.style.cursor="";' +
+  '    document.body.style.userSelect="";' +
+  '    window.dispatchEvent(new Event("resize"));' +
+  '  });' +
+  '  resizer.addEventListener("dblclick",function(e){' +
+  '    if(window.innerWidth<=768)return;' +
+  '    panel.style.width="";' +
+  '    panel.style.maxWidth="";' +
+  '    window.dispatchEvent(new Event("resize"));' +
+  '  });' +
+  '})();' +
   'applyTheme();' +
   '(function(){var h=parseHash();if(h){if(h.type==="dashboard")loadDashboard();else if(h.type==="recent")loadRecent();else if(h.type==="url-history")loadUrlHistory();else if(h.type==="settings")loadCloudSettings();else navigateTo(h.path||"");return;}var saved=localStorage.getItem("fm-path");if(saved===null)loadDashboard();else if(saved==="__dashboard__")loadDashboard();else if(saved==="__recent__")loadRecent();else if(saved==="__url_history__")loadUrlHistory();else if(saved==="__settings__")loadCloudSettings();else navigateTo(saved||"");})();' +
   'loadDisk();' +

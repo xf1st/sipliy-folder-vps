@@ -428,7 +428,8 @@ async function renderDownloads() {
   if (!cfg.serverUrl || !cfg.token) {
     $('ready-section').style.display = 'none';
     $('active-list').innerHTML = '<div class="empty-state"><div class="icon">⚙️</div>Добавьте аккаунт в настройках</div>';
-    $('file-list').innerHTML = '';
+    if ($('file-list')) $('file-list').innerHTML = '';
+    if ($('upload-file-list')) $('upload-file-list').innerHTML = '';
     return;
   }
 
@@ -511,25 +512,43 @@ async function renderDownloads() {
 
   // ── All VPS files ──
   const fileEl = $('file-list');
+  const uploadFileEl = $('upload-file-list');
   if (!filesRes || !filesRes.ok) {
-    fileEl.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div>Нет соединения с сервером</div>';
+    if (fileEl) fileEl.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div>Нет соединения с сервером</div>';
+    if (uploadFileEl) uploadFileEl.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div>Нет соединения с сервером</div>';
     return;
   }
-  fileEl.innerHTML = vpsFiles.length
-    ? vpsFiles.map(f => {
-        const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(cfg.token);
-        const filePath = f.path || ('/' + f.name);
-        return `<div class="file-item">
-          <div class="file-ico">${fileEmoji(f.name)}</div>
-          <div class="file-info">
-            <div class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
-            <div class="file-meta">${fmt(f.size)} · ${fmtDate(new Date(f.mtime).getTime())}</div>
-          </div>
-          <button class="btn-sm btn-share" data-share-file="${escHtml(f.name)}" data-share-path="${escHtml(filePath)}" title="Публичная ссылка / QR">🔗</button>
-          <button class="btn-sm btn-dl" data-url="${escHtml(encodeURIComponent(dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}">⬇</button>
-        </div>`;
-      }).join('')
-    : '<div class="empty-state"><div class="icon">📂</div>Файлов нет</div>';
+
+  const downloadFiles = vpsFiles.filter(f => f.source !== 'upload');
+  const uploadFiles = vpsFiles.filter(f => f.source === 'upload');
+
+  const renderSingleList = (files) => {
+    return files.map(f => {
+      const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(cfg.token);
+      const filePath = f.path || ('/' + f.name);
+      return `<div class="file-item">
+        <div class="file-ico">${fileEmoji(f.name)}</div>
+        <div class="file-info">
+          <div class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
+          <div class="file-meta">${fmt(f.size)} · ${fmtDate(new Date(f.mtime).getTime())}</div>
+        </div>
+        <button class="btn-sm btn-share" data-share-file="${escHtml(f.name)}" data-share-path="${escHtml(filePath)}" title="Публичная ссылка / QR">🔗</button>
+        <button class="btn-sm btn-dl" data-url="${escHtml(encodeURIComponent(dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}">⬇</button>
+      </div>`;
+    }).join('');
+  };
+
+  if (fileEl) {
+    fileEl.innerHTML = downloadFiles.length
+      ? renderSingleList(downloadFiles)
+      : '<div class="empty-state"><div class="icon">📂</div>Файлов нет</div>';
+  }
+
+  if (uploadFileEl) {
+    uploadFileEl.innerHTML = uploadFiles.length
+      ? renderSingleList(uploadFiles)
+      : '<div class="empty-state"><div class="icon">📂</div>Файлов нет</div>';
+  }
 }
 
 // ─── Manual URL -> VPS ───────────────────────────────────────────

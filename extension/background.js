@@ -272,7 +272,7 @@ async function syncVpsFilesForAccount(acc) {
   }
 
   const knownSet = new Set(lastVpsFileNames);
-  const newFiles = files.filter(f => !knownSet.has(f.name));
+  const newFiles = files.filter(f => !knownSet.has(f.name) && f.source !== 'upload');
 
   if (newFiles.length > 0) {
     const { readyFiles = [] } = await localGet('readyFiles');
