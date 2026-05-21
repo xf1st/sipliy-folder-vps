@@ -524,18 +524,52 @@ function filenameWithUrlExtension(url, filename) {
 }
 
 app.get('/api/disk', auth, (req, res) => {
-  try {
-    const root = fs.existsSync(DOWNLOADS_ROOT) ? DOWNLOADS_ROOT : '.';
-    const sf = fs.statfsSync(root);
-    const total = sf.blocks * sf.bsize;
-    const avail = sf.bfree * sf.bsize;
-    const used  = total - avail;
-    const percent = total ? Math.min(100, Math.round(used / total * 100)) : 0;
-    res.json({ total: fmtBytes(total), used: fmtBytes(used), avail: fmtBytes(avail), percent });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  const root = fs.existsSync(DOWNLOADS_ROOT) ? DOWNLOADS_ROOT : '.';
+  
+  // 1. Try native fs.statfsSync if available
+  if (typeof fs.statfsSync === 'function') {
+    try {
+      const sf = fs.statfsSync(root);
+      const total = sf.blocks * sf.bsize;
+      const avail = sf.bfree * sf.bsize;
+      const used  = total - avail;
+      const percent = total ? Math.min(100, Math.round(used / total * 100)) : 0;
+      return res.json({ total: fmtBytes(total), used: fmtBytes(used), avail: fmtBytes(avail), percent });
+    } catch (err) {
+      console.error('fs.statfsSync error:', err.message);
+    }
   }
+
+  // 2. Fallback for older Node.js versions on Unix-like systems (Linux/macOS)
+  if (process.platform !== 'win32') {
+    try {
+      const { execSync } = require('child_process');
+      const out = execSync(`df -Pk "${root}"`, { timeout: 2000, encoding: 'utf8' });
+      const lines = out.trim().split('\n');
+      if (lines.length >= 2) {
+        const parts = lines[1].replace(/\s+/g, ' ').split(' ');
+        if (parts.length >= 4) {
+          const totalKb = parseInt(parts[1], 10);
+          const usedKb = parseInt(parts[2], 10);
+          const availKb = parseInt(parts[3], 10);
+          if (!isNaN(totalKb) && !isNaN(usedKb) && !isNaN(availKb)) {
+            const total = totalKb * 1024;
+            const used = usedKb * 1024;
+            const avail = availKb * 1024;
+            const percent = total ? Math.min(100, Math.round(used / total * 100)) : 0;
+            return res.json({ total: fmtBytes(total), used: fmtBytes(used), avail: fmtBytes(avail), percent });
+          }
+        }
+      }
+    } catch (err) {
+      console.error('df fallback error:', err.message);
+    }
+  }
+
+  // 3. Ultimate safe fallback
+  res.json({ total: '—', used: '—', avail: '—', percent: 0 });
 });
+
 
 app.get('/api/files', auth, (req, res) => {
   const dir = userDir(req.session.user);
