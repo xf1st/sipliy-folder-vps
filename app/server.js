@@ -9,6 +9,7 @@ const FormData = require('form-data');
 const QRCode = require('qrcode');
 const { exec, execFile, spawn } = require('child_process');
 const multer = require('multer');
+const archiver = require('archiver');
 
 const VT_API_KEY = '93c0c934a298f0f35b0f95be051de5b4e4ea7340fa3c7bb8fd5c1f572a13c2b8';
 const SHARES_FILE = '/opt/vps-downloader/shares.json';
@@ -34,6 +35,12 @@ function shareOptionsFromBody(body = {}) {
   };
   if (Number.isFinite(expiresInRaw) && expiresInRaw > 0) {
     out.expiresAt = new Date(Date.now() + expiresInRaw * 60 * 60 * 1000).toISOString();
+  }
+  if (body.password && typeof body.password === 'string' && body.password.trim().length > 0) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.pbkdf2Sync(body.password.trim(), Buffer.from(salt, 'hex'), 1000, 32, 'sha256').toString('hex');
+    out.passwordHash = hash;
+    out.passwordSalt = salt;
   }
   return out;
 }
@@ -748,6 +755,14 @@ app.get('/share/:token', (req, res) => {
     saveShares(shares);
     return res.status(404).send(shareNotFoundPage());
   }
+
+  if (s.passwordHash) {
+    const verified = req.session.verifiedShares && req.session.verifiedShares[req.params.token];
+    if (!verified) {
+      return res.send(sharePasswordPage(req.params.token));
+    }
+  }
+
   const file = shareFilePath(s);
   if (!file) return res.status(404).send(shareNotFoundPage());
   if (!fs.existsSync(file)) return res.status(404).send(shareNotFoundPage());
@@ -761,6 +776,24 @@ app.get('/share/:token', (req, res) => {
   s.downloads = (s.downloads || 0) + 1;
   saveShares(shares);
   res.download(file, s.downloadName || path.basename(file), { dotfiles: 'allow' });
+});
+
+app.post('/share/:token/auth', (req, res) => {
+  const shares = loadShares();
+  const s = shares[req.params.token];
+  if (!s || shareIsExpired(s)) return res.status(404).send(shareNotFoundPage());
+  
+  const password = req.body.password || '';
+  if (s.passwordHash && s.passwordSalt) {
+    const testHash = crypto.pbkdf2Sync(password.trim(), Buffer.from(s.passwordSalt, 'hex'), 1000, 32, 'sha256').toString('hex');
+    if (testHash === s.passwordHash) {
+      req.session.verifiedShares = req.session.verifiedShares || {};
+      req.session.verifiedShares[req.params.token] = true;
+      return res.redirect('/share/' + req.params.token + (req.query.dl ? '?dl=1' : ''));
+    }
+  }
+  
+  res.send(sharePasswordPage(req.params.token, 'Неверный пароль'));
 });
 
 app.get('/api/shares', auth, (req, res) => {
@@ -1434,8 +1467,24 @@ app.get('/api/fm/search', auth, (req, res) => {
 // GET /api/fm/download?path=
 app.get('/api/fm/download', auth, (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
-  if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).send('Not found');
-  res.download(full, path.basename(full));
+  if (!full || !fs.existsSync(full)) return res.status(404).send('Not found');
+  const stats = fs.statSync(full);
+  if (stats.isDirectory()) {
+    const archiveName = (path.basename(full) || 'folder') + '.zip';
+    res.attachment(archiveName);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('error', (err) => {
+      console.error('Directory archiving error:', err);
+      if (!res.headersSent) {
+        res.status(500).send({ ok: false, error: err.message });
+      }
+    });
+    archive.pipe(res);
+    archive.directory(full, false);
+    archive.finalize();
+  } else {
+    res.download(full, path.basename(full));
+  }
 });
 
 // GET /api/fm/preview?path=
@@ -1780,6 +1829,7 @@ app.get('/api/fm/shares', auth, (req, res) => {
       downloads: s.downloads || 0,
       maxDownloads: s.maxDownloads || null,
       preview: s.preview !== false,
+      hasPassword: !!s.passwordHash,
     }))
     .sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
   res.json({ ok: true, path: rel, shares: list });
@@ -1794,6 +1844,19 @@ app.patch('/api/fm/share/:token', auth, (req, res) => {
   share.maxDownloads = Number.isFinite(maxDownloadsRaw) && maxDownloadsRaw > 0 ? maxDownloadsRaw : null;
   share.expiresAt = Number.isFinite(expiresInRaw) && expiresInRaw > 0 ? new Date(Date.now() + expiresInRaw * 60 * 60 * 1000).toISOString() : null;
   share.preview = !!req.body.preview;
+  
+  if (req.body.password !== undefined) {
+    if (typeof req.body.password === 'string' && req.body.password.trim().length > 0) {
+      const salt = crypto.randomBytes(16).toString('hex');
+      const hash = crypto.pbkdf2Sync(req.body.password.trim(), Buffer.from(salt, 'hex'), 1000, 32, 'sha256').toString('hex');
+      share.passwordHash = hash;
+      share.passwordSalt = salt;
+    } else {
+      delete share.passwordHash;
+      delete share.passwordSalt;
+    }
+  }
+
   shares[req.params.token] = share;
   saveShares(shares);
   res.json({
@@ -1805,6 +1868,7 @@ app.patch('/api/fm/share/:token', auth, (req, res) => {
     downloads: share.downloads || 0,
     maxDownloads: share.maxDownloads || null,
     preview: share.preview !== false,
+    hasPassword: !!share.passwordHash,
   });
 });
 
@@ -1854,6 +1918,32 @@ function runCleanup() {
 }
 setInterval(runCleanup, 60 * 60 * 1000);
 runCleanup();
+
+function sharePasswordPage(token, errorMsg = '') {
+  return '<!DOCTYPE html><html lang="ru"><head><title>Защищенная ссылка</title>' + HEAD + '</head>' +
+  '<body class="bg-background font-body text-on-surface min-h-screen flex items-center justify-center">' +
+  '<div class="absolute inset-0 overflow-hidden pointer-events-none">' +
+    '<div class="absolute -top-40 -right-40 w-96 h-96 bg-primary/5 rounded-full blur-3xl"></div>' +
+    '<div class="absolute -bottom-40 -left-40 w-96 h-96 bg-primary-container/10 rounded-full blur-3xl"></div>' +
+  '</div>' +
+  '<div class="relative w-full max-w-sm mx-4">' +
+    '<div class="bg-surface-container-lowest/80 glass rounded-4xl p-10 shadow-[0_32px_80px_rgba(107,80,154,0.08)] text-center">' +
+      '<div class="w-14 h-14 mx-auto rounded-3xl bg-gradient-to-tr from-primary to-primary-container flex items-center justify-center shadow-lg shadow-purple-200 mb-6">' +
+        '<span class="material-symbols-outlined text-white text-2xl">lock</span>' +
+      '</div>' +
+      '<h1 class="text-2xl font-headline font-extrabold text-on-primary-container tracking-tight">Доступ ограничен</h1>' +
+      '<p class="text-secondary text-sm font-label mt-2 mb-6">Эта ссылка защищена паролем. Введите пароль для получения доступа.</p>' +
+      '<form method="POST" action="/share/' + token + '/auth" class="space-y-4">' +
+        '<div>' +
+          '<input name="password" type="password" required class="w-full bg-surface-container-low border-none rounded-2xl px-5 py-3.5 text-on-surface font-body focus:ring-2 focus:ring-primary/20 transition-all placeholder:text-outline" placeholder="Пароль доступа"/>' +
+        '</div>' +
+        (errorMsg ? '<div style="font-size:12px;font-weight:bold;color:#ffb4ab;margin-top:8px">' + htmlEscape(errorMsg) + '</div>' : '') +
+        '<button type="submit" class="w-full btn-primary bg-primary hover:bg-primary-container text-white rounded-2xl py-3.5 font-bold transition-all shadow-md mt-4" style="width:100%">Подтвердить</button>' +
+      '</form>' +
+    '</div>' +
+  '</div>' +
+  '</body></html>';
+}
 
 function shareNotFoundPage() {
   return '<!DOCTYPE html><html lang="ru"><head><title>Ссылка недействительна</title>' + HEAD + '</head>' +
@@ -2978,6 +3068,25 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<meta name="viewport" content="width=device-width,initial-scale=1">' +
   '<title>CloudSpace - ' + safeUsername + '</title>' +
   '<script src="https://cdn.tailwindcss.com"></script>' +
+  '<script>' +
+  'function applyAccentColor(){' +
+  '  var themes={' +
+  '    "violet":{color:"#a078ff",glow:"rgba(160,120,255,0.24)",hover:"#7c3aed",bg:"rgba(160,120,255,0.14)",light:"#d2bbff"},' +
+  '    "emerald":{color:"#10b981",glow:"rgba(16,185,129,0.24)",hover:"#059669",bg:"rgba(16,185,129,0.14)",light:"#a7f3d0"},' +
+  '    "ruby":{color:"#f43f5e",glow:"rgba(244,63,94,0.24)",hover:"#e11d48",bg:"rgba(244,63,94,0.14)",light:"#fecdd3"},' +
+  '    "glacier":{color:"#06b6d4",glow:"rgba(6,182,212,0.24)",hover:"#0891b2",bg:"rgba(6,182,212,0.14)",light:"#a5f3fc"}' +
+  '  };' +
+  '  var current=localStorage.getItem("cloud-accent")||"violet";' +
+  '  var t=themes[current]||themes.violet;' +
+  '  var root=document.documentElement;' +
+  '  root.style.setProperty("--accent-color",t.color);' +
+  '  root.style.setProperty("--accent-glow",t.glow);' +
+  '  root.style.setProperty("--accent-hover",t.hover);' +
+  '  root.style.setProperty("--accent-bg",t.bg);' +
+  '  root.style.setProperty("--accent-light",t.light);' +
+  '}' +
+  'applyAccentColor();' +
+  '</script>' +
   '<link rel="preconnect" href="https://fonts.googleapis.com">' +
   '<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">' +
   '<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">' +
@@ -2998,52 +3107,52 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.mobile-topbar,.mobile-bottom-nav{display:none}' +
   '.sidebar{background:#0e0e10;width:280px;min-height:100vh;flex-shrink:0}' +
   '.card{background:#1b1b1d;border:1px solid rgba(74,68,85,.7);border-radius:16px}' +
-  '.btn-primary{background:#7c3aed;color:#fff;border-radius:9999px;padding:10px 20px;font-weight:700;font-size:14px;border:none;cursor:pointer;transition:opacity .2s,transform .2s,box-shadow .2s;min-height:44px}' +
-  '.btn-primary:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 10px 24px rgba(160,120,255,.24)}' +
+  '.btn-primary{background:var(--accent-color);color:#fff;border-radius:9999px;padding:10px 20px;font-weight:700;font-size:14px;border:none;cursor:pointer;transition:opacity .2s,transform .2s,box-shadow .2s;min-height:44px}' +
+  '.btn-primary:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 10px 24px var(--accent-glow)}' +
   '.btn-ghost{background:#201f21;border:1px solid #4a4455;color:#e5e1e4;border-radius:9999px;padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;transition:background .2s,transform .2s,border-color .2s;min-height:40px}' +
-  '.btn-ghost:hover{background:rgba(208,188,255,.1);border-color:#7f67b8;transform:translateY(-1px)}' +
+  '.btn-ghost:hover{background:var(--accent-bg);border-color:var(--accent-hover);transform:translateY(-1px)}' +
   '.nav-item{display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:12px;cursor:pointer;color:#cbc3d7;font-size:14px;font-weight:500;transition:background .2s;text-decoration:none}' +
-  '.nav-item:hover{background:rgba(208,188,255,.1);color:#e4e1e6}' +
-  '.nav-item.active{background:rgba(208,188,255,.15);color:#d0bcff}' +
+  '.nav-item:hover{background:var(--accent-bg);color:#e4e1e6}' +
+  '.nav-item.active{background:var(--accent-bg);color:var(--accent-light)}' +
   '.breadcrumb-sep{color:#494454;margin:0 6px}' +
   '.file-row{display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:12px;cursor:pointer;transition:background .15s,border-color .15s,transform .15s;border-bottom:1px solid #1f1f22}' +
   '.file-row:last-child{border-bottom:none}' +
   '.file-row:hover{background:#2a2a2d;transform:translateX(2px)}' +
-  '.file-row.selected{background:rgba(160,120,255,.14)}' +
-  '.file-row.drag-over{background:rgba(160,120,255,.18)!important;outline:2px dashed #a078ff;outline-offset:-2px}' +
+  '.file-row.selected{background:var(--accent-bg)}' +
+  '.file-row.drag-over{background:var(--accent-bg)!important;outline:2px dashed var(--accent-color);outline-offset:-2px}' +
   '.file-row.dragging{opacity:.4}' +
   '.file-grid-item{background:#1b1b1d;border:1px solid rgba(74,68,85,.55);border-radius:16px;padding:16px 12px;display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;transition:border-color .15s,background .15s,transform .15s,box-shadow .15s;text-align:center;animation:popIn .18s ease both}' +
-  '.file-grid-item:hover{background:#2a2a2d;border-color:#6d3bd7;transform:translateY(-3px);box-shadow:0 14px 28px rgba(0,0,0,.24)}' +
-  '.file-grid-item.selected{background:rgba(160,120,255,.14);border-color:#a078ff}' +
-  '.file-grid-item.drag-over{background:rgba(160,120,255,.18)!important;border-color:#a078ff;outline:2px dashed #a078ff;outline-offset:-2px}' +
+  '.file-grid-item:hover{background:#2a2a2d;border-color:var(--accent-color);transform:translateY(-3px);box-shadow:0 14px 28px rgba(0,0,0,.24)}' +
+  '.file-grid-item.selected{background:var(--accent-bg);border-color:var(--accent-color)}' +
+  '.file-grid-item.drag-over{background:var(--accent-bg)!important;border-color:var(--accent-color);outline:2px dashed var(--accent-color);outline-offset:-2px}' +
   '.file-grid-item.dragging{opacity:.4}' +
-  '.file-thumb{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:#353437;color:#d2bbff;font-size:26px;overflow:hidden;flex:0 0 auto}' +
-  '.file-thumb .material-symbols-outlined{font-size:28px;color:#d2bbff}' +
+  '.file-thumb{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:#353437;color:var(--accent-light);font-size:26px;overflow:hidden;flex:0 0 auto}' +
+  '.file-thumb .material-symbols-outlined{font-size:28px;color:var(--accent-light)}' +
   '.file-thumb img{width:100%;height:100%;object-fit:cover}' +
   '.file-actions{display:flex;gap:4px;margin-top:auto;flex-wrap:wrap;justify-content:center;max-width:100%}' +
   '.file-actions .btn-ghost{padding:3px 7px!important;min-width:30px}' +
   '.item-menu-btn{width:40px;height:40px;min-height:40px;border-radius:9999px;padding:0;display:flex;align-items:center;justify-content:center;flex:0 0 auto}' +
   '.item-menu-btn .material-symbols-outlined{font-size:22px}' +
-  '.drop-target{outline:2px dashed #a078ff!important;outline-offset:-3px;background:rgba(160,120,255,.16)!important;color:#d2bbff!important}' +
+  '.drop-target{outline:2px dashed var(--accent-color)!important;outline-offset:-3px;background:var(--accent-bg)!important;color:var(--accent-light)!important}' +
   '.transfer-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #1f1f22}' +
   '.transfer-row:last-child{border-bottom:none}' +
   '.transfer-card{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-bottom:1px solid #1f1f22}' +
   '.transfer-card:last-child{border-bottom:none}' +
   '.transfer-top{display:flex;align-items:center;gap:10px}' +
   '.transfer-name{flex:1;min-width:0;font-size:13px;font-weight:700;color:#e4e1e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-  '.transfer-status{font-size:11px;font-weight:800;text-transform:uppercase;color:#d2bbff;background:rgba(124,58,237,.16);border-radius:9999px;padding:3px 8px}' +
+  '.transfer-status{font-size:11px;font-weight:800;text-transform:uppercase;color:var(--accent-light);background:var(--accent-bg);border-radius:9999px;padding:3px 8px}' +
   '.transfer-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;font-size:12px;color:#958ea0}' +
   '.transfer-controls{display:flex;gap:8px;flex-wrap:wrap}' +
   '.transfer-controls .btn-ghost{min-height:32px;padding:4px 10px;font-size:12px}' +
   '.progress-track{background:#2a2a2d;border:1px solid rgba(208,188,255,.14);border-radius:9999px;height:10px;overflow:hidden;flex:1;box-shadow:inset 0 0 0 1px rgba(0,0,0,.18)}' +
-  '.progress-fill{height:100%;border-radius:9999px;background:linear-gradient(90deg,#a078ff,#6d3bd7);transition:width .4s}' +
+  '.progress-fill{height:100%;border-radius:9999px;background:linear-gradient(90deg,var(--accent-color),var(--accent-hover));transition:width .4s}' +
   '.progress-fill.done{background:#10B981;box-shadow:0 0 8px rgba(16,185,129,.5)}' +
   '.transfer-card.is-error{border-color:#93000a;background:rgba(147,0,10,.06);padding-left:12px;padding-right:12px;border-radius:12px}' +
-  '.transfer-card.is-active{border-color:#6d3bd7;background:rgba(109,59,215,.06);padding-left:12px;padding-right:12px;border-radius:12px}' +
+  '.transfer-card.is-active{border-color:var(--accent-hover);background:var(--accent-bg);padding-left:12px;padding-right:12px;border-radius:12px}' +
   '.transfer-section-title{font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;color:#958ea0;margin:4px 0}' +
   '#transfers-card{display:none;position:fixed;right:24px;bottom:24px;z-index:520;width:min(560px,calc(100vw - 48px));max-height:min(62vh,620px);overflow:auto;margin:0!important;padding:16px!important;box-shadow:0 18px 70px rgba(0,0,0,.5)}' +
   '#transfers-card.minimized{display:none!important}' +
-  '#transfers-chip{display:none;position:fixed;right:24px;bottom:24px;z-index:521;align-items:center;gap:10px;background:#1f1f22;border:1px solid #6d3bd7;border-radius:9999px;padding:10px 14px;color:#e4e1e6;box-shadow:0 14px 46px rgba(0,0,0,.45);cursor:pointer}' +
+  '#transfers-chip{display:none;position:fixed;right:24px;bottom:24px;z-index:521;align-items:center;gap:10px;background:#1f1f22;border:1px solid var(--accent-color);border-radius:9999px;padding:10px 14px;color:#e4e1e6;box-shadow:0 14px 46px rgba(0,0,0,.45);cursor:pointer}' +
   '#transfers-chip.active{display:flex}' +
   '.new-badge{display:inline-flex;align-items:center;margin-left:8px;border:1px solid rgba(16,185,129,.42);background:rgba(16,185,129,.14);color:#86efac;border-radius:9999px;padding:2px 7px;font-size:10px;font-weight:900;text-transform:uppercase}' +
   '.file-row.is-new,.file-grid-item.is-new{outline:2px solid rgba(16,185,129,.65)!important;outline-offset:-2px}' +
@@ -3052,14 +3161,14 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.history-row:last-child{border-bottom:none;border-radius:0 0 12px 12px}' +
   '.history-name{min-width:0;font-size:13px;font-weight:800;color:#e4e1e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
   '.history-meta{font-size:12px;color:#958ea0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-  '.select-check{width:16px;height:16px;accent-color:#a078ff;cursor:pointer;flex:0 0 auto}' +
+  '.select-check{width:16px;height:16px;accent-color:var(--accent-color);cursor:pointer;flex:0 0 auto}' +
   '#selection-bar{display:none;align-items:center;gap:10px;padding:10px 24px;border-bottom:1px solid #1f1f22;background:#17171a;flex-shrink:0}' +
   '#upload-panel{display:none;position:fixed;right:24px;bottom:24px;z-index:350;width:min(420px,calc(100vw - 48px));background:#1f1f22;border:1px solid #494454;border-radius:14px;padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.55);animation:slideUp .22s ease both}' +
-  '#toast{display:none;position:fixed;right:24px;bottom:24px;z-index:650;width:min(380px,calc(100vw - 48px));background:#1f1f22;border:1px solid #6d3bd7;border-radius:12px;padding:10px 14px;box-shadow:0 8px 32px rgba(0,0,0,.55);animation:slideUp .18s ease both}' +
-  '#connection-pill{display:none;position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:700;align-items:center;gap:8px;background:rgba(31,31,34,.94);border:1px solid #6d3bd7;border-radius:9999px;padding:8px 12px;color:#e4e1e6;font-size:12px;font-weight:800;box-shadow:0 10px 34px rgba(0,0,0,.42);backdrop-filter:blur(16px)}' +
+  '#toast{display:none;position:fixed;right:24px;bottom:24px;z-index:650;width:min(380px,calc(100vw - 48px));background:#1f1f22;border:1px solid var(--accent-color);border-radius:12px;padding:10px 14px;box-shadow:0 8px 32px rgba(0,0,0,.55);animation:slideUp .18s ease both}' +
+  '#connection-pill{display:none;position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:700;align-items:center;gap:8px;background:rgba(31,31,34,.94);border:1px solid var(--accent-color);border-radius:9999px;padding:8px 12px;color:#e4e1e6;font-size:12px;font-weight:800;box-shadow:0 10px 34px rgba(0,0,0,.42);backdrop-filter:blur(16px)}' +
   '#connection-pill.offline{display:flex;border-color:#93000a;color:#ffdad6}' +
   '#connection-pill.checking{display:flex;border-color:#6650a4;color:#d2bbff}' +
-  '#connection-pill .dot{width:8px;height:8px;border-radius:9999px;background:#a078ff;box-shadow:0 0 12px rgba(160,120,255,.8)}' +
+  '#connection-pill .dot{width:8px;height:8px;border-radius:9999px;background:var(--accent-color);box-shadow:0 0 12px var(--accent-glow)}' +
   '#connection-pill.offline .dot{background:#ff5449;box-shadow:0 0 12px rgba(255,84,73,.8)}' +
   '.speed-result{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}' +
   '.speed-metric{border:1px solid #353437;border-radius:14px;padding:10px;background:#17171a;min-width:0}' +
@@ -3067,13 +3176,13 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.speed-metric span{display:block;color:#958ea0;font-size:11px;margin-top:3px}' +
   '.preview-panel{display:none;width:380px;max-width:38vw;border-left:1px solid #1f1f22;background:#151518;flex-shrink:0;flex-direction:column;overflow:hidden;transform-origin:right center;position:relative!important}' +
   '.preview-resizer{position:absolute;left:0;top:0;bottom:0;width:6px;cursor:col-resize;z-index:100;background:transparent;transition:background 0.2s}' +
-  '.preview-resizer:hover,.preview-resizer.dragging{background:rgba(160,120,255,0.4)}' +
+  '.preview-resizer:hover,.preview-resizer.dragging{background:var(--accent-color)!important}' +
   '.preview-panel.open{display:flex;animation:panelIn .22s cubic-bezier(.2,.8,.2,1) both}' +
   '.preview-head{display:flex;align-items:center;gap:6px;padding:10px 14px;border-bottom:1px solid #1f1f22;flex-shrink:0}' +
   '.preview-body{padding:14px;overflow:auto;flex:1;min-height:0}' +
   '.preview-body.media-preview{display:flex;align-items:center;justify-content:center;background:#0e0e10}' +
   '.preview-media{max-width:100%;max-height:72vh;border-radius:12px;object-fit:contain;display:block}' +
-  ':root{--plyr-color-main:#a078ff}' +
+  ':root{--plyr-color-main:var(--accent-color);--accent-color:#a078ff;--accent-glow:rgba(160,120,255,0.24);--accent-hover:#7c3aed;--accent-bg:rgba(160,120,255,0.14);--accent-light:#d2bbff}' +
   '.mv-stage .plyr,.preview-media-wrap .plyr{width:auto;max-width:100%;border-radius:14px;background:#000;box-shadow:0 24px 90px rgba(0,0,0,.38);overflow:hidden}' +
   '.mv-stage .plyr{max-height:100%;height:auto}' +
   '.mv-stage .plyr video,.preview-media-wrap .plyr video{width:100%;height:100%;max-width:100%;max-height:72vh;object-fit:contain}' +
@@ -3090,20 +3199,20 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.doc-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}' +
   '.doc-tab{border:1px solid #494454;background:#1f1f22;color:#e4e1e6;border-radius:999px;padding:6px 10px;font-weight:800;font-size:12px;cursor:pointer}' +
   '.archive-path{max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e4e1e6}' +
-  '.archive-dir{color:#d2bbff;font-weight:800}' +
+  '.archive-dir{color:var(--accent-light);font-weight:800}' +
   '.media-viewer{position:fixed;inset:0;z-index:900;background:rgba(5,5,7,.96);display:none;flex-direction:column;color:#fff}' +
   '.media-viewer.open{display:flex;animation:viewerIn .2s cubic-bezier(.2,.8,.2,1) both}' +
   '.mv-top{height:64px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(20,20,24,.72);backdrop-filter:blur(18px)}' +
   '.mv-title{flex:1;min-width:0;font-size:15px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
   '.mv-icon{width:42px;height:42px;border-radius:9999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer}' +
-  '.mv-icon:hover{background:rgba(160,120,255,.22);border-color:#a078ff}' +
-  '.mv-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:18px;overflow:hidden;position:relative;background:radial-gradient(circle at 50% 50%,rgba(160,120,255,.08),transparent 42%)}' +
+  '.mv-icon:hover{background:var(--accent-bg);border-color:var(--accent-color)}' +
+  '.mv-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:18px;overflow:hidden;position:relative;background:radial-gradient(circle at 50% 50%,var(--accent-bg),transparent 42%)}' +
   '.mv-stage img,.mv-stage video{max-width:100%;max-height:100%;object-fit:contain;border-radius:14px;box-shadow:0 24px 90px rgba(0,0,0,.55)}' +
   '.mv-stage audio{width:min(720px,92vw)}' +
   '.mv-bottom{min-height:72px;display:flex;align-items:center;gap:12px;padding:12px 18px;border-top:1px solid rgba(255,255,255,.08);background:rgba(20,20,24,.72);backdrop-filter:blur(18px)}' +
-  '.mv-seek{flex:1;accent-color:#a078ff}' +
+  '.mv-seek{flex:1;accent-color:var(--accent-color)}' +
   '.mv-time{font-size:12px;color:#cbc3d7;min-width:96px;text-align:center}' +
-  '.mv-range{width:100px;accent-color:#a078ff}' +
+  '.mv-range{width:100px;accent-color:var(--accent-color)}' +
   '.mv-center-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) scale(.94);width:86px;height:86px;border-radius:9999px;border:1px solid rgba(255,255,255,.28);background:rgba(20,20,24,.62);backdrop-filter:blur(18px);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 18px 60px rgba(0,0,0,.42);transition:opacity .18s,transform .18s}' +
   '.mv-center-play.hidden{opacity:0;pointer-events:none;transform:translate(-50%,-50%) scale(.82)}' +
   '.mv-center-play .material-symbols-outlined{font-size:48px}' +
@@ -3116,7 +3225,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.meta-row:last-child{border-bottom:none}' +
   '.meta-lbl{color:#494454;flex-shrink:0;padding-top:1px}' +
   '.meta-val{color:#cbc3d7;font-weight:500;text-align:right;word-break:break-all}' +
-  '.dir-name{color:#d0bcff}' +
+  '.dir-name{color:var(--accent-light)}' +
   '.file-name{color:#e4e1e6}' +
   '.upload-file{font-size:12px;color:#cbc3d7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
   '.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:flex;align-items:center;justify-content:center}' +
@@ -3124,47 +3233,47 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '#modal-qr .modal{z-index:121}' +
   '.modal{background:#1f1f22;border:1px solid #494454;border-radius:16px;padding:24px;min-width:360px;max-width:90vw;animation:popIn .18s ease both}' +
   '.inp{background:#0e0e11;border:1px solid #494454;border-radius:8px;color:#e4e1e6;padding:8px 14px;font-size:14px;width:100%;outline:none;font-family:Manrope,sans-serif}' +
-  '.inp:focus{border-color:#d0bcff;box-shadow:0 0 0 3px rgba(208,188,255,.15)}' +
+  '.inp:focus{border-color:var(--accent-color);box-shadow:0 0 0 3px var(--accent-glow)}' +
   '.disk-bar{background:#2a2a2d;border-radius:9999px;height:8px;overflow:hidden}' +
-  '.disk-fill{height:100%;border-radius:9999px;background:linear-gradient(90deg,#a078ff,#6d3bd7)}' +
+  '.disk-fill{height:100%;border-radius:9999px;background:linear-gradient(90deg,var(--accent-color),var(--accent-hover))}' +
   'body.light{background:#f0ecfa;color:#17151c}' +
   'body.light .sidebar{background:#fff;border-right:1px solid #e2d9f3}' +
   'body.light .sidebar [style*="color:#e4e1e6"]{color:#17151c!important}' +
   'body.light .sidebar [style*="color:#958ea0"]{color:#7b6f93!important}' +
   'body.light .sidebar [style*="color:#494454"]{color:#4a3b6e!important}' +
   'body.light .nav-item{color:#4a3b6e}' +
-  'body.light .nav-item:hover{background:#ede5ff;color:#6d3bd7}' +
-  'body.light .nav-item.active{background:#e8e0ff;color:#6d3bd7}' +
+  'body.light .nav-item:hover{background:var(--accent-bg);color:var(--accent-hover)}' +
+  'body.light .nav-item.active{background:var(--accent-bg);color:var(--accent-hover)}' +
   'body.light #main-area{background:#f6f3ff!important}' +
   'body.light #main-area>div:first-child{background:#fff!important;border-bottom-color:#e2d9f3!important}' +
   'body.light #main-area>div:nth-child(2){background:#f1ecfb!important;border-bottom-color:#d8cdec!important}' +
-  'body.light #selection-bar{background:#ede5ff;border-bottom-color:#e2d9f3;color:#17151c}' +
+  'body.light #selection-bar{background:var(--accent-bg);border-bottom-color:#e2d9f3;color:#17151c}' +
   'body.light #file-scroll{background:#f0ecfa}' +
   'body.light .card{background:#fff;border-color:#e2d9f3;color:#17151c}' +
   'body.light .transfer-row{border-bottom-color:#e2d9f3}' +
   'body.light .transfer-card{border-bottom-color:#e2d9f3}' +
   'body.light .transfer-name{color:#17151c}' +
-  'body.light .transfer-status{background:#ede5ff;color:#6d3bd7}' +
+  'body.light .transfer-status{background:var(--accent-bg);color:var(--accent-hover)}' +
   'body.light .transfer-meta{color:#7b6f93}' +
   'body.light .progress-track{background:#e2d9f3}' +
-  'body.light #transfers-card,body.light #transfers-chip{background:#fff;border-color:#a078ff;color:#17151c}' +
+  'body.light #transfers-card,body.light #transfers-chip{background:#fff;border-color:var(--accent-color);color:#17151c}' +
   'body.light .history-row{background:#fff;border-bottom-color:#e2d9f3}' +
   'body.light .history-name{color:#17151c}' +
   'body.light .history-meta{color:#7b6f93}' +
   'body.light .file-row{background:#fff!important;border-color:#d8cdec!important;border-bottom-color:#ede5ff;color:#17151c}' +
-  'body.light .file-row:hover{background:#f7f2ff!important}' +
-  'body.light .file-row.selected{background:#e0d5ff}' +
-  'body.light .file-thumb{background:#ede5ff}' +
-  'body.light .dir-name{color:#6d3bd7}' +
+  'body.light .file-row:hover{background:var(--accent-bg)!important}' +
+  'body.light .file-row.selected{background:var(--accent-bg)}' +
+  'body.light .file-thumb{background:var(--accent-bg)}' +
+  'body.light .dir-name{color:var(--accent-hover)}' +
   'body.light .file-name{color:#17151c}' +
   'body.light .file-grid-item{background:#fff!important;border-color:#d8cdec!important;color:#17151c!important}' +
-  'body.light .file-grid-item:hover{background:#f7f2ff!important;border-color:#a078ff!important}' +
-  'body.light .file-grid-item.selected{background:#e8e0ff!important;border-color:#7c4dff!important}' +
+  'body.light .file-grid-item:hover{background:var(--accent-bg)!important;border-color:var(--accent-color)!important}' +
+  'body.light .file-grid-item.selected{background:var(--accent-bg)!important;border-color:var(--accent-color)!important}' +
   'body.light .file-grid-item [style*="color:#e4e1e6"],body.light .file-row [style*="color:#e4e1e6"]{color:#17151c!important}' +
-  'body.light .file-grid-item [style*="color:#d0bcff"],body.light .file-row [style*="color:#d0bcff"]{color:#6d3bd7!important}' +
+  'body.light .file-grid-item [style*="color:#d0bcff"],body.light .file-row [style*="color:#d0bcff"]{color:var(--accent-hover)!important}' +
   'body.light .modal{background:#fff;border-color:#e2d9f3;color:#17151c}' +
   'body.light #upload-panel{background:#fff;border-color:#e2d9f3}' +
-  'body.light #toast{background:#fff;border-color:#a078ff;color:#17151c}' +
+  'body.light #toast{background:#fff;border-color:var(--accent-color);color:#17151c}' +
   'body.light #connection-pill{background:rgba(255,255,255,.94);color:#17151c}' +
   'body.light .speed-metric{background:#faf8ff;border-color:#e2d9f3}' +
   'body.light .speed-metric b{color:#17151c}' +
@@ -3185,30 +3294,53 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'body.light .disk-bar{background:#e2d9f3}' +
   'body.light #disk-label{color:#4a3b6e}' +
   'body.light .inp{background:#faf8ff;color:#17151c;border-color:#c9bfe0}' +
-  'body.light .inp:focus{border-color:#a078ff}' +
+  'body.light .inp:focus{border-color:var(--accent-color)}' +
   'body.light .btn-ghost{color:#4a3b6e;border-color:#c0b3d8;background:#fff}' +
-  'body.light .btn-ghost:hover{background:#ede5ff;border-color:#a078ff;color:#6d3bd7}' +
-  'body.light .btn-primary{background:#7c3aed!important;color:#fff!important}' +
+  'body.light .btn-ghost:hover{background:var(--accent-bg);border-color:var(--accent-color);color:var(--accent-hover)}' +
+  'body.light .btn-primary{background:var(--accent-color)!important;color:#fff!important}' +
   'body.light .mobile-actions button{background:#fff!important;border-color:#c0b3d8!important;color:#4a3b6e!important}' +
   'body.light .mobile-topbar,body.light .mobile-bottom-nav{background:rgba(255,255,255,.88)!important;border-color:#e2d9f3!important}' +
   'body.light .mobile-brand{color:#17151c!important;text-shadow:none!important}' +
-  'body.light .mobile-avatar{background:#ede5ff!important;border-color:#d8cdec!important;color:#6d3bd7!important}' +
+  'body.light .mobile-avatar{background:var(--accent-bg)!important;border-color:#d8cdec!important;color:var(--accent-hover)!important}' +
   'body.light #ctx-menu{background:#fff!important;border-color:#d8cdec!important;box-shadow:0 12px 40px rgba(50,34,80,.18)!important}' +
   'body.light .ctx-item{color:#2d2440!important}' +
-  'body.light .ctx-item:hover{background:#ede5ff!important;color:#6d3bd7!important}' +
+  'body.light .ctx-item:hover{background:var(--accent-bg)!important;color:var(--accent-hover)!important}' +
   'body.light .ctx-sep{background:#e8e0f4!important}' +
   'body.light #file-area{color:#17151c}' +
   /* context menu */
   '#ctx-menu{position:fixed;z-index:500;background:#1f1f22;border:1px solid #494454;border-radius:10px;padding:4px;min-width:190px;box-shadow:0 12px 40px rgba(0,0,0,.7);display:none;transform-origin:top left}' +
   '#ctx-menu.open{animation:menuIn .14s cubic-bezier(.2,.8,.2,1) both}' +
   '.ctx-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;color:#e4e1e6;transition:background .12s}' +
-  '.ctx-item:hover{background:rgba(208,188,255,.15);color:#d0bcff}' +
+  '.ctx-item:hover{background:var(--accent-bg);color:var(--accent-light)}' +
   '.ctx-item.danger{color:#ffb4ab}' +
   '.ctx-item.danger:hover{background:rgba(255,180,171,.1);color:#ff8a80}' +
   '.ctx-sep{height:1px;background:#353438;margin:3px 6px}' +
   /* drop zone overlay */
-  '#drop-zone{position:fixed;inset:0;z-index:300;pointer-events:none;display:none;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:rgba(109,59,215,.1);border:3px dashed #a078ff;border-radius:0}' +
+  '#drop-zone{position:fixed;inset:0;z-index:300;pointer-events:none;display:none;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:rgba(109,59,215,.1);border:3px dashed var(--accent-color);border-radius:0}' +
   '#drop-zone.active{display:flex}' +
+  /* Custom features classes */
+  '.filter-pill{background:#1f1f22;border:1px solid #494455;color:#cbc3d7;border-radius:9999px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s}' +
+  '.filter-pill:hover{background:var(--accent-bg);color:#e4e1e6;border-color:var(--accent-color)}' +
+  '.filter-pill.active{background:var(--accent-color);color:#fff;border-color:var(--accent-color);box-shadow:0 0 10px var(--accent-glow)}' +
+  'body.light .filter-pill{background:#fff;border-color:#c9bfe0;color:#4a3b6e}' +
+  'body.light .filter-pill:hover{background:var(--accent-bg);color:var(--accent-hover);border-color:var(--accent-color)}' +
+  'body.light .filter-pill.active{background:var(--accent-color);color:#fff;border-color:var(--accent-color)}' +
+  '.settings-grid{display:grid;grid-template-columns:1fr;gap:18px}' +
+  '@media(min-width:1024px){.settings-grid{grid-template-columns:1fr 1fr!important}}' +
+  '.theme-card{display:flex;align-items:center;gap:12px;padding:14px;border-radius:14px;background:#0e0e11;border:1px solid #4a4455;cursor:pointer;transition:all .2s}' +
+  '.theme-card:hover{border-color:var(--accent-color);background:var(--accent-bg)}' +
+  '.theme-card.active{border-color:var(--accent-color);background:var(--accent-bg);box-shadow:0 0 12px var(--accent-glow)}' +
+  'body.light .theme-card{background:#faf8ff;border-color:#c9bfe0}' +
+  'body.light .theme-card:hover{background:var(--accent-bg)}' +
+  'body.light .theme-card.active{background:var(--accent-bg);border-color:var(--accent-color)}' +
+  '.theme-card-dot{width:22px;height:22px;border-radius:9999px;flex:0 0 auto}' +
+  '.code-hl-kw{color:#ff79c6;font-weight:bold}' +
+  '.code-hl-str{color:#f1fa8c}' +
+  '.code-hl-cmt{color:#6272a4;font-style:italic}' +
+  '.code-hl-num{color:#bd93f9}' +
+  '.code-hl-fn{color:#50fa7b}' +
+  '.code-hl-tag{color:#8be9fd}' +
+  '.code-hl-attr{color:#ffb86c}' +
   '@keyframes popIn{from{opacity:0;transform:scale(.98) translateY(6px)}to{opacity:1;transform:scale(1) translateY(0)}}' +
   '@keyframes slideUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}' +
   '@keyframes panelIn{from{opacity:0;transform:translateX(18px) scale(.985)}to{opacity:1;transform:translateX(0) scale(1)}}' +
@@ -3424,6 +3556,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="preview-resizer" class="preview-resizer"></div>' +
   '<div class="preview-head">' +
   '<div id="preview-title" style="font-weight:700;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Предпросмотр</div>' +
+  '<button id="preview-btn-prev" class="btn-ghost" data-action="preview-prev" style="padding:5px 9px;display:none" title="Предыдущий"><span class="material-symbols-outlined">navigate_before</span></button>' +
+  '<button id="preview-btn-next" class="btn-ghost" data-action="preview-next" style="padding:5px 9px;display:none" title="Следующий"><span class="material-symbols-outlined">navigate_next</span></button>' +
   '<button class="btn-ghost" data-action="fullscreen-preview" style="padding:5px 9px" title="На весь экран"><span class="material-symbols-outlined">fullscreen</span></button>' +
   '<button class="btn-ghost" data-action="download-preview" style="padding:5px 9px" title="Скачать"><span class="material-symbols-outlined">download</span></button>' +
   '<button class="btn-ghost" data-action="share-preview" style="padding:5px 9px" title="Публичная ссылка"><span class="material-symbols-outlined">link</span></button>' +
@@ -3435,7 +3569,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
 
   /* ── CONTEXT MENU ── */
   '<div id="media-viewer" class="media-viewer">' +
-  '<div class="mv-top"><div id="mv-title" class="mv-title">Media</div><button class="mv-icon" data-action="mv-download" title="Скачать"><span class="material-symbols-outlined">download</span></button><button class="mv-icon" data-action="mv-share" title="Публичная ссылка"><span class="material-symbols-outlined">link</span></button><button class="mv-icon" data-action="mv-close" title="Закрыть"><span class="material-symbols-outlined">close</span></button></div>' +
+  '<div class="mv-top"><div id="mv-title" class="mv-title">Media</div><button class="mv-icon" data-action="playlist-prev" title="Предыдущий"><span class="material-symbols-outlined">navigate_before</span></button><button class="mv-icon" data-action="playlist-next" title="Следующий"><span class="material-symbols-outlined">navigate_next</span></button><button class="mv-icon" data-action="mv-download" title="Скачать"><span class="material-symbols-outlined">download</span></button><button class="mv-icon" data-action="mv-share" title="Публичная ссылка"><span class="material-symbols-outlined">link</span></button><button class="mv-icon" data-action="mv-close" title="Закрыть"><span class="material-symbols-outlined">close</span></button></div>' +
   '<div id="mv-stage" class="mv-stage"></div>' +
   '<div id="mv-bottom" class="mv-bottom"></div>' +
   '</div>' +
@@ -3525,6 +3659,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</select>' +
   '<label style="display:block;font-size:12px;color:#958ea0;margin-bottom:6px">Количество скачиваний</label>' +
   '<input id="share-max-inp" class="inp" type="number" min="0" step="1" placeholder="0 = без ограничения" style="margin-bottom:12px">' +
+  '<label style="display:block;font-size:12px;color:#958ea0;margin-bottom:6px">Пароль для защиты ссылки (опционально)</label>' +
+  '<input id="share-password-inp" class="inp" type="password" placeholder="Оставьте пустым, если пароль не нужен" style="margin-bottom:12px">' +
   '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#958ea0;margin-bottom:12px;cursor:pointer">' +
   '<input type="checkbox" id="share-preview-chk" checked style="cursor:pointer"> Создать страницу предпросмотра (вместо авто-скачивания)' +
   '</label>' +
@@ -3559,12 +3695,17 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<select id="sm-new-expire" class="inp"><option value="0">Без ограничения</option><option value="1">1 час</option><option value="24">1 день</option><option value="72">3 дня</option><option value="168">7 дней</option><option value="720">30 дней</option></select>' +
   '<input id="sm-new-max" class="inp" type="number" min="0" step="1" placeholder="Скачиваний: 0 = без лимита">' +
   '</div>' +
-  '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#958ea0;margin-bottom:12px;cursor:pointer"><input type="checkbox" id="sm-new-preview" checked> Страница предпросмотра</label>' +
-  '<div style="display:flex;justify-content:flex-end"><button class="btn-primary" data-action="sm-create"><span class="material-symbols-outlined">add_link</span> Создать ссылку</button></div>' +
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">' +
+  '<input id="sm-new-password" class="inp" type="password" placeholder="Пароль (опционально)">' +
+  '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#958ea0;cursor:pointer"><input type="checkbox" id="sm-new-preview" checked> Страница предпросмотра</label>' +
+  '</div>' +
+  '<div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn-primary" data-action="sm-create"><span class="material-symbols-outlined">add_link</span> Создать ссылку</button></div>' +
   '</div>' +
   '</div></div>' +
 
   '<script>' +
+  'var userIsAdmin = ' + (profile.isAdmin ? 'true' : 'false') + ';' +
+  'var activeFilter = "all";' +
   'var currentPath="__dashboard__",currentView=localStorage.getItem("fm-view")||"list";' +
   'if(currentView!=="grid")currentView="list";' +
   'function encPath(p){return (p||"").split("/").filter(Boolean).map(encodeURIComponent).join("/");}' +
@@ -3601,6 +3742,52 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
 
   /* ── UTILS ── */
   'function H(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
+  'function highlightCode(code,ext){' +
+  '  var escaped=H(code);' +
+  '  var store=[];' +
+  '  function mask(str,cls){' +
+  '    var placeholder="___MASKED_"+store.length+"___";' +
+  '    store.push({value:str,cls:cls});' +
+  '    return placeholder;' +
+  '  }' +
+  '  var temp=escaped;' +
+  '  temp=temp.replace(/(&quot;|&#39;|`)(?:\\\\.|[^\\\\])*?\\\\1/g,function(m){' +
+  '    return mask(m,"code-hl-str");' +
+  '  });' +
+  '  if(["html","xml"].includes(ext)){' +
+  '    temp=temp.replace(/&lt;!--[\\\\s\\\\S]*?--&gt;/g,function(m){' +
+  '      return mask(m,"code-hl-cmt");' +
+  '    });' +
+  '  }else{' +
+  '    temp=temp.replace(/\\\\/\\\\*[\\\\s\\\\S]*?\\\\*\\\\//g,function(m){' +
+  '      return mask(m,"code-hl-cmt");' +
+  '    });' +
+  '    temp=temp.replace(/\\\\/\\\\/.*$/gm,function(m){' +
+  '      return mask(m,"code-hl-cmt");' +
+  '    });' +
+  '    temp=temp.replace(/#.*$/gm,function(m){' +
+  '      return mask(m,"code-hl-cmt");' +
+  '    });' +
+  '  }' +
+  '  if(["html","xml","svg"].includes(ext)){' +
+  '    temp=temp.replace(/(&lt;\\\\/?)([\\\\w:-]+)(.*?)(\\\\/?&gt;)/g,function(match,open,tag,attrs,close){' +
+  '      var highlightedAttrs=attrs.replace(/(\\\\b[\\\\w:-]+)(=)/g,\'<span class="code-hl-attr">$1</span>$2\');' +
+  '      return open+\'<span class="code-hl-tag">\'+tag+\'</span>\'+highlightedAttrs+close;' +
+  '    });' +
+  '  }else{' +
+  '    var keywords=/\\\\b(break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|finally|for|function|if|import|in|instanceof|new|return|super|switch|this|throw|try|typeof|var|void|while|with|yield|def|elif|lambda|import|from|as|global|nonlocal|pass|raise|try|except|finally|with|and|or|not|is|in)\\\\b/g;' +
+  '    var builtins=/\\\\b(console|document|window|Object|Array|String|Number|Boolean|Function|Promise|JSON|Map|Set|dict|list|tuple|set|int|str|float|print|len|range|self)\\\\b/g;' +
+  '    temp=temp.replace(keywords,\'<span class="code-hl-kw">$1</span>\');' +
+  '    temp=temp.replace(builtins,\'<span class="code-hl-fn">$1</span>\');' +
+  '    temp=temp.replace(/\\\\b(\\\\d+(?:\\\\.\\\\d+)?)\\\\b/g,\'<span class="code-hl-num">$1</span>\');' +
+  '  }' +
+  '  for(var i=store.length-1;i>=0;i--){' +
+  '    var placeholder="___MASKED_"+i+"___";' +
+  '    var item=store[i];' +
+  '    temp=temp.replace(placeholder,\'<span class="\'+item.cls+\'">\'+item.value+\'</span>\');' +
+  '  }' +
+  '  return temp;' +
+  '}' +
   'function fmtSize(b){if(!b)return "0 B";var u=["B","KB","MB","GB"],i=0;while(b>=1024&&i<3){b/=1024;i++;}return b.toFixed(i?1:0)+" "+u[i];}' +
   'function fmtSpeed(b){return fmtSize(b||0)+"/s";}' +
   'function fmtDate(ts){if(!ts)return "";return new Date(ts).toLocaleDateString("ru-RU",{day:"2-digit",month:"short",year:"numeric"});}' +
@@ -3650,20 +3837,20 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function makeZip(items,name,startDownload){return fetch("/api/fm/zip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:items,name:name||"cloudspace.zip"})}).then(function(r){return r.json();}).then(function(d){if(!d.ok)throw new Error(d.error||"Ошибка архива");if(startDownload)window.location.href=d.url;return d;});}' +
   'function downloadSelected(){var items=selectedList();if(!items.length)return;if(items.some(function(x){return x.isDir;})||items.length>5){zipSelected();return;}items.forEach(function(it,i){setTimeout(function(){var a=document.createElement("a");a.href="/api/fm/download?path="+encodeURIComponent(it.fp);a.download=it.name;document.body.appendChild(a);a.click();a.remove();},i*350);});}' +
   'function zipSelected(){var items=selectedPayload();if(!items.length)return;makeZip(items,"cloudspace.zip",true).catch(function(e){alert(e.message);});}' +
-  'function openShareModal(payload,label){pendingShare=payload;document.getElementById("share-target-label").textContent=label||"Настройки доступа";document.getElementById("share-expire-inp").value="0";document.getElementById("share-max-inp").value="";document.getElementById("share-preview-chk").checked=true;document.getElementById("share-status").textContent="";document.getElementById("modal-share").style.display="flex";}' +
+  'function openShareModal(payload,label){pendingShare=payload;document.getElementById("share-target-label").textContent=label||"Настройки доступа";document.getElementById("share-expire-inp").value="0";document.getElementById("share-max-inp").value="";document.getElementById("share-password-inp").value="";document.getElementById("share-preview-chk").checked=true;document.getElementById("share-status").textContent="";document.getElementById("modal-share").style.display="flex";}' +
   'function closeShareModal(){document.getElementById("modal-share").style.display="none";pendingShare=null;}' +
-  'function confirmShare(){if(!pendingShare)return;var body=Object.assign({},pendingShare);body.expiresIn=parseInt(document.getElementById("share-expire-inp").value||"0",10);body.maxDownloads=parseInt(document.getElementById("share-max-inp").value||"0",10);body.preview=document.getElementById("share-preview-chk").checked;var st=document.getElementById("share-status");st.textContent="Создаю ссылку...";fetch("/api/fm/share",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){if(d.ok){closeShareModal();copyOrShowLink(d.url);if(previewFp)renderPreviewInfo(previewFp,previewName);}else st.textContent=d.error||"Ошибка ссылки";}).catch(function(){st.textContent="Ошибка ссылки";});}' +
+  'function confirmShare(){if(!pendingShare)return;var body=Object.assign({},pendingShare);body.expiresIn=parseInt(document.getElementById("share-expire-inp").value||"0",10);body.maxDownloads=parseInt(document.getElementById("share-max-inp").value||"0",10);body.password=document.getElementById("share-password-inp").value.trim();body.preview=document.getElementById("share-preview-chk").checked;var st=document.getElementById("share-status");st.textContent="Создаю ссылку...";fetch("/api/fm/share",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){if(d.ok){closeShareModal();copyOrShowLink(d.url);if(previewFp)renderPreviewInfo(previewFp,previewName);}else st.textContent=d.error||"Ошибка ссылки";}).catch(function(){st.textContent="Ошибка ссылки";});}' +
   'function shareSelected(){var items=selectedPayload();if(!items.length)return;openShareModal({items:items},"Выбрано объектов: "+items.length);}' +
   'function shareOne(fp){openShareModal({path:fp},"Объект: "+fp);}' +
   'function shareExpireOptions(selected){var opts=[[0,"Без ограничения"],[1,"1 час"],[24,"1 день"],[72,"3 дня"],[168,"7 дней"],[720,"30 дней"]];return opts.map(function(o){return "<option value=\\""+o[0]+"\\""+(String(selected)===String(o[0])?" selected":"")+">"+o[1]+"</option>";}).join("");}' +
   'function shareDateText(v){return v?fmtDateTime(v):"Без ограничения";}' +
   'function shareMaxText(v){return v?String(v):"Без лимита";}' +
-  'function openShareManager(fp,name){shareManagerFp=fp;shareManagerName=name||fp;document.getElementById("sm-file-label").textContent=shareManagerName+" · "+shareManagerFp;document.getElementById("sm-status").textContent="";document.getElementById("modal-share-manager").style.display="flex";loadShareManager();}' +
+  'function openShareManager(fp,name){shareManagerFp=fp;shareManagerName=name||fp;document.getElementById("sm-file-label").textContent=shareManagerName+" · "+shareManagerFp;document.getElementById("sm-status").textContent="";document.getElementById("sm-new-password").value="";document.getElementById("modal-share-manager").style.display="flex";loadShareManager();}' +
   'function closeShareManager(){document.getElementById("modal-share-manager").style.display="none";shareManagerFp="";shareManagerName="";}' +
-  'function renderShareManager(items){var box=document.getElementById("sm-list");if(!items.length){box.innerHTML=\'<div class="card" style="padding:14px;margin:0;color:#958ea0">У этого файла пока нет публичных ссылок.</div>\';return;}var h="";items.forEach(function(x){var full=window.location.origin+x.url;h+=\'<div class="card" style="padding:14px;margin:0 0 10px 0"><div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:10px"><div style="flex:1;min-width:0"><div style="font-size:12px;color:#958ea0;margin-bottom:4px">Создана: \'+H(fmtDateTime(x.created))+\'; действует до: \'+H(shareDateText(x.expiresAt))+\'</div><div style="font-size:12px;color:#d2bbff;word-break:break-all">\'+H(full)+\'</div><div style="font-size:12px;color:#958ea0;margin-top:4px">Скачиваний: \'+H(String(x.downloads||0))+\' / \'+H(shareMaxText(x.maxDownloads))+\'</div></div><button class="btn-ghost" data-action="sm-qr" data-url="\'+H(full)+\'" style="padding:6px 9px"><span class="material-symbols-outlined">qr_code_2</span></button><button class="btn-ghost" data-action="sm-copy" data-url="\'+H(full)+\'" style="padding:6px 9px"><span class="material-symbols-outlined">content_copy</span></button></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px"><select id="sm-expire-\'+H(x.token)+\'" class="inp">\'+shareExpireOptions(0)+\'</select><input id="sm-max-\'+H(x.token)+\'" class="inp" type="number" min="0" step="1" value="\'+H(x.maxDownloads||"")+\'" placeholder="0 = без лимита"></div><label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#958ea0;margin-bottom:10px"><input type="checkbox" id="sm-preview-\'+H(x.token)+\'" \'+(x.preview!==false?"checked":"")+\' > Страница предпросмотра</label><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn-ghost" data-action="sm-save" data-token="\'+H(x.token)+\'">Сохранить</button><button class="btn-ghost" data-action="sm-revoke" data-token="\'+H(x.token)+\'" style="color:#ffb4ab;border-color:#93000a">Отозвать</button></div></div>\';});box.innerHTML=h;}' +
+  'function renderShareManager(items){var box=document.getElementById("sm-list");if(!items.length){box.innerHTML=\'<div class="card" style="padding:14px;margin:0;color:#958ea0">У этого файла пока нет публичных ссылок.</div>\';return;}var h="";items.forEach(function(x){var full=window.location.origin+x.url;var lockIcon=x.hasPassword?"\u{1F512}":"\u{1F513}";h+=\'<div class="card" style="padding:14px;margin:0 0 10px 0"><div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:10px"><div style="flex:1;min-width:0"><div style="font-size:12px;color:#958ea0;margin-bottom:4px">Создана: \'+H(fmtDateTime(x.created))+\'; действует до: \'+H(shareDateText(x.expiresAt))+\' &middot; \'+lockIcon+\'</div><div style="font-size:12px;color:#d2bbff;word-break:break-all">\'+H(full)+\'</div><div style="font-size:12px;color:#958ea0;margin-top:4px">Скачиваний: \'+H(String(x.downloads||0))+\' / \'+H(shareMaxText(x.maxDownloads))+\'</div></div><button class="btn-ghost" data-action="sm-qr" data-url="\'+H(full)+\'" style="padding:6px 9px"><span class="material-symbols-outlined">qr_code_2</span></button><button class="btn-ghost" data-action="sm-copy" data-url="\'+H(full)+\'" style="padding:6px 9px"><span class="material-symbols-outlined">content_copy</span></button></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px"><select id="sm-expire-\'+H(x.token)+\'" class="inp">\'+shareExpireOptions(0)+\'</select><input id="sm-max-\'+H(x.token)+\'" class="inp" type="number" min="0" step="1" value="\'+H(x.maxDownloads||"")+\'" placeholder="0 = без лимита"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px"><input id="sm-password-\'+H(x.token)+\'" class="inp" type="password" placeholder="Новый пароль"><label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#958ea0;cursor:pointer"><input type="checkbox" id="sm-clear-password-\'+H(x.token)+\'"> Сбросить пароль</label></div><label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#958ea0;margin-bottom:10px"><input type="checkbox" id="sm-preview-\'+H(x.token)+\'" \'+(x.preview!==false?"checked":"")+\' > Страница предпросмотра</label><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn-ghost" data-action="sm-save" data-token="\'+H(x.token)+\'">Сохранить</button><button class="btn-ghost" data-action="sm-revoke" data-token="\'+H(x.token)+\'" style="color:#ffb4ab;border-color:#93000a">Отозвать</button></div></div>\';});box.innerHTML=h;}' +
   'function loadShareManager(){if(!shareManagerFp)return;document.getElementById("sm-status").textContent="Загружаю ссылки...";fetch("/api/fm/shares?path="+encodeURIComponent(shareManagerFp)).then(function(r){return r.json();}).then(function(d){if(!d.ok){document.getElementById("sm-status").textContent=d.error||"Ошибка";return;}document.getElementById("sm-status").textContent="";renderShareManager(d.shares||[]);}).catch(function(){document.getElementById("sm-status").textContent="Ошибка загрузки ссылок";});}' +
-  'function createManagedShare(){if(!shareManagerFp)return;var body={path:shareManagerFp,expiresIn:parseInt(document.getElementById("sm-new-expire").value||"0",10),maxDownloads:parseInt(document.getElementById("sm-new-max").value||"0",10),preview:document.getElementById("sm-new-preview").checked};document.getElementById("sm-status").textContent="Создаю ссылку...";fetch("/api/fm/share",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){if(d.ok){document.getElementById("sm-new-expire").value="0";document.getElementById("sm-new-max").value="";document.getElementById("sm-new-preview").checked=true;copyOrShowLink(d.url);loadShareManager();if(previewFp===shareManagerFp)renderPreviewInfo(previewFp,previewName);}else document.getElementById("sm-status").textContent=d.error||"Ошибка ссылки";}).catch(function(){document.getElementById("sm-status").textContent="Ошибка ссылки";});}' +
-  'function saveManagedShare(token){var body={expiresIn:parseInt((document.getElementById("sm-expire-"+token)||{}).value||"0",10),maxDownloads:parseInt((document.getElementById("sm-max-"+token)||{}).value||"0",10),preview:!!(document.getElementById("sm-preview-"+token)||{}).checked};document.getElementById("sm-status").textContent="Сохраняю...";fetch("/api/fm/share/"+encodeURIComponent(token),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){document.getElementById("sm-status").textContent=d.ok?"Сохранено":(d.error||"Ошибка");loadShareManager();if(previewFp===shareManagerFp)renderPreviewInfo(previewFp,previewName);}).catch(function(){document.getElementById("sm-status").textContent="Ошибка сохранения";});}' +
+  'function createManagedShare(){if(!shareManagerFp)return;var body={path:shareManagerFp,expiresIn:parseInt(document.getElementById("sm-new-expire").value||"0",10),maxDownloads:parseInt(document.getElementById("sm-new-max").value||"0",10),password:document.getElementById("sm-new-password").value.trim(),preview:document.getElementById("sm-new-preview").checked};document.getElementById("sm-status").textContent="Создаю ссылку...";fetch("/api/fm/share",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){if(d.ok){document.getElementById("sm-new-expire").value="0";document.getElementById("sm-new-max").value="";document.getElementById("sm-new-password").value="";document.getElementById("sm-new-preview").checked=true;copyOrShowLink(d.url);loadShareManager();if(previewFp===shareManagerFp)renderPreviewInfo(previewFp,previewName);}else document.getElementById("sm-status").textContent=d.error||"Ошибка ссылки";}).catch(function(){document.getElementById("sm-status").textContent="Ошибка ссылки";});}' +
+  'function saveManagedShare(token){var clearChecked=!!(document.getElementById("sm-clear-password-"+token)||{}).checked;var passVal=(document.getElementById("sm-password-"+token)||{}).value||"";var body={expiresIn:parseInt((document.getElementById("sm-expire-"+token)||{}).value||"0",10),maxDownloads:parseInt((document.getElementById("sm-max-"+token)||{}).value||"0",10),preview:!!(document.getElementById("sm-preview-"+token)||{}).checked};if(clearChecked)body.password="";else if(passVal.trim())body.password=passVal.trim();document.getElementById("sm-status").textContent="Сохраняю...";fetch("/api/fm/share/"+encodeURIComponent(token),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){document.getElementById("sm-status").textContent=d.ok?"Сохранено":(d.error||"Ошибка");loadShareManager();if(previewFp===shareManagerFp)renderPreviewInfo(previewFp,previewName);}).catch(function(){document.getElementById("sm-status").textContent="Ошибка сохранения";});}' +
   'function revokeManagedShare(token){if(!confirm("Отозвать эту публичную ссылку?"))return;fetch("/api/share/"+encodeURIComponent(token),{method:"DELETE"}).then(function(r){return r.json();}).then(function(d){if(!d.ok)throw new Error(d.error||"Ошибка");loadShareManager();if(previewFp===shareManagerFp)renderPreviewInfo(previewFp,previewName);}).catch(function(e){document.getElementById("sm-status").textContent=e.message;});}' +
   'function copyPlain(url){if(navigator.clipboard)navigator.clipboard.writeText(url).then(function(){showToast("Скопировано",url,url);});}' +
 
@@ -3683,7 +3870,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
 
   /* ── NAVIGATE & LOAD ── */
-  'function navigateTo(p){p=p||"";if(p!==currentPath)clearSelection(false);currentPath=p;savePath(p);loadDir();}' +
+  'function navigateTo(p){p=p||"";activeFilter="all";if(p!==currentPath)clearSelection(false);currentPath=p;savePath(p);loadDir();}' +
   'function loadDir(){' +
   '  setSectionChrome("files");' +
   '  setNavActive("nav-files");' +
@@ -3758,10 +3945,39 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function loadCloudUsers(){fetch("/api/users").then(function(r){if(!r.ok)throw new Error("not admin");return r.json();}).then(function(users){var sec=document.getElementById("cloud-users-section"),box=document.getElementById("cloud-users-list");if(!sec||!box)return;sec.style.display="block";box.innerHTML=users.map(function(u){return \'<div style="display:flex;align-items:center;gap:8px;border:1px solid #353437;border-radius:12px;padding:8px 10px"><div style="flex:1"><b>\'+H(u.username)+\'</b><div style="font-size:12px;color:#958ea0">\'+H(u.label||"")+\' \'+(u.isAdmin?"· admin":"")+\'</div></div><button class="btn-ghost" data-action="settings-delete-user" data-user="\'+H(u.username)+\'" style="color:#ffb4ab;border-color:#93000a">Удалить</button></div>\';}).join("");}).catch(function(){var sec=document.getElementById("cloud-users-section");if(sec)sec.style.display="none";});}' +
   'function addCloudUser(){var username=document.getElementById("cloud-new-username").value.trim(),password=document.getElementById("cloud-new-password").value,label=document.getElementById("cloud-new-label").value.trim();fetch("/api/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:username,password:password,label:label})}).then(function(r){return r.json().then(function(d){d._ok=r.ok;return d;});}).then(function(d){setCloudStatus("cloud-users-status",d._ok?"Аккаунт добавлен":(d.error||"Ошибка"),d._ok);if(d._ok){document.getElementById("cloud-new-username").value="";document.getElementById("cloud-new-password").value="";document.getElementById("cloud-new-label").value="";loadCloudUsers();}}).catch(function(){setCloudStatus("cloud-users-status","Ошибка",false);});}' +
   'function deleteCloudUser(username){if(!confirm("Удалить аккаунт "+username+"?"))return;fetch("/api/users/"+encodeURIComponent(username),{method:"DELETE"}).then(function(r){return r.json().then(function(d){d._ok=r.ok;return d;});}).then(function(d){setCloudStatus("cloud-users-status",d._ok?"Аккаунт удалён":(d.error||"Ошибка"),d._ok);loadCloudUsers();}).catch(function(){setCloudStatus("cloud-users-status","Ошибка",false);});}' +
+  'function getFilteredEntries(entries){' +
+  '  if(activeFilter==="all")return entries;' +
+  '  var map={' +
+  '    images:["jpg","jpeg","png","gif","webp","svg","bmp","ico"],' +
+  '    videos:["mp4","webm","ogg","mov","mkv"],' +
+  '    music:["mp3","wav","m4a","flac","aac","oga"],' +
+  '    docs:["pdf","doc","docx","xls","xlsx","ppt","pptx","txt","rtf","odt","ods","odp","csv","md","html","css","js","json","py","sh","yml","yaml"],' +
+  '    archives:["zip","rar","tar","gz","7z","bz2","xz"]' +
+  '  };' +
+  '  var exts=map[activeFilter]||[];' +
+  '  return entries.filter(function(e){' +
+  '    if(e.isDir)return true;' +
+  '    var ext=(e.name.split(".").pop()||"").toLowerCase();' +
+  '    return exts.includes(ext);' +
+  '  });' +
+  '}' +
   'function renderContent(entries,base){' +
   '  lastEntries=entries||[];lastBase=(base!==undefined)?base:currentPath;' +
-  '  document.getElementById("file-area").innerHTML=' +
-  '    (currentView==="grid"?fileGridHtml(lastEntries,lastBase):fileListHtml(lastEntries,lastBase));' +
+  '  var filtered=getFilteredEntries(lastEntries);' +
+  '  var isFiles=(currentPath!=="__dashboard__"&&currentPath!=="__recent__"&&currentPath!=="__url_history__"&&currentPath!=="__settings__");' +
+  '  var filterHtml="";' +
+  '  if(isFiles){' +
+  '    filterHtml=\'<div class="filter-bar" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">\' +' +
+  '      \'<button class="filter-pill\'+(activeFilter==="all"?" active":"")+\'" data-action="filter-category" data-filter="all">Все</button>\' +' +
+  '      \'<button class="filter-pill\'+(activeFilter==="images"?" active":"")+\'" data-action="filter-category" data-filter="images">Изображения</button>\' +' +
+  '      \'<button class="filter-pill\'+(activeFilter==="videos"?" active":"")+\'" data-action="filter-category" data-filter="videos">Видео</button>\' +' +
+  '      \'<button class="filter-pill\'+(activeFilter==="music"?" active":"")+\'" data-action="filter-category" data-filter="music">Музыка</button>\' +' +
+  '      \'<button class="filter-pill\'+(activeFilter==="docs"?" active":"")+\'" data-action="filter-category" data-filter="docs">Документы</button>\' +' +
+  '      \'<button class="filter-pill\'+(activeFilter==="archives"?" active":"")+\'" data-action="filter-category" data-filter="archives">Архивы</button>\' +' +
+  '    \'</div>\';' +
+  '  }' +
+  '  document.getElementById("file-area").innerHTML=filterHtml+' +
+  '    (currentView==="grid"?fileGridHtml(filtered,lastBase):fileListHtml(filtered,lastBase));' +
   '}' +
 
   'function fileListHtml(files,base){' +
@@ -3846,16 +4062,62 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function closeUrlModal(){document.getElementById("modal-url").style.display="none";}' +
   'function stripInputMediaExt(name){return String(name||"").replace(/\\.(mp4|webm|mkv|mov|m4v|mp3|m4a|opus|ogg|wav|flac|aac)$/i,"");}' +
   'function addUrlDownload(){var url=document.getElementById("url-dl-inp").value.trim();var name=document.getElementById("url-name-inp").value.trim();var mode=document.getElementById("url-mode-inp").value;var st=document.getElementById("url-status");var folder=activePath();if(!url){st.textContent="Вставь URL";return;}var media=mode!=="file";if(media)name=stripInputMediaExt(name);st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:folder,mode:mode})}).then(function(r){return r.json();}).then(function(d){if(d.ok){var gid=d.gid||(d.job&&d.job.id);if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,folder);}st.textContent=media?"Медиа-загрузка запущена":"Загрузка добавлена";closeUrlModal();loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
-  'function closePreview(){if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}document.getElementById("preview-panel").classList.remove("open");document.getElementById("preview-body").classList.remove("media-preview");document.getElementById("preview-body").innerHTML="";document.getElementById("preview-info").innerHTML="";previewKind="";previewSrc="";}' +
+  'function updatePreviewNavButtons(){' +
+  '  var prevBtn=document.getElementById("preview-btn-prev");' +
+  '  var nextBtn=document.getElementById("preview-btn-next");' +
+  '  var isMedia=["image","video","audio"].includes(previewKind);' +
+  '  if(prevBtn)prevBtn.style.display=isMedia?"inline-flex":"none";' +
+  '  if(nextBtn)nextBtn.style.display=isMedia?"inline-flex":"none";' +
+  '}' +
+  'function closePreview(){if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}document.getElementById("preview-panel").classList.remove("open");document.getElementById("preview-body").classList.remove("media-preview");document.getElementById("preview-body").innerHTML="";document.getElementById("preview-info").innerHTML="";previewKind="";previewSrc="";updatePreviewNavButtons();}' +
   'function metaRow(label,value){return \'<div class="meta-row"><div class="meta-lbl">\'+H(label)+\'</div><div class="meta-val">\'+(value||"—")+\'</div></div>\';}' +
   'function renderPreviewInfo(fp,name){var info=document.getElementById("preview-info");info.innerHTML=\'<div style="font-size:12px;color:#958ea0">Загрузка информации...</div>\';fetch("/api/fm/meta?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(m){if(m.error){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);return;}var links=m.publicLinks||[];var linkHtml=links.length?links.map(function(x){var full=window.location.origin+x.url;return \'<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><a href="\'+H(x.url)+\'" target="_blank" style="color:#d2bbff;min-width:0;overflow:hidden;text-overflow:ellipsis">\'+H(full)+\'</a><button class="btn-ghost" data-action="qr-link" data-url="\'+H(full)+\'" style="padding:2px 7px;min-height:24px;font-size:11px">QR</button></div>\';}).join(""):"Нет";var h="";h+=metaRow("Имя",m.name||name);h+=metaRow("Путь",m.path||fp);h+=metaRow("Размер",fmtSize(m.size));h+=metaRow("Тип",m.ext?m.ext.slice(1).toUpperCase():"Файл");h+=metaRow("Загружен",fmtDateTime(m.created));h+=metaRow("Изменён",fmtDateTime(m.mtime));h+=metaRow("Публичная ссылка",linkHtml);info.innerHTML=h;}).catch(function(){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);});}' +
   'function fitPlyrToVideo(media,player){if(!media||!player)return;var container=player.elements&&player.elements.container;if(!container)return;function fit(){var vw=media.videoWidth||0,vh=media.videoHeight||0;if(!vw||!vh)return;var host=media.closest(".preview-media-wrap")||media.closest(".mv-stage")||container.parentElement;if(!host)return;var maxW=host.clientWidth||window.innerWidth,maxH=host.clientHeight||Math.round(window.innerHeight*.72);if(host.classList&&host.classList.contains("mv-stage"))maxH=Math.max(220,maxH-4);else maxH=Math.min(maxH||Math.round(window.innerHeight*.72),Math.round(window.innerHeight*.72));var ratio=vw/vh,w=maxW,h=w/ratio;if(h>maxH){h=maxH;w=h*ratio;}container.style.width=Math.max(180,Math.floor(w))+"px";container.style.maxWidth="100%";container.style.aspectRatio=vw+" / "+vh;var wrap=container.querySelector(".plyr__video-wrapper");if(wrap){wrap.style.aspectRatio=vw+" / "+vh;wrap.style.height=Math.floor(h)+"px";}media.style.objectFit="contain";}media.addEventListener("loadedmetadata",fit,{once:false});window.addEventListener("resize",fit);setTimeout(fit,80);setTimeout(fit,400);}\n' +
-  'function initPlyr(selector,isVideo,key){if(typeof Plyr==="undefined")return null;var opts={controls:isVideo?["play-large","play","progress","current-time","duration","mute","volume","captions","settings","pip","airplay","fullscreen"]:["play","progress","current-time","duration","mute","volume"],settings:["captions","quality","speed","loop"],keyboard:{focused:true,global:false},tooltips:{controls:true,seek:true}};var p=new Plyr(selector,opts);if(isVideo)fitPlyrToVideo(document.querySelector(selector),p);p.on("ready",function(e){var t=localStorage.getItem(key);if(t)e.detail.plyr.currentTime=parseFloat(t);});p.on("timeupdate",function(e){localStorage.setItem(key,e.detail.plyr.currentTime);});return p;}\n' +
-  'function openPreview(fp,name,isDir){if(isDir){navigateTo(fp);return;}if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}previewFp=fp;previewName=name;previewKind="";previewSrc="";var panel=document.getElementById("preview-panel");var body=document.getElementById("preview-body");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");body.innerHTML="";renderPreviewInfo(fp,name);var ext=(name.split(".").pop()||"").toLowerCase();var src="/api/fm/preview?path="+encodeURIComponent(fp);if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext)){previewKind="image";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(["mp4","webm","ogg","mov","mkv"].includes(ext)){previewKind="video";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video id="preview-plyr" src="${src}" playsinline controls></video></div>`;setTimeout(function(){try{window.previewPlyrInstance=initPlyr("#preview-plyr",true,"plyr_time_"+src);}catch(e){console.error(e);}},50);return;}if(["mp3","wav","m4a","flac","aac","oga"].includes(ext)){previewKind="audio";previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><audio id="preview-plyr" src="${src}" playsinline controls></audio></div>`;setTimeout(function(){try{window.previewPlyrInstance=initPlyr("#preview-plyr",false,"plyr_time_"+src);}catch(e){console.error(e);}},50);return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
-  'function openPreviewShell(fp,name){if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}previewFp=fp;previewName=name;previewKind="";previewSrc="";var panel=document.getElementById("preview-panel"),body=document.getElementById("preview-body");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");body.innerHTML="";renderPreviewInfo(fp,name);return body;}' +
+  'function getPlayableMediaFiles(kind){' +
+  '  var exts=[];' +
+  '  if(kind==="image")exts=["png","jpg","jpeg","gif","webp","svg","bmp"];' +
+  '  else if(kind==="video")exts=["mp4","webm","ogg","mov","mkv"];' +
+  '  else if(kind==="audio")exts=["mp3","wav","m4a","flac","aac","oga"];' +
+  '  else return [];' +
+  '  return lastEntries.filter(function(e){' +
+  '    if(e.isDir)return false;' +
+  '    var ext=(e.name.split(".").pop()||"").toLowerCase();' +
+  '    return exts.includes(ext);' +
+  '  });' +
+  '}' +
+  'function playSibling(direction,autoPlay){' +
+  '  if(!previewFp||!previewKind)return;' +
+  '  var list=getPlayableMediaFiles(previewKind);' +
+  '  if(!list.length)return;' +
+  '  var idx=-1;' +
+  '  for(var i=0;i<list.length;i++){' +
+  '    var entryPath=lastBase?(lastBase+"/"+list[i].name):list[i].name;' +
+  '    if(entryPath===previewFp){idx=i;break;}' +
+  '  }' +
+  '  if(idx===-1)return;' +
+  '  var nextIdx=idx;' +
+  '  if(direction==="next"){nextIdx=(idx+1)%list.length;}' +
+  '  else{nextIdx=(idx-1+list.length)%list.length;}' +
+  '  var nextEntry=list[nextIdx];' +
+  '  var nextFp=lastBase?(lastBase+"/"+nextEntry.name):nextEntry.name;' +
+  '  var mv=document.getElementById("media-viewer");' +
+  '  var isMvOpen=mv&&mv.classList.contains("open");' +
+  '  if(isMvOpen){' +
+  '    if(window.plyrInstance){try{window.plyrInstance.destroy();}catch(e){}window.plyrInstance=null;}' +
+  '    document.getElementById("mv-stage").innerHTML="";' +
+  '    document.getElementById("mv-bottom").innerHTML="";' +
+  '    openPreview(nextFp,nextEntry.name,false,0,autoPlay);' +
+  '    setTimeout(function(){openMediaViewer();},100);' +
+  '  }else{' +
+  '    openPreview(nextFp,nextEntry.name,false,0,autoPlay);' +
+  '  }' +
+  '}' +
+  'function initPlyr(selector,isVideo,key,startTime,autoPlay){if(typeof Plyr==="undefined")return null;var opts={controls:isVideo?["play-large","play","progress","current-time","duration","mute","volume","captions","settings","pip","airplay","fullscreen"]:["play","progress","current-time","duration","mute","volume"],settings:["captions","quality","speed","loop"],keyboard:{focused:true,global:false},tooltips:{controls:true,seek:true}};var p=new Plyr(selector,opts);if(isVideo)fitPlyrToVideo(document.querySelector(selector),p);p.on("ready",function(e){var savedTime=localStorage.getItem(key);var useTime=(startTime!==undefined&&startTime!==null)?startTime:(savedTime?parseFloat(savedTime):0);e.detail.plyr.currentTime=useTime;if(autoPlay){setTimeout(function(){try{e.detail.plyr.play();}catch(err){}},50);}});p.on("timeupdate",function(e){localStorage.setItem(key,e.detail.plyr.currentTime);});p.on("ended",function(e){playSibling("next",true);});return p;}\n' +
+  'function openPreview(fp,name,isDir,startTime,autoPlay){if(isDir){navigateTo(fp);return;}if(window.previewPlyrInstance){try{window.previewPlyrInstance.destroy();}catch(e){}window.previewPlyrInstance=null;}var body=document.getElementById("preview-body");body.innerHTML="";previewFp=fp;previewName=name;previewKind="";previewSrc="";var ext=(name.split(".").pop()||"").toLowerCase();if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext))previewKind="image";else if(["mp4","webm","ogg","mov","mkv"].includes(ext))previewKind="video";else if(["mp3","wav","m4a","flac","aac","oga"].includes(ext))previewKind="audio";updatePreviewNavButtons();var panel=document.getElementById("preview-panel");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");renderPreviewInfo(fp,name);var src="/api/fm/preview?path="+encodeURIComponent(fp);if(previewKind==="image"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(previewKind==="video"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video id="preview-plyr" src="${src}" playsinline controls></video></div>`;setTimeout(function(){try{if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}window.previewPlyrInstance=initPlyr("#preview-plyr",true,"plyr_time_"+src,startTime,autoPlay);}catch(e){console.error(e);}},50);return;}if(previewKind==="audio"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><audio id="preview-plyr" src="${src}" playsinline controls></audio></div>`;setTimeout(function(){try{if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}window.previewPlyrInstance=initPlyr("#preview-plyr",false,"plyr_time_"+src,startTime,autoPlay);}catch(e){console.error(e);}},50);return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf","py","sh"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){if(t.length<150000&&["js","css","html","xml","json","py","sh","yml","yaml","md"].includes(ext)){var highlighted=highlightCode(t,ext);body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0;font-family:\'Fira Code\',Consolas,monospace;background:#18181f;padding:12px;border-radius:10px;color:#f8f8f2">${highlighted}</pre>`;}else{body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
+  'function openPreviewShell(fp,name){if(window.previewPlyrInstance){try{window.previewPlyrInstance.destroy();}catch(e){}window.previewPlyrInstance=null;}var body=document.getElementById("preview-body");body.innerHTML="";previewFp=fp;previewName=name;previewKind="";previewSrc="";updatePreviewNavButtons();var panel=document.getElementById("preview-panel");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");renderPreviewInfo(fp,name);return body;}' +
   'function renderDocPreview(fp,name){var body=openPreviewShell(fp,name);body.innerHTML=\'<div style="color:#958ea0;padding:20px">Загрузка документа...</div>\';fetch("/api/fm/doc-preview?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(d){if(!d.ok){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">\'+H(d.error||"Не удалось открыть документ")+\'</div>\';return;}if(d.type==="sheet"){var sheets=d.sheets||[];if(!sheets.length){body.innerHTML=\'<div style="padding:24px;color:#958ea0">В таблице нет листов</div>\';return;}var h=\'<div class="doc-tabs">\';for(var i=0;i<sheets.length;i++)h+=\'<button class="doc-tab" data-sheet="\'+i+\'">\'+H(sheets[i].name)+\'</button>\';h+=\'</div><div id="sheet-preview" class="doc-preview">\'+(sheets[0].html||"")+\'</div>\';body.innerHTML=h;body.querySelectorAll("[data-sheet]").forEach(function(btn){btn.addEventListener("click",function(){var idx=parseInt(btn.dataset.sheet,10)||0;document.getElementById("sheet-preview").innerHTML=sheets[idx].html||"";});});return;}body.innerHTML=\'<div class="doc-preview">\'+(d.html||"")+\'</div>\';}).catch(function(){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">Ошибка предпросмотра</div>\';});}' +
   'function renderArchivePreview(fp,name){var body=openPreviewShell(fp,name);body.innerHTML=\'<div style="color:#958ea0;padding:20px">Читаю архив...</div>\';fetch("/api/fm/archive/list?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(d){if(!d.ok){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">\'+H(d.error||"Не удалось открыть архив")+\'<div style="margin-top:8px;color:#958ea0;font-size:12px">\'+H(d.details||"")+\'</div></div>\';return;}var items=d.entries||[];if(!items.length){body.innerHTML=\'<div style="padding:24px;color:#958ea0">Архив пуст</div>\';return;}var h=\'<div style="display:flex;justify-content:space-between;gap:10px;margin-bottom:10px;color:#958ea0;font-size:12px"><span>\'+items.length+\' items</span><a class="btn-ghost" href="/api/fm/download?path=\'+encodeURIComponent(fp)+\'" download style="text-decoration:none;padding:4px 10px;min-height:28px">Скачать архив</a></div><table class="archive-table"><tbody>\';items.forEach(function(x){var icon=x.isDir?"folder":"draft";var cls=x.isDir?"archive-path archive-dir":"archive-path";h+=\'<tr><td style="width:28px"><span class="material-symbols-outlined" style="font-size:18px">\'+icon+\'</span></td><td><div class="\'+cls+\'" title="\'+H(x.path)+\'">\'+H(x.path)+\'</div></td><td style="width:76px;color:#958ea0;white-space:nowrap">\'+(x.isDir?"":fmtSize(x.size||0))+\'</td><td style="width:42px;text-align:right">\'+(x.isDir?"":\'<a class="btn-ghost" href="/api/fm/archive/download?path=\'+encodeURIComponent(fp)+\'&entry=\'+encodeURIComponent(x.path)+\'" download style="padding:3px 8px;min-height:24px;text-decoration:none">↓</a>\')+\'</td></tr>\';});h+=\'</tbody></table>\';body.innerHTML=h;}).catch(function(){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">Ошибка чтения архива</div>\';});}' +
-  'var cloudBasicOpenPreview=openPreview;openPreview=function(fp,name,isDir){if(isDir){navigateTo(fp);return;}var ext=(name.split(".").pop()||"").toLowerCase();if(["docx","xlsx","csv"].includes(ext))return renderDocPreview(fp,name);if(["zip","rar","7z","tar","gz","bz2","xz"].includes(ext))return renderArchivePreview(fp,name);return cloudBasicOpenPreview(fp,name,isDir);};' +
+  'var cloudBasicOpenPreview=openPreview;openPreview=function(fp,name,isDir,startTime,autoPlay){if(isDir){navigateTo(fp);return;}var ext=(name.split(".").pop()||"").toLowerCase();if(["docx","xlsx","csv"].includes(ext))return renderDocPreview(fp,name);if(["zip","rar","7z","tar","gz","bz2","xz"].includes(ext))return renderArchivePreview(fp,name);return cloudBasicOpenPreview(fp,name,isDir,startTime,autoPlay);};' +
   'window.plyrInstance = null;' +
   'window.previewPlyrInstance = null;' +
   'function closeMediaViewer(){' +
@@ -3875,18 +4137,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  v.classList.remove("open");' +
   '  document.getElementById("mv-stage").innerHTML="";' +
   '  document.getElementById("mv-bottom").innerHTML="";' +
-  '  var smallMedia=document.getElementById("preview-plyr");' +
-  '  if(smallMedia){' +
-  '    smallMedia.currentTime=lastTime;' +
-  '    if(startPreviewPlayback){' +
-  '      setTimeout(function(){try{smallMedia.play();}catch(e){}},50);' +
-  '    }' +
-  '  }' +
-  '  if(window.previewPlyrInstance){' +
-  '    window.previewPlyrInstance.currentTime=lastTime;' +
-  '    if(startPreviewPlayback){' +
-  '      setTimeout(function(){try{window.previewPlyrInstance.play();}catch(e){}},50);' +
-  '    }' +
+  '  if(previewFp && (previewKind==="video" || previewKind === "audio")) {' +
+  '    openPreview(previewFp, previewName, false, lastTime, startPreviewPlayback);' +
+  '  } else if (previewFp && previewKind === "image") {' +
+  '    openPreview(previewFp, previewName, false);' +
   '  }' +
   '}' +
   'function openMediaViewer(){' +
@@ -3903,8 +4157,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  if(window.previewPlyrInstance){' +
   '    if(startTime===0) startTime=window.previewPlyrInstance.currentTime||0;' +
   '    if(!startPlayback) startPlayback=window.previewPlyrInstance.playing||false;' +
-  '    try{window.previewPlyrInstance.pause();}catch(e){}' +
+  '    try{window.previewPlyrInstance.destroy();}catch(e){}window.previewPlyrInstance=null;' +
   '  }' +
+  '  var previewBody=document.getElementById("preview-body");' +
+  '  if(previewBody) previewBody.innerHTML="";' +
   '  if(previewKind==="image"){' +
   '    stage.innerHTML=`<img id="mv-media" src="${previewSrc}" alt="${H(previewName)}">`;' +
   '    bottom.innerHTML=\'<button class="mv-icon" data-action="mv-zoom-out"><span class="material-symbols-outlined">zoom_out</span></button><button class="mv-icon" data-action="mv-fit"><span class="material-symbols-outlined">fit_screen</span></button><button class="mv-icon" data-action="mv-zoom-in"><span class="material-symbols-outlined">zoom_in</span></button><div style="flex:1"></div><div class="mv-time">Image viewer</div>\';' +
@@ -3935,6 +4191,9 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '        });' +
   '        window.plyrInstance.on("timeupdate", function(e){ ' +
   '           localStorage.setItem("plyr_time_" + previewSrc, e.detail.plyr.currentTime);' +
+  '        });' +
+  '        window.plyrInstance.on("ended", function(e){ ' +
+  '           playSibling("next", true);' +
   '        });' +
   '      } catch(err) { console.error("Plyr failed to init:", err); }' +
   '    }, 150);' +
@@ -4018,6 +4277,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  var h="";' +
   '  if(isDir){' +
   '    h+=\'<div class="ctx-item" data-ctx="open">\u{1F4C2} Открыть</div>\';' +
+  '    h+=\'<div class="ctx-item" data-ctx="download">📦 Скачать ZIP</div>\';' +
   '  }else{' +
   '    h+=\'<div class="ctx-item" data-ctx="download">↓ Скачать</div>\';' +
   '  }' +
@@ -4143,6 +4403,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="confirm-share"){confirmShare();}' +
   '  else if(action==="close-preview"){closePreview();}' +
   '  else if(action==="fullscreen-preview"){openMediaViewer();}' +
+  '  else if(action==="preview-prev"||action==="playlist-prev"){playSibling("prev",true);}' +
+  '  else if(action==="preview-next"||action==="playlist-next"){playSibling("next",true);}' +
+  '  else if(action==="filter-category"){activeFilter=el.dataset.filter;renderContent(lastEntries,lastBase);}' +
+  '  else if(action==="set-accent"){var themeName=el.dataset.theme;localStorage.setItem("cloud-accent",themeName);applyAccentColor();document.querySelectorAll(".theme-card").forEach(function(x){x.classList.toggle("active",x.dataset.theme===themeName);});}' +
   '  else if(action==="download-preview"){if(previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);}' +
   '  else if(action==="share-preview"){if(previewFp)shareOne(previewFp);}' +
   '  else if(action==="transfer-pause"){fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid)+"/pause",{method:"POST"}).then(loadTransfers);}' +
