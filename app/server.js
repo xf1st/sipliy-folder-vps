@@ -3751,7 +3751,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    return placeholder;' +
   '  }' +
   '  var temp=escaped;' +
-  '  temp=temp.replace(/(&quot;|&#39;|`)(?:\\\\.|[^\\\\])*?\\\\1/g,function(m){' +
+  '  temp=temp.replace(/(&quot;|&#39;|\\\'|\'|`)(?:\\\\.|[^\\\\])*?\\\\1/g,function(m){' +
   '    return mask(m,"code-hl-str");' +
   '  });' +
   '  if(["html","xml"].includes(ext)){' +
@@ -4549,6 +4549,37 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    else if(document.getElementById("modal-rename").style.display!=="none")doRename();' +
   '    else if(document.getElementById("modal-url").style.display!=="none")addUrlDownload();' +
   '    else if(document.getElementById("modal-share").style.display!=="none")confirmShare();' +
+  '  }' +
+  '});' +
+
+  /* ── CLIPBOARD PASTE ── */
+  'document.addEventListener("paste",function(e){' +
+  '  var target=e.target;' +
+  '  if(target.tagName==="INPUT"||target.tagName==="TEXTAREA"||target.isContentEditable)return;' +
+  '  var items=(e.clipboardData||(e.originalEvent||{}).clipboardData||{}).items||[];' +
+  '  var files=[];' +
+  '  for(var i=0;i<items.length;i++){' +
+  '    if(items[i].kind==="file"){' +
+  '      var blob=items[i].getAsFile();' +
+  '      if(blob){' +
+  '        var name=blob.name;' +
+  '        if(!name||name==="image.png"){' +
+  '          var d=new Date();' +
+  '          var ts=d.getFullYear()+""+String(d.getMonth()+1).padStart(2,"0")+""+String(d.getDate()).padStart(2,"0")+"_"+String(d.getHours()).padStart(2,"0")+""+String(d.getMinutes()).padStart(2,"0")+""+String(d.getSeconds()).padStart(2,"0");' +
+  '          name="Screenshot_"+ts+".png";' +
+  '        }' +
+  '        try{' +
+  '          var f=new File([blob],name,{type:blob.type});' +
+  '          files.push(f);' +
+  '        }catch(err){' +
+  '          blob.name=name;files.push(blob);' +
+  '        }' +
+  '      }' +
+  '    }' +
+  '  }' +
+  '  if(files.length){' +
+  '    e.preventDefault();' +
+  '    uploadFiles(files,activePath());' +
   '  }' +
   '});' +
 
