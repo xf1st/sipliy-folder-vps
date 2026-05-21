@@ -16,3 +16,8 @@ sessions/
 .DS_Store
 Thumbs.db
 *.log
+
+# Временные тестовые файлы локальной разработки
+test_output.txt
+diff_server_js.txt
+mock_opt/

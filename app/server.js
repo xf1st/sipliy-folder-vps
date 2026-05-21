@@ -3794,10 +3794,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '      return mask(m,"code-hl-cmt");' +
   '    });' +
   '  }else{' +
-  '    temp=temp.replace(/\\\\/\\\\*[\\\\s\\\\S]*?\\\\*\\\\//g,function(m){' +
+  '    temp=temp.replace(/\\/\\*[\\\\s\\\\S]*?\\*\\//g,function(m){' +
   '      return mask(m,"code-hl-cmt");' +
   '    });' +
-  '    temp=temp.replace(/\\\\/\\\\/.*$/gm,function(m){' +
+  '    temp=temp.replace(/\\/\\/.*$/gm,function(m){' +
   '      return mask(m,"code-hl-cmt");' +
   '    });' +
   '    temp=temp.replace(/#.*$/gm,function(m){' +
@@ -3805,16 +3805,16 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    });' +
   '  }' +
   '  if(["html","xml","svg"].includes(ext)){' +
-  '    temp=temp.replace(/(&lt;\\\\/?)([\\\\w:-]+)(.*?)(\\\\/?&gt;)/g,function(match,open,tag,attrs,close){' +
-  '      var highlightedAttrs=attrs.replace(/(\\\\b[\\\\w:-]+)(=)/g,\'<span class="code-hl-attr">$1</span>$2\');' +
+  '    temp=temp.replace(/(&lt;\\/?)([\\\\w:-]+)(.*?)(\\/?&gt;)/g,function(match,open,tag,attrs,close){' +
+  '      var highlightedAttrs=attrs.replace(/(\\b[\\\\w:-]+)(=)/g,\'<span class="code-hl-attr">$1</span>$2\');' +
   '      return open+\'<span class="code-hl-tag">\'+tag+\'</span>\'+highlightedAttrs+close;' +
   '    });' +
   '  }else{' +
-  '    var keywords=/\\\\b(break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|finally|for|function|if|import|in|instanceof|new|return|super|switch|this|throw|try|typeof|var|void|while|with|yield|def|elif|lambda|import|from|as|global|nonlocal|pass|raise|try|except|finally|with|and|or|not|is|in)\\\\b/g;' +
-  '    var builtins=/\\\\b(console|document|window|Object|Array|String|Number|Boolean|Function|Promise|JSON|Map|Set|dict|list|tuple|set|int|str|float|print|len|range|self)\\\\b/g;' +
+  '    var keywords=/\\b(break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|finally|for|function|if|import|in|instanceof|new|return|super|switch|this|throw|try|typeof|var|void|while|with|yield|def|elif|lambda|import|from|as|global|nonlocal|pass|raise|try|except|finally|with|and|or|not|is|in)\\b/g;' +
+  '    var builtins=/\\b(console|document|window|Object|Array|String|Number|Boolean|Function|Promise|JSON|Map|Set|dict|list|tuple|set|int|str|float|print|len|range|self)\\b/g;' +
   '    temp=temp.replace(keywords,\'<span class="code-hl-kw">$1</span>\');' +
   '    temp=temp.replace(builtins,\'<span class="code-hl-fn">$1</span>\');' +
-  '    temp=temp.replace(/\\\\b(\\\\d+(?:\\\\.\\\\d+)?)\\\\b/g,\'<span class="code-hl-num">$1</span>\');' +
+  '    temp=temp.replace(/\\b(\\d+(?:\\.\\d+)?)\\b/g,\'<span class="code-hl-num">$1</span>\');' +
   '  }' +
   '  for(var i=store.length-1;i>=0;i--){' +
   '    var placeholder="___MASKED_"+i+"___";' +
