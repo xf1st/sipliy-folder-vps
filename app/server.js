@@ -524,16 +524,17 @@ function filenameWithUrlExtension(url, filename) {
 }
 
 app.get('/api/disk', auth, (req, res) => {
-  exec('df -B1 /var/downloads', (err, stdout) => {
-    if (err) return res.status(500).json({ error: err.message });
-    const lines = stdout.trim().split('\n');
-    const parts = lines[1].trim().split(/\s+/);
-    const total = parseInt(parts[1]);
-    const used  = parseInt(parts[2]);
-    const avail = parseInt(parts[3]);
-    const percent = Math.round(used / total * 100);
+  try {
+    const root = fs.existsSync(DOWNLOADS_ROOT) ? DOWNLOADS_ROOT : '.';
+    const sf = fs.statfsSync(root);
+    const total = sf.blocks * sf.bsize;
+    const avail = sf.bfree * sf.bsize;
+    const used  = total - avail;
+    const percent = total ? Math.min(100, Math.round(used / total * 100)) : 0;
     res.json({ total: fmtBytes(total), used: fmtBytes(used), avail: fmtBytes(avail), percent });
-  });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/files', auth, (req, res) => {
@@ -1332,7 +1333,7 @@ app.get('/api/fm/list', auth, (req, res) => {
         const isDir = stat.isDirectory();
         let fileCount = 0;
         if (isDir) { try { fileCount = fs.readdirSync(p).filter(n => !n.startsWith('.')).length; } catch {} }
-        return { name, isDir, size: isDir ? fmDirSize(p) : stat.size, mtime: stat.mtime, fileCount };
+        return { name, isDir, size: isDir ? 0 : stat.size, mtime: stat.mtime, fileCount };
       })
       .sort((a, b) => { if (a.isDir !== b.isDir) return a.isDir ? -1 : 1; return a.name.localeCompare(b.name, 'ru'); });
     res.json({ entries, diskUsed, diskTotal });
@@ -1455,7 +1456,7 @@ app.get('/api/fm/search', auth, (req, res) => {
         const stat = fs.statSync(full);
         const rel = (relDir ? relDir + '/' : '') + name;
         const isDir = stat.isDirectory();
-        if (name.toLowerCase().includes(q)) results.push({ name, relPath: rel, isDir, size: isDir ? fmDirSize(full) : stat.size, mtime: stat.mtime });
+        if (name.toLowerCase().includes(q)) results.push({ name, relPath: rel, isDir, size: isDir ? 0 : stat.size, mtime: stat.mtime });
         if (isDir) walk(full, rel);
       });
     } catch {}
@@ -1688,7 +1689,7 @@ app.get('/api/fm/meta', auth, (req, res) => {
       name: path.basename(full),
       path: rel,
       isDir: stat.isDirectory(),
-      size: stat.isDirectory() ? fmDirSize(full) : stat.size,
+      size: stat.isDirectory() ? 0 : stat.size,
       mtime: stat.mtime,
       created: stat.birthtime,
       ext: path.extname(full).toLowerCase(),
@@ -3984,13 +3985,13 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  if(!files.length)return \'<div style="color:#494454;padding:40px;text-align:center">\\u041f\\u0430\\u043f\\u043a\\u0430 \\u043f\\u0443\\u0441\\u0442\\u0430</div>\';' +
   '  var h=\'<div style="background:#1b1b1e;border:1px solid #494454;border-radius:12px;overflow:hidden">\';' +
   '  h+=\'<div class="file-row" style="font-size:12px;font-weight:600;color:#494454;text-transform:uppercase;letter-spacing:.05em;cursor:default;background:#131316"><div style="width:20px"><input class="select-check" type="checkbox" data-action="select-all" \'+(allVisibleSelected(files,base)?"checked":"")+\'></div><div style="width:28px"></div><div style="flex:1">\\u041d\\u0430\\u0437\\u0432\\u0430\\u043d\\u0438\\u0435</div><div style="width:100px;text-align:right">\\u0420\\u0430\\u0437\\u043c\\u0435\\u0440</div><div style="width:130px;text-align:right">\\u0418\\u0437\\u043c\\u0435\\u043d\\u0435\\u043d</div><div style="width:54px"></div></div>\';' +
-  '  for(var i=0;i<files.length;i++){var f=files[i],fp=base?(base+"/"+f.name):f.name,checked=!!selectedItems[fp],isNew=isNewFile(fp),badge=isNew?\'<span class="new-badge">New</span>\':"";h+=\'<div class="file-row \'+(checked?"selected ":"")+(isNew?"is-new":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'">\';h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'"\'+(checked?" checked":"")+">";h+=fileThumb(f.name,fp,f.isDir);if(f.isDir)h+=\'<div data-meta="\'+(f.fileCount!=null?H(f.fileCount+" items"):"Folder")+\'" style="flex:1;font-weight:500;color:#d0bcff;cursor:pointer;pointer-events:none">\'+H(f.name)+badge+"</div>";else h+=\'<div data-meta="\'+H(fmtSize(f.size)+" ? "+fmtDate(f.mtime))+\'" style="flex:1;color:#e4e1e6;pointer-events:none">\'+H(f.name)+badge+"</div>";h+=\'<div style="width:100px;text-align:right;font-size:13px;color:#958ea0;pointer-events:none">\'+fmtSize(f.size)+"</div>";h+=\'<div style="width:130px;text-align:right;font-size:12px;color:#494454;pointer-events:none">\'+fmtDate(f.mtime)+"</div>";h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Actions"><span class="material-symbols-outlined">more_vert</span></button></div>\';}' +
+  '  for(var i=0;i<files.length;i++){var f=files[i],fp=base?(base+"/"+f.name):f.name,checked=!!selectedItems[fp],isNew=isNewFile(fp),badge=isNew?\'<span class="new-badge">New</span>\':"";h+=\'<div class="file-row \'+(checked?"selected ":"")+(isNew?"is-new":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'">\';h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'"\'+(checked?" checked":"")+">";h+=fileThumb(f.name,fp,f.isDir);if(f.isDir)h+=\'<div data-meta="\'+(f.fileCount!=null?H(f.fileCount+" объектов"):"Папка")+\'" style="flex:1;font-weight:500;color:#d0bcff;cursor:pointer;pointer-events:none">\'+H(f.name)+badge+"</div>";else h+=\'<div data-meta="\'+H(fmtSize(f.size)+" · "+fmtDate(f.mtime))+\'" style="flex:1;color:#e4e1e6;pointer-events:none">\'+H(f.name)+badge+"</div>";h+=\'<div style="width:100px;text-align:right;font-size:13px;color:#958ea0;pointer-events:none">\'+(f.isDir?"—":fmtSize(f.size))+"</div>";h+=\'<div style="width:130px;text-align:right;font-size:12px;color:#494454;pointer-events:none">\'+fmtDate(f.mtime)+"</div>";h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Actions"><span class="material-symbols-outlined">more_vert</span></button></div>\';}' +
   '  return h+"</div>";' +
   '}' +
   'function fileGridHtml(files,base){' +
   '  if(!files.length)return \'<div style="color:#494454;padding:40px;text-align:center">\\u041f\\u0430\\u043f\\u043a\\u0430 \\u043f\\u0443\\u0441\\u0442\\u0430</div>\';' +
   '  var h=\'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px">\';' +
-  '  for(var i=0;i<files.length;i++){var f=files[i],fp=base?(base+"/"+f.name):f.name,checked=!!selectedItems[fp],isNew=isNewFile(fp),badge=isNew?\'<span class="new-badge">New</span>\':"";h+=\'<div class="file-grid-item \'+(checked?"selected ":"")+(isNew?"is-new":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:relative">\';h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:absolute;top:10px;left:10px"\'+(checked?" checked":"")+">";h+=fileThumb(f.name,fp,f.isDir);h+=\'<div style="font-size:13px;font-weight:700;color:\'+(f.isDir?"#d0bcff":"#e4e1e6")+\';word-break:break-word;max-width:150px;text-align:left;pointer-events:none">\'+H(f.name)+badge+"</div>";h+=\'<div style="font-size:11px;color:#958ea0;pointer-events:none">\'+(f.isDir?(fmtSize(f.size)+" ? "+(f.fileCount||0)+" items"):fmtSize(f.size))+"</div>";h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Actions" style="position:absolute;right:10px;top:10px"><span class="material-symbols-outlined">more_vert</span></button></div>\';}' +
+  '  for(var i=0;i<files.length;i++){var f=files[i],fp=base?(base+"/"+f.name):f.name,checked=!!selectedItems[fp],isNew=isNewFile(fp),badge=isNew?\'<span class="new-badge">New</span>\':"";h+=\'<div class="file-grid-item \'+(checked?"selected ":"")+(isNew?"is-new":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:relative">\';h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:absolute;top:10px;left:10px"\'+(checked?" checked":"")+">";h+=fileThumb(f.name,fp,f.isDir);h+=\'<div style="font-size:13px;font-weight:700;color:\'+(f.isDir?"#d0bcff":"#e4e1e6")+\';word-break:break-word;max-width:150px;text-align:left;pointer-events:none">\'+H(f.name)+badge+"</div>";h+=\'<div style="font-size:11px;color:#958ea0;pointer-events:none">\'+(f.isDir?((f.fileCount||0)+" объектов"):fmtSize(f.size))+"</div>";h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Actions" style="position:absolute;right:10px;top:10px"><span class="material-symbols-outlined">more_vert</span></button></div>\';}' +
   '  return h+"</div>";' +
   '}' +
 
@@ -4071,7 +4072,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
   'function closePreview(){if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}document.getElementById("preview-panel").classList.remove("open");document.getElementById("preview-body").classList.remove("media-preview");document.getElementById("preview-body").innerHTML="";document.getElementById("preview-info").innerHTML="";previewKind="";previewSrc="";updatePreviewNavButtons();}' +
   'function metaRow(label,value){return \'<div class="meta-row"><div class="meta-lbl">\'+H(label)+\'</div><div class="meta-val">\'+(value||"—")+\'</div></div>\';}' +
-  'function renderPreviewInfo(fp,name){var info=document.getElementById("preview-info");info.innerHTML=\'<div style="font-size:12px;color:#958ea0">Загрузка информации...</div>\';fetch("/api/fm/meta?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(m){if(m.error){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);return;}var links=m.publicLinks||[];var linkHtml=links.length?links.map(function(x){var full=window.location.origin+x.url;return \'<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><a href="\'+H(x.url)+\'" target="_blank" style="color:#d2bbff;min-width:0;overflow:hidden;text-overflow:ellipsis">\'+H(full)+\'</a><button class="btn-ghost" data-action="qr-link" data-url="\'+H(full)+\'" style="padding:2px 7px;min-height:24px;font-size:11px">QR</button></div>\';}).join(""):"Нет";var h="";h+=metaRow("Имя",m.name||name);h+=metaRow("Путь",m.path||fp);h+=metaRow("Размер",fmtSize(m.size));h+=metaRow("Тип",m.ext?m.ext.slice(1).toUpperCase():"Файл");h+=metaRow("Загружен",fmtDateTime(m.created));h+=metaRow("Изменён",fmtDateTime(m.mtime));h+=metaRow("Публичная ссылка",linkHtml);info.innerHTML=h;}).catch(function(){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);});}' +
+  'function renderPreviewInfo(fp,name){var info=document.getElementById("preview-info");info.innerHTML=\'<div style="font-size:12px;color:#958ea0">Загрузка информации...</div>\';fetch("/api/fm/meta?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(m){if(m.error){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);return;}var links=m.publicLinks||[];var linkHtml=links.length?links.map(function(x){var full=window.location.origin+x.url;return \'<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><a href="\'+H(x.url)+\'" target="_blank" style="color:#d2bbff;min-width:0;overflow:hidden;text-overflow:ellipsis">\'+H(full)+\'</a><button class="btn-ghost" data-action="qr-link" data-url="\'+H(full)+\'" style="padding:2px 7px;min-height:24px;font-size:11px">QR</button></div>\';}).join(""):"Нет";var h="";h+=metaRow("Имя",m.name||name);h+=metaRow("Путь",m.path||fp);h+=metaRow("Размер",m.isDir?"—":fmtSize(m.size));h+=metaRow("Тип",m.isDir?"Папка":(m.ext?m.ext.slice(1).toUpperCase():"Файл"));h+=metaRow("Загружен",fmtDateTime(m.created));h+=metaRow("Изменён",fmtDateTime(m.mtime));h+=metaRow("Публичная ссылка",linkHtml);info.innerHTML=h;}).catch(function(){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);});}' +
   'function fitPlyrToVideo(media,player){if(!media||!player)return;var container=player.elements&&player.elements.container;if(!container)return;function fit(){var vw=media.videoWidth||0,vh=media.videoHeight||0;if(!vw||!vh)return;var host=media.closest(".preview-media-wrap")||media.closest(".mv-stage")||container.parentElement;if(!host)return;var maxW=host.clientWidth||window.innerWidth,maxH=host.clientHeight||Math.round(window.innerHeight*.72);if(host.classList&&host.classList.contains("mv-stage"))maxH=Math.max(220,maxH-4);else maxH=Math.min(maxH||Math.round(window.innerHeight*.72),Math.round(window.innerHeight*.72));var ratio=vw/vh,w=maxW,h=w/ratio;if(h>maxH){h=maxH;w=h*ratio;}container.style.width=Math.max(180,Math.floor(w))+"px";container.style.maxWidth="100%";container.style.aspectRatio=vw+" / "+vh;var wrap=container.querySelector(".plyr__video-wrapper");if(wrap){wrap.style.aspectRatio=vw+" / "+vh;wrap.style.height=Math.floor(h)+"px";}media.style.objectFit="contain";}media.addEventListener("loadedmetadata",fit,{once:false});window.addEventListener("resize",fit);setTimeout(fit,80);setTimeout(fit,400);}\n' +
   'function getPlayableMediaFiles(kind){' +
   '  var exts=[];' +
