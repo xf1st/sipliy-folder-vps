@@ -1259,7 +1259,11 @@ app.listen(PORT, () => console.log('Running on port ' + PORT));
 
 // ─── Telegram bot polling ─────────────────────────────────
 let tgOffset = 0;
+const tgPending = new Map(); // key → { fileId, fileName, fileSize, username, chatId }
 async function handleTgUpdate(update) {
+  if (update.callback_query) {
+    return handleTgCallback(update.callback_query).catch(() => {});
+  }
   const msg = update.message;
   if (!msg) return;
   const chatId = msg.chat.id;
@@ -1329,26 +1333,99 @@ async function handleTgUpdate(update) {
     return;
   }
 
-  try {
-    const fileInfo = await tgApi('getFile', { file_id: fileId });
-    const filePath = fileInfo.result.file_path;
-    const dlUrl = `https://api.telegram.org/file/bot${TG_TOKEN}/${filePath}`;
-    const dir = userDir(user.username);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    let safeName = fileName.replace(/[/\\:*?"<>|]/g, '_');
-    let dest = path.join(dir, safeName);
-    if (fs.existsSync(dest)) {
-      const ext = path.extname(safeName);
-      const base = path.basename(safeName, ext);
-      dest = path.join(dir, base + '_' + Date.now() + ext);
-      safeName = path.basename(dest);
+  // Показываем меню вместо немедленной загрузки
+  const key = Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  tgPending.set(key, { fileId, fileName, username: user.username, chatId });
+  setTimeout(() => tgPending.delete(key), 15 * 60 * 1000); // TTL 15 минут
+
+  const sizeStr = msg.document?.file_size || msg.video?.file_size || msg.audio?.file_size || msg.voice?.file_size || 0;
+  await tgApi('sendMessage', {
+    chat_id: chatId,
+    text: `📎 <b>${fileName}</b>${sizeStr ? '\n📦 ' + fmtBytes(sizeStr) : ''}\n\nЧто сделать с файлом?`,
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '💾 Сохранить в хранилище', callback_data: 'save:' + key },
+          { text: '🔗 Сохранить + ссылка + QR', callback_data: 'share:' + key }
+        ],
+        [{ text: '❌ Отмена', callback_data: 'cancel:' + key }]
+      ]
     }
-    const resp = await axios.get(dlUrl, { responseType: 'stream', timeout: 120000 });
-    const writer = fs.createWriteStream(dest);
-    resp.data.pipe(writer);
-    await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
-    const stat = fs.statSync(dest);
-    await tgSend(chatId, `✅ <b>${safeName}</b>\n📦 ${fmtBytes(stat.size)}\n\n<a href="https://sipliyfolder.ru/cloud">Открыть хранилище</a>`);
+  });
+}
+
+async function tgDoSaveFile(pending) {
+  const fileInfo = await tgApi('getFile', { file_id: pending.fileId });
+  const dlUrl = `https://api.telegram.org/file/bot${TG_TOKEN}/${fileInfo.result.file_path}`;
+  const dir = userDir(pending.username);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  let safeName = pending.fileName.replace(/[/\\:*?"<>|]/g, '_');
+  let dest = path.join(dir, safeName);
+  if (fs.existsSync(dest)) {
+    const ext = path.extname(safeName);
+    const base = path.basename(safeName, ext);
+    dest = path.join(dir, base + '_' + Date.now() + ext);
+    safeName = path.basename(dest);
+  }
+  const resp = await axios.get(dlUrl, { responseType: 'stream', timeout: 120000 });
+  const writer = fs.createWriteStream(dest);
+  resp.data.pipe(writer);
+  await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
+  return { dest, safeName, size: fs.statSync(dest).size };
+}
+
+async function handleTgCallback(cb) {
+  const chatId = cb.message.chat.id;
+  const msgId = cb.message.message_id;
+  const [action, key] = (cb.data || '').split(':');
+  const pending = tgPending.get(key);
+
+  await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+
+  if (!pending) {
+    await tgApi('editMessageText', { chat_id: chatId, message_id: msgId, text: '⏱ Время ожидания истекло. Отправьте файл ещё раз.' });
+    return;
+  }
+
+  if (action === 'cancel') {
+    tgPending.delete(key);
+    await tgApi('editMessageText', { chat_id: chatId, message_id: msgId, text: '❌ Отменено.' });
+    return;
+  }
+
+  tgPending.delete(key);
+  await tgApi('editMessageText', { chat_id: chatId, message_id: msgId, text: '⏳ Загружаю файл...' });
+
+  try {
+    const { dest, safeName, size } = await tgDoSaveFile(pending);
+
+    if (action === 'save') {
+      await tgSend(chatId, `✅ Сохранено: <b>${safeName}</b>\n📦 ${fmtBytes(size)}\n\n<a href="https://sipliyfolder.ru/cloud">Открыть хранилище</a>`);
+      return;
+    }
+
+    if (action === 'share') {
+      // Создаём публичную ссылку
+      const token = crypto.randomUUID();
+      const shares = loadShares();
+      const relPath = fmRelative(pending.username, dest) || path.basename(dest);
+      shares[token] = { username: pending.username, file: relPath, created: new Date().toISOString(), downloads: 0, maxDownloads: null, expiresAt: null, preview: false };
+      saveShares(shares);
+      const shareUrl = `https://sipliyfolder.ru/share/${token}`;
+
+      // Генерируем QR-код как PNG буфер
+      const qrBuf = await QRCode.toBuffer(shareUrl, { type: 'png', width: 300, margin: 2, color: { dark: '#111111', light: '#ffffff' } });
+
+      // Отправляем QR как фото
+      const FormDataLib = require('form-data');
+      const fd = new FormDataLib();
+      fd.append('chat_id', String(chatId));
+      fd.append('photo', qrBuf, { filename: 'qr.png', contentType: 'image/png' });
+      fd.append('caption', `✅ <b>${safeName}</b>\n📦 ${fmtBytes(size)}\n\n🔗 <a href="${shareUrl}">${shareUrl}</a>`, { contentType: 'text/plain; charset=utf-8' });
+      fd.append('parse_mode', 'HTML');
+      await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, fd, { headers: fd.getHeaders(), timeout: 30000 });
+    }
   } catch (e) {
     await tgSend(chatId, `❌ Ошибка: ${e.message}`);
   }
@@ -1356,7 +1433,7 @@ async function handleTgUpdate(update) {
 async function tgPoll() {
   let hadUpdates = false;
   try {
-    const r = await tgApi('getUpdates', { offset: tgOffset, timeout: 25, allowed_updates: ['message'] });
+    const r = await tgApi('getUpdates', { offset: tgOffset, timeout: 25, allowed_updates: ['message', 'callback_query'] });
     if (r.ok && r.result && r.result.length) {
       hadUpdates = true;
       for (const upd of r.result) {
@@ -3309,22 +3386,24 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<title>CloudSpace - ' + safeUsername + '</title>' +
   '<script src="https://cdn.tailwindcss.com"></script>' +
   '<script>' +
+  'function hexToRgb(h){var r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);return[r,g,b];}' +
+  'function darkenHex(h,f){var c=hexToRgb(h);return"#"+c.map(function(x){return Math.max(0,Math.round(x*f)).toString(16).padStart(2,"0");}).join("");}' +
+  'function lightenHex(h,f){var c=hexToRgb(h);return"#"+c.map(function(x){return Math.min(255,Math.round(x+(255-x)*f)).toString(16).padStart(2,"0");}).join("");}' +
   'function applyAccentColor(){' +
-  '  var themes={' +
-  '    "violet":{color:"#a078ff",glow:"rgba(160,120,255,0.24)",hover:"#7c3aed",bg:"rgba(160,120,255,0.14)",light:"#d2bbff"},' +
-  '    "emerald":{color:"#10b981",glow:"rgba(16,185,129,0.24)",hover:"#059669",bg:"rgba(16,185,129,0.14)",light:"#a7f3d0"},' +
-  '    "ruby":{color:"#f43f5e",glow:"rgba(244,63,94,0.24)",hover:"#e11d48",bg:"rgba(244,63,94,0.14)",light:"#fecdd3"},' +
-  '    "glacier":{color:"#06b6d4",glow:"rgba(6,182,212,0.24)",hover:"#0891b2",bg:"rgba(6,182,212,0.14)",light:"#a5f3fc"}' +
-  '  };' +
-  '  var current=localStorage.getItem("cloud-accent")||"violet";' +
-  '  var t=themes[current]||themes.violet;' +
+  '  var presets={"violet":"#a078ff","emerald":"#10b981","ruby":"#f43f5e","glacier":"#06b6d4"};' +
+  '  var hex=localStorage.getItem("cloud-accent-hex")||presets[localStorage.getItem("cloud-accent")]||"#a078ff";' +
+  '  var c=hexToRgb(hex);' +
+  '  var hover=darkenHex(hex,0.78);' +
+  '  var light=lightenHex(hex,0.6);' +
+  '  var glow="rgba("+c[0]+","+c[1]+","+c[2]+",0.24)";' +
+  '  var bg="rgba("+c[0]+","+c[1]+","+c[2]+",0.14)";' +
   '  var root=document.documentElement;' +
-  '  root.style.setProperty("--accent-color",t.color);' +
-  '  root.style.setProperty("--accent-glow",t.glow);' +
-  '  root.style.setProperty("--accent-hover",t.hover);' +
-  '  root.style.setProperty("--accent-bg",t.bg);' +
-  '  root.style.setProperty("--accent-light",t.light);' +
-  '  root.style.setProperty("--accent-gradient","linear-gradient(135deg,"+t.color+","+t.hover+")");' +
+  '  root.style.setProperty("--accent-color",hex);' +
+  '  root.style.setProperty("--accent-glow",glow);' +
+  '  root.style.setProperty("--accent-hover",hover);' +
+  '  root.style.setProperty("--accent-bg",bg);' +
+  '  root.style.setProperty("--accent-light",light);' +
+  '  root.style.setProperty("--accent-gradient","linear-gradient(135deg,"+hex+","+hover+")");' +
   '}' +
   'applyAccentColor();' +
   '</script>' +
@@ -3573,6 +3652,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.settings-subtle{font-size:12px;color:#958ea0;line-height:1.45}' +
   '.settings-grid{display:grid;grid-template-columns:1fr;gap:18px}' +
   '@media(min-width:1024px){.settings-grid{grid-template-columns:1fr 1fr!important}}' +
+  '.color-swatch{width:34px;height:34px;border-radius:50%;border:3px solid transparent;cursor:pointer;flex-shrink:0;transition:transform .15s,border-color .15s,box-shadow .15s;box-shadow:0 2px 8px rgba(0,0,0,.3)}' +
+  '.color-swatch:hover{transform:scale(1.18);box-shadow:0 4px 16px rgba(0,0,0,.5)}' +
+  '.color-swatch.active{border-color:#fff!important;transform:scale(1.15);box-shadow:0 0 0 2px rgba(255,255,255,.3)}' +
+  '#accent-color-input{width:46px;height:38px;border:none;border-radius:10px;cursor:pointer;padding:0;background:none;flex-shrink:0}' +
+  '#accent-color-input::-webkit-color-swatch-wrapper{padding:0;border-radius:8px}' +
+  '#accent-color-input::-webkit-color-swatch{border:none;border-radius:8px}' +
   '.theme-card{display:flex;align-items:center;gap:12px;padding:14px;border-radius:14px;background:#0e0e11;border:1px solid #4a4455;cursor:pointer;transition:all .2s}' +
   '.theme-card:hover{border-color:var(--accent-color);background:var(--accent-bg)}' +
   '.theme-card.active{border-color:var(--accent-color);background:var(--accent-bg);box-shadow:0 0 12px var(--accent-glow)}' +
@@ -3757,7 +3842,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<button id="go-back-btn" class="btn-ghost" data-action="go-back" data-drop-path="" title="Назад" style="padding:6px 10px"><span class="material-symbols-outlined">arrow_back</span></button>' +
   '<div id="breadcrumb" style="flex:1;display:flex;align-items:center;flex-wrap:wrap;font-size:14px;color:#cbc3d7"></div>' +
   '<div id="toolbar-search-wrap" style="position:relative">' +
-  '<input id="search-inp" class="inp" placeholder="Search files, folders..." style="width:200px;padding-left:32px">' +
+  '<input id="search-inp" class="inp" placeholder="Search files, folders..." style="width:200px;padding-left:32px" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">' +
   '<span class="material-symbols-outlined" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#958ea0">search</span>' +
   '</div>' +
   '<button id="toolbar-view-list" class="btn-ghost" data-action="view-list" title="Список"><span class="material-symbols-outlined">view_list</span></button>' +
@@ -4203,7 +4288,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'async function runSpeedTest(){var st=document.getElementById("speed-status"),p=document.getElementById("speed-ping"),d=document.getElementById("speed-down"),u=document.getElementById("speed-up");if(!st||!p||!d||!u)return;p.textContent=d.textContent=u.textContent="...";setSpeedStatus("\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0437\\u0430\\u0434\\u0435\\u0440\\u0436\\u043a\\u0443...",false);try{var pingTimes=[];for(var i=0;i<4;i++){var t0=performance.now();await fetch("/api/speedtest/ping?x="+Date.now()+"-"+i,{cache:"no-store"});pingTimes.push(performance.now()-t0);}var ping=Math.round(pingTimes.reduce(function(a,b){return a+b;},0)/pingTimes.length);p.textContent=ping+" ms";setSpeedStatus("\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0441\\u043a\\u0430\\u0447\\u0438\\u0432\\u0430\\u043d\\u0438\\u0435...",false);var size=10*1024*1024,t1=performance.now();var r=await fetch("/api/speedtest/download?size="+size+"&x="+Date.now(),{cache:"no-store"});var buf=await r.arrayBuffer();var downMs=performance.now()-t1;d.textContent=fmtMbps(buf.byteLength,downMs);setSpeedStatus("\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0432\\u044b\\u0433\\u0440\\u0443\\u0437\\u043a\\u0443...",false);var upSize=4*1024*1024,payload=new Uint8Array(upSize);for(var j=0;j<upSize;j+=4096)payload[j]=j%251;var t2=performance.now();await fetch("/api/speedtest/upload?x="+Date.now(),{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:payload,cache:"no-store"});var upMs=performance.now()-t2;u.textContent=fmtMbps(upSize,upMs);setSpeedStatus("\\u0413\\u043e\\u0442\\u043e\\u0432\\u043e",true);}catch(e){setSpeedStatus("\\u041d\\u0435 \\u0443\\u0434\\u0430\\u043b\\u043e\\u0441\\u044c \\u0432\\u044b\\u043f\\u043e\\u043b\\u043d\\u0438\\u0442\\u044c \\u0442\\u0435\\u0441\\u0442",false);if(p.textContent==="...")p.textContent="\\u2014";if(d.textContent==="...")d.textContent="\\u2014";if(u.textContent==="...")u.textContent="\\u2014";}}' +
   'function loadCloudSettings(){currentPath="__settings__";savePath("__settings__");clearSelection(false);setSectionChrome("settings");setNavActive("nav-settings");var bc=document.getElementById("breadcrumb");if(bc)bc.innerHTML=\'<span style="color:#a078ff;font-weight:700">Настройки</span>\';var html=\'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">\';html+=settingsCard("\u041f\u0440\u043e\u0444\u0438\u043b\u044c",\'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px"><div id="settings-profile-avatar" style="width:48px;height:48px;border-radius:16px;background:linear-gradient(135deg,#a078ff,#6d3bd7);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:18px;flex:0 0 auto">?</div><div style="min-width:0;flex:1"><div id="settings-profile-login" style="font-size:12px;color:#958ea0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@...</div><div id="settings-profile-role" style="font-size:12px;color:#d2bbff;margin-top:2px"></div></div></div><div style="font-size:12px;color:#958ea0;margin-bottom:8px">\u0418\u043c\u044f \u0432 \u043f\u0440\u043e\u0444\u0438\u043b\u0435</div><input id="cloud-profile-label" class="inp" maxlength="40" placeholder="CloudSpace" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-save-profile">\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c</button><div id="cloud-profile-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard("Хранение файлов",\'<div style="font-size:12px;color:#958ea0;margin-bottom:10px">Автоудаление старых файлов</div><select id="cloud-retention" class="inp" style="margin-bottom:10px"><option value="1">1 день</option><option value="3">3 дня</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="0">Никогда</option></select><button class="btn-primary" data-action="settings-save-retention">Сохранить</button><div id="cloud-retention-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard("Уведомления",\'<div id="cloud-notif-status" style="font-size:12px;color:#958ea0;margin-bottom:10px">Проверяю...</div><button class="btn-ghost" data-action="settings-notif"><span class="material-symbols-outlined">notifications</span> Разрешить уведомления</button>\');html+=settingsCard("Speed test",\'<div style="font-size:12px;color:#958ea0;margin-bottom:10px">\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0441\u043a\u043e\u0440\u043e\u0441\u0442\u0438 \u043c\u0435\u0436\u0434\u0443 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u043e\u043c \u0438 VPS</div><button class="btn-primary" data-action="settings-speedtest"><span class="material-symbols-outlined">speed</span> \u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u0442\u0435\u0441\u0442</button><div id="speed-status" style="font-size:12px;color:#958ea0;margin-top:10px;min-height:16px"></div><div id="speed-result" class="speed-result"><div class="speed-metric"><b id="speed-ping">\u2014</b><span>Ping</span></div><div class="speed-metric"><b id="speed-down">\u2014</b><span>Download</span></div><div class="speed-metric"><b id="speed-up">\u2014</b><span>Upload</span></div></div>\');html+=settingsCard("Токен расширения",\'<div id="cloud-token-display" style="font-size:12px;color:#d2bbff;word-break:break-all;margin-bottom:10px">Скрыт</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="settings-load-token">Показать</button><button class="btn-ghost" data-action="settings-copy-token">Копировать</button><button class="btn-ghost" data-action="settings-reset-token" style="color:#ffb4ab;border-color:#93000a">Сбросить</button></div><div id="cloud-token-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard("Пароль",\'<input id="cloud-pass-current" class="inp" type="password" placeholder="Текущий пароль" style="margin-bottom:10px"><input id="cloud-pass-new" class="inp" type="password" placeholder="Новый пароль" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-change-password">Сменить пароль</button><div id="cloud-pass-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=\'<div id="cloud-users-section" class="card" style="margin:0;padding:18px;display:none"><div style="font-size:15px;font-weight:800;margin-bottom:12px;color:#e4e1e6">Аккаунты</div><div id="cloud-users-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px"><input id="cloud-new-username" class="inp" placeholder="Логин"><input id="cloud-new-password" class="inp" placeholder="Пароль"><input id="cloud-new-label" class="inp" placeholder="Имя"></div><button class="btn-primary" data-action="settings-add-user">Добавить аккаунт</button><div id="cloud-users-status" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>\';html+="</div>";document.getElementById("file-area").innerHTML=html;loadCloudProfile();loadCloudRetention();updateCloudNotifStatus();loadCloudUsers();}' +
   'function settingsThemeCard(id,label,desc,c1,c2,current){return \'<button class="theme-card \'+(current===id?"active":"")+\'" data-action="set-accent" data-theme="\'+id+\'" type="button"><span class="theme-card-dot" style="background:linear-gradient(135deg,\'+c1+\',\'+c2+\')"></span><span style="min-width:0;flex:1;text-align:left"><b style="display:block;color:#e4e1e6;font-size:13px">\'+label+\'</b><span class="settings-subtle" style="display:block;margin-top:2px">\'+desc+\'</span></span><span class="material-symbols-outlined" style="color:var(--accent-light);font-size:20px">\'+(current===id?"check_circle":"radio_button_unchecked")+\'</span></button>\';}' +
-  'function loadCloudSettings(){currentPath="__settings__";savePath("__settings__");clearSelection(false);setSectionChrome("settings");setNavActive("nav-settings");var bc=document.getElementById("breadcrumb");if(bc)bc.innerHTML=\'<span style="color:var(--accent-color);font-weight:800">Настройки</span>\';var currentAccent=localStorage.getItem("cloud-accent")||"violet";var html="";html+=\'<section class="settings-hero"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px"><div style="display:flex;gap:14px;align-items:flex-start;min-width:0"><div class="settings-hero-icon"><span class="material-symbols-outlined" style="font-size:30px">tune</span></div><div style="min-width:0"><div style="font-size:24px;font-weight:900;color:#fff;line-height:1.12">Настройки CloudSpace</div><div class="settings-subtle" style="margin-top:7px;max-width:760px">Профиль, внешний вид, безопасность и системные параметры собраны в одном месте.</div></div></div><button class="btn-ghost" data-action="nav-files"><span class="material-symbols-outlined">folder</span> Мои файлы</button></div></section>\';html+=\'<div class="settings-grid">\';html+=settingsCard(\'Внешний вид\',\'<div class="settings-subtle" style="margin-bottom:12px">Акцент применяется к кнопкам, навигации, прогрессу, плееру и выделенным состояниям.</div><div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">\'+settingsThemeCard("violet","Violet","Классический CloudSpace","#a078ff","#7c3aed",currentAccent)+settingsThemeCard("emerald","Emerald","Зеленый рабочий акцент","#10b981","#059669",currentAccent)+settingsThemeCard("ruby","Ruby","Контрастный красный","#f43f5e","#e11d48",currentAccent)+settingsThemeCard("glacier","Glacier","Холодный cyan","#06b6d4","#0891b2",currentAccent)+\'</div><div style="display:flex;align-items:center;gap:10px;margin-top:14px"><button class="btn-ghost" data-action="toggle-theme"><span class="material-symbols-outlined">contrast</span> Светлая / темная</button><span class="settings-subtle">Выбранный цвет сохраняется в браузере.</span></div>\');html+=settingsCard(\'Профиль\',\'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px"><div id="settings-profile-avatar" style="width:48px;height:48px;border-radius:16px;background:var(--accent-gradient);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:18px;flex:0 0 auto">?</div><div style="min-width:0;flex:1"><div id="settings-profile-login" class="settings-subtle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@...</div><div id="settings-profile-role" style="font-size:12px;color:var(--accent-light);margin-top:2px;font-weight:800"></div></div></div><div class="settings-subtle" style="margin-bottom:8px">Имя в профиле</div><input id="cloud-profile-label" class="inp" maxlength="40" placeholder="CloudSpace" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-save-profile">Сохранить</button><div id="cloud-profile-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Хранение файлов\',\'<div class="settings-subtle" style="margin-bottom:10px">Автоудаление старых файлов</div><select id="cloud-retention" class="inp" style="margin-bottom:10px"><option value="1">1 день</option><option value="3">3 дня</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="0">Никогда</option></select><button class="btn-primary" data-action="settings-save-retention">Сохранить</button><div id="cloud-retention-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Уведомления\',\'<div id="cloud-notif-status" class="settings-subtle" style="margin-bottom:10px">Проверяю...</div><button class="btn-ghost" data-action="settings-notif"><span class="material-symbols-outlined">notifications</span> Разрешить уведомления</button>\');html+=settingsCard(\'Speed test\',\'<div class="settings-subtle" style="margin-bottom:10px">Проверка скорости между браузером и VPS</div><button class="btn-primary" data-action="settings-speedtest"><span class="material-symbols-outlined">speed</span> Запустить тест</button><div id="speed-status" class="settings-subtle" style="margin-top:10px;min-height:16px"></div><div id="speed-result" class="speed-result"><div class="speed-metric"><b id="speed-ping">—</b><span>Ping</span></div><div class="speed-metric"><b id="speed-down">—</b><span>Download</span></div><div class="speed-metric"><b id="speed-up">—</b><span>Upload</span></div></div>\');html+=settingsCard(\'Токен расширения\',\'<div id="cloud-token-display" style="font-size:12px;color:var(--accent-light);word-break:break-all;margin-bottom:10px">Скрыт</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="settings-load-token">Показать</button><button class="btn-ghost" data-action="settings-copy-token">Копировать</button><button class="btn-ghost" data-action="settings-reset-token" style="color:#ffb4ab;border-color:#93000a">Сбросить</button></div><div id="cloud-token-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Telegram\',\'<div id="tg-linked" style="display:none"><div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px 12px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px"><span style="font-size:22px;flex-shrink:0">✅</span><div><div style="font-size:13px;font-weight:700;color:#4ade80">Telegram подключён</div><div id="tg-linked-info" class="settings-subtle" style="margin-top:2px"></div></div></div><button class="btn-ghost" data-action="settings-tg-unlink" style="color:#ffb4ab;border-color:#93000a">Отключить</button></div><div id="tg-unlinked"><div class="settings-subtle" style="margin-bottom:12px">Отправляйте файлы в Telegram — они сохранятся прямо в ваше хранилище на VPS. Поддерживаются документы, фото, видео, аудио.</div><button class="btn-primary" data-action="settings-tg-connect" style="background:linear-gradient(135deg,#0ea5e9,#2563eb)">🤖 Подключить Telegram</button><div class="settings-subtle" style="margin-top:8px">Откроется @SiplyiFolderUpload_bot</div></div><div id="tg-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Пароль\',\'<input id="cloud-pass-current" class="inp" type="password" placeholder="Текущий пароль" style="margin-bottom:10px"><input id="cloud-pass-new" class="inp" type="password" placeholder="Новый пароль" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-change-password">Сменить пароль</button><div id="cloud-pass-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=\'<div id="cloud-users-section" class="card" style="margin:0;padding:18px;display:none"><div class="settings-card-title"><span class="material-symbols-outlined">group</span> Аккаунты</div><div id="cloud-users-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px"><input id="cloud-new-username" class="inp" placeholder="Логин"><input id="cloud-new-password" class="inp" placeholder="Пароль"><input id="cloud-new-label" class="inp" placeholder="Имя"></div><button class="btn-primary" data-action="settings-add-user">Добавить аккаунт</button><div id="cloud-users-status" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>\';html+="</div>";document.getElementById("file-area").innerHTML=html;applyAccentColor();loadCloudProfile();loadCloudRetention();updateCloudNotifStatus();loadCloudUsers();loadTelegramStatus();}' +
+  'function loadCloudSettings(){currentPath="__settings__";savePath("__settings__");clearSelection(false);setSectionChrome("settings");setNavActive("nav-settings");var bc=document.getElementById("breadcrumb");if(bc)bc.innerHTML=\'<span style="color:var(--accent-color);font-weight:800">Настройки</span>\';var currentAccent=localStorage.getItem("cloud-accent")||"violet";var html="";html+=\'<section class="settings-hero"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px"><div style="display:flex;gap:14px;align-items:flex-start;min-width:0"><div class="settings-hero-icon"><span class="material-symbols-outlined" style="font-size:30px">tune</span></div><div style="min-width:0"><div style="font-size:24px;font-weight:900;color:#fff;line-height:1.12">Настройки CloudSpace</div><div class="settings-subtle" style="margin-top:7px;max-width:760px">Профиль, внешний вид, безопасность и системные параметры собраны в одном месте.</div></div></div><button class="btn-ghost" data-action="nav-files"><span class="material-symbols-outlined">folder</span> Мои файлы</button></div></section>\';html+=\'<div class="settings-grid">\';html+=settingsCard(\'Внешний вид\',\'<div class="settings-subtle" style="margin-bottom:14px">Цвет акцента применяется ко всем элементам интерфейса.</div><div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px" id="color-swatches"><button class="color-swatch" data-action="set-accent-hex" data-hex="#a078ff" title="Violet" style="background:#a078ff"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#10b981" title="Emerald" style="background:#10b981"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#f43f5e" title="Ruby" style="background:#f43f5e"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#06b6d4" title="Glacier" style="background:#06b6d4"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#f59e0b" title="Amber" style="background:#f59e0b"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#ec4899" title="Pink" style="background:#ec4899"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#22c55e" title="Green" style="background:#22c55e"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#6366f1" title="Indigo" style="background:#6366f1"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#ef4444" title="Red" style="background:#ef4444"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#14b8a6" title="Teal" style="background:#14b8a6"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#f97316" title="Orange" style="background:#f97316"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#a855f7" title="Purple" style="background:#a855f7"></button></div><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><span class="settings-subtle" style="white-space:nowrap">Свой цвет</span><input type="color" id="accent-color-input" value="#a078ff" title="Выберите цвет"><span id="accent-hex-label" style="font-size:12px;color:var(--accent-light);font-family:monospace;font-weight:700">#a078ff</span></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="toggle-theme"><span class="material-symbols-outlined">contrast</span> Светлая / тёмная</button></div>\');html+=settingsCard(\'Профиль\',\'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px"><div id="settings-profile-avatar" style="width:48px;height:48px;border-radius:16px;background:var(--accent-gradient);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:18px;flex:0 0 auto">?</div><div style="min-width:0;flex:1"><div id="settings-profile-login" class="settings-subtle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@...</div><div id="settings-profile-role" style="font-size:12px;color:var(--accent-light);margin-top:2px;font-weight:800"></div></div></div><div class="settings-subtle" style="margin-bottom:8px">Имя в профиле</div><input id="cloud-profile-label" class="inp" maxlength="40" placeholder="CloudSpace" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-save-profile">Сохранить</button><div id="cloud-profile-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Хранение файлов\',\'<div class="settings-subtle" style="margin-bottom:10px">Автоудаление старых файлов</div><select id="cloud-retention" class="inp" style="margin-bottom:10px"><option value="1">1 день</option><option value="3">3 дня</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="0">Никогда</option></select><button class="btn-primary" data-action="settings-save-retention">Сохранить</button><div id="cloud-retention-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Уведомления\',\'<div id="cloud-notif-status" class="settings-subtle" style="margin-bottom:10px">Проверяю...</div><button class="btn-ghost" data-action="settings-notif"><span class="material-symbols-outlined">notifications</span> Разрешить уведомления</button>\');html+=settingsCard(\'Speed test\',\'<div class="settings-subtle" style="margin-bottom:10px">Проверка скорости между браузером и VPS</div><button class="btn-primary" data-action="settings-speedtest"><span class="material-symbols-outlined">speed</span> Запустить тест</button><div id="speed-status" class="settings-subtle" style="margin-top:10px;min-height:16px"></div><div id="speed-result" class="speed-result"><div class="speed-metric"><b id="speed-ping">—</b><span>Ping</span></div><div class="speed-metric"><b id="speed-down">—</b><span>Download</span></div><div class="speed-metric"><b id="speed-up">—</b><span>Upload</span></div></div>\');html+=settingsCard(\'Токен расширения\',\'<div id="cloud-token-display" style="font-size:12px;color:var(--accent-light);word-break:break-all;margin-bottom:10px">Скрыт</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="settings-load-token">Показать</button><button class="btn-ghost" data-action="settings-copy-token">Копировать</button><button class="btn-ghost" data-action="settings-reset-token" style="color:#ffb4ab;border-color:#93000a">Сбросить</button></div><div id="cloud-token-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Telegram\',\'<div id="tg-linked" style="display:none"><div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px 12px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px"><span style="font-size:22px;flex-shrink:0">✅</span><div><div style="font-size:13px;font-weight:700;color:#4ade80">Telegram подключён</div><div id="tg-linked-info" class="settings-subtle" style="margin-top:2px"></div></div></div><button class="btn-ghost" data-action="settings-tg-unlink" style="color:#ffb4ab;border-color:#93000a">Отключить</button></div><div id="tg-unlinked"><div class="settings-subtle" style="margin-bottom:12px">Отправляйте файлы в Telegram — они сохранятся прямо в ваше хранилище на VPS. Поддерживаются документы, фото, видео, аудио.</div><button class="btn-primary" data-action="settings-tg-connect" style="background:linear-gradient(135deg,#0ea5e9,#2563eb)">🤖 Подключить Telegram</button><div class="settings-subtle" style="margin-top:8px">Откроется @SiplyiFolderUpload_bot</div></div><div id="tg-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Пароль\',\'<input id="cloud-pass-current" class="inp" type="password" placeholder="Текущий пароль" style="margin-bottom:10px"><input id="cloud-pass-new" class="inp" type="password" placeholder="Новый пароль" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-change-password">Сменить пароль</button><div id="cloud-pass-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=\'<div id="cloud-users-section" class="card" style="margin:0;padding:18px;display:none"><div class="settings-card-title"><span class="material-symbols-outlined">group</span> Аккаунты</div><div id="cloud-users-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px"><input id="cloud-new-username" class="inp" placeholder="Логин"><input id="cloud-new-password" class="inp" placeholder="Пароль"><input id="cloud-new-label" class="inp" placeholder="Имя"></div><button class="btn-primary" data-action="settings-add-user">Добавить аккаунт</button><div id="cloud-users-status" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>\';html+="</div>";document.getElementById("file-area").innerHTML=html;applyAccentColor();initColorPicker();loadCloudProfile();loadCloudRetention();updateCloudNotifStatus();loadCloudUsers();loadTelegramStatus();}' +
   'function loadCloudRetention(){fetch("/api/settings").then(function(r){return r.json();}).then(function(d){var el=document.getElementById("cloud-retention");if(el)el.value=String(d.retention);}).catch(function(){});}' +
   'function saveCloudRetention(){var v=document.getElementById("cloud-retention").value;fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({retention:parseInt(v,10)})}).then(function(r){return r.json();}).then(function(d){setCloudStatus("cloud-retention-status",d.ok?"Сохранено":(d.error||"Ошибка"),!!d.ok);}).catch(function(){setCloudStatus("cloud-retention-status","Ошибка",false);});}' +
   'function updateCloudNotifStatus(){var el=document.getElementById("cloud-notif-status");if(!el)return;if(!("Notification" in window)){el.textContent="Браузерные уведомления недоступны";return;}el.textContent=Notification.permission==="granted"?"Уведомления включены":Notification.permission==="denied"?"Уведомления запрещены в браузере":"Уведомления еще не разрешены";}' +
@@ -4212,6 +4297,23 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function loadTelegramStatus(){fetch("/api/tg/status").then(function(r){return r.json();}).then(function(d){var linked=document.getElementById("tg-linked"),unlinked=document.getElementById("tg-unlinked"),info=document.getElementById("tg-linked-info");if(!linked)return;if(d.linked){linked.style.display="";unlinked.style.display="none";if(info)info.textContent=(d.firstName?"@"+d.firstName+" · ":"")+"Подключён "+new Date(d.connectedAt).toLocaleDateString("ru");}else{linked.style.display="none";unlinked.style.display="";}}).catch(function(){});}' +
   'function connectTelegram(){var st=document.getElementById("tg-status");if(st)st.textContent="Открываю бота...";fetch("/api/tg/connect-link").then(function(r){return r.json();}).then(function(d){if(d.url){window.open(d.url,"_blank");if(st)st.textContent="Бот открыт в Telegram. После подтверждения нажмите кнопку ниже.";var btn=document.createElement("button");btn.className="btn-ghost";btn.style.marginTop="8px";btn.textContent="Проверить подключение";btn.onclick=function(){loadTelegramStatus();if(st)st.textContent="";};var stParent=st&&st.parentNode;if(stParent)stParent.insertBefore(btn,st.nextSibling);}else{if(st)st.textContent=d.error||"Ошибка";}}).catch(function(){if(st)st.textContent="Ошибка";});}' +
   'function unlinkTelegram(){if(!confirm("Отключить Telegram?"))return;fetch("/api/tg/unlink",{method:"POST"}).then(function(r){return r.json();}).then(function(){loadTelegramStatus();}).catch(function(){});}' +
+  'function initColorPicker(){' +
+  '  var inp=document.getElementById("accent-color-input");' +
+  '  var lbl=document.getElementById("accent-hex-label");' +
+  '  if(!inp)return;' +
+  '  var cur=localStorage.getItem("cloud-accent-hex")||"#a078ff";' +
+  '  inp.value=cur;if(lbl)lbl.textContent=cur;' +
+  '  updateColorSwatches(cur);' +
+  '  inp.addEventListener("input",function(){' +
+  '    var h=inp.value;localStorage.setItem("cloud-accent-hex",h);' +
+  '    if(lbl)lbl.textContent=h;' +
+  '    applyAccentColor();updateColorSwatches(h);' +
+  '  });' +
+  '}' +
+  'function updateColorSwatches(hex){' +
+  '  var btns=document.querySelectorAll(".color-swatch");' +
+  '  btns.forEach(function(b){b.classList.toggle("active",b.dataset.hex&&b.dataset.hex.toLowerCase()===hex.toLowerCase());});' +
+  '}' +
   'function copyCloudToken(){var t=(document.getElementById("cloud-token-display")||{}).textContent||"";if(!t||t==="Скрыт"){loadCloudToken();return;}navigator.clipboard&&navigator.clipboard.writeText(t).then(function(){setCloudStatus("cloud-token-status","Скопировано",true);});}' +
   'function resetCloudToken(){if(!confirm("Сбросить токен расширения? Старый перестанет работать."))return;fetch("/api/mytoken/reset",{method:"POST"}).then(function(r){return r.json();}).then(function(d){document.getElementById("cloud-token-display").textContent=d.token||"";setCloudStatus("cloud-token-status","Новый токен готов",true);}).catch(function(){setCloudStatus("cloud-token-status","Ошибка сброса",false);});}' +
   'function updateSidebarProfile(d){var label=d.label||d.username||"",user=d.username||"",role=d.isAdmin?"Admin":"User";var ls=document.getElementById("profile-label-sidebar"),av=document.getElementById("profile-avatar-sidebar"),ms=document.getElementById("profile-meta-sidebar"),sl=document.getElementById("settings-profile-login"),sr=document.getElementById("settings-profile-role"),sa=document.getElementById("settings-profile-avatar");if(ls)ls.textContent=label;if(av)av.textContent=(label||user||"?").trim().charAt(0).toUpperCase()||"?";if(sa)sa.textContent=(label||user||"?").trim().charAt(0).toUpperCase()||"?";if(ms)ms.textContent="@"+user+" \u00b7 "+role;if(sl)sl.textContent="@"+user;if(sr)sr.textContent=role;}\n' +
@@ -4741,6 +4843,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="settings-load-token"){loadCloudToken();}' +
   '  else if(action==="settings-copy-token"){copyCloudToken();}' +
   '  else if(action==="settings-reset-token"){resetCloudToken();}' +
+  '  else if(action==="set-accent-hex"){var h=el.dataset.hex;if(h){localStorage.setItem("cloud-accent-hex",h);applyAccentColor();var inp=document.getElementById("accent-color-input");var lbl=document.getElementById("accent-hex-label");if(inp)inp.value=h;if(lbl)lbl.textContent=h;updateColorSwatches(h);}}' +
   '  else if(action==="settings-tg-connect"){connectTelegram();}' +
   '  else if(action==="settings-tg-unlink"){unlinkTelegram();}' +
   '  else if(action==="settings-change-password"){changeCloudPassword();}' +
