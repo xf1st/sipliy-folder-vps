@@ -105,4 +105,34 @@
 
 ---
 
-*Лог обновлен: 21 мая 2026 года.*
+## 📦 Релиз v2.6.0 (21 мая 2026)
+
+### Что изменилось
+
+#### 🎨 Премиум Settings Grid
+- Настройки полностью переверстаны в адаптивный двухколоночный `.settings-grid` (max-width 1000px, центрирование).
+- **Левая колонка (Personal)**: Профиль, Цветовая тема 🌈, Токен расширения, Уведомления, Speed test, Пароль.
+- **Правая колонка (Admin)**: Хранение файлов, Аккаунты — скрыта по умолчанию (`display:none`), открывается только если `profile.isAdmin === true`.
+- На мобильных (< 1024px) колонки складываются в одну.
+
+#### 🌈 Интерактивный выбор акцентных тем
+- В настройках появились 4 кнопки `.theme-card`: **Violet Glow**, **Emerald Mint**, **Ruby Crimson**, **Glacier Blue**.
+- Клик мгновенно сохраняет тему в `localStorage("cloud-accent")`, вызывает `applyAccentColor()` и переключает `.active` класс.
+- При загрузке настроек текущая тема подсвечивается автоматически.
+
+#### ✨ Плавные CSS-анимации
+- Все ключевые элементы (`.card`, `.btn-primary`, `.btn-ghost`, `.nav-item`, `.file-row`, `.file-grid-item`, `.theme-card`) теперь используют `transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1)` — плавный, «маслянистый» переход.
+- Добавлен `@keyframes fadeIn` (slide up + opacity) и класс `.animate-fade-in` — применяется к `.settings-grid` при рендере.
+
+#### 🔢 Версия
+- `SITE_VERSION` → `2.6.0`
+- `EXT_VERSION` → `2.6.0`
+- `extension/manifest.json` → `"version": "2.6.0"`
+
+### Проверки
+- `node check_client_syntax.js` — все 5 script-блоков валидны ✓
+- `node deploy-systemd.js` — деплой успешен, сервис `active (running)` ✓
+
+---
+
+*Лог обновлён: 21 мая 2026 года.*

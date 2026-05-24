@@ -131,6 +131,31 @@ function removeUploadedFile(username, filename) {
     }
   } catch (e) {}
 }
+
+const ACTIVITY_FILE = '/opt/vps-downloader/activity.json';
+function loadActivity() {
+  try { return JSON.parse(fs.readFileSync(ACTIVITY_FILE, 'utf8')); }
+  catch { return []; }
+}
+function logActivity(username, action, details) {
+  try {
+    const dir = path.dirname(ACTIVITY_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const list = loadActivity();
+    list.unshift({
+      timestamp: new Date().toISOString(),
+      username: username || 'system',
+      action: action,
+      details: details
+    });
+    if (list.length > 200) list.length = 200;
+    fs.writeFileSync(ACTIVITY_FILE, JSON.stringify(list, null, 2));
+  } catch (e) {
+    console.error('Error logging activity:', e);
+  }
+}
 function htmlEscape(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
@@ -1383,7 +1408,11 @@ app.post('/api/fm/mkdir', auth, (req, res) => {
   const full = fmResolve(req.session.user, combined);
   if (!full) return res.status(403).json({ error: 'Invalid path' });
   if (fs.existsSync(full)) return res.status(409).json({ error: 'Уже существует' });
-  try { fs.mkdirSync(full, { recursive: true }); res.json({ ok: true }); }
+  try {
+    fs.mkdirSync(full, { recursive: true });
+    logActivity(req.session.user, 'Создание папки', 'Создана папка: ' + combined);
+    res.json({ ok: true });
+  }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1412,13 +1441,18 @@ app.post('/api/fm/rename', auth, (req, res) => {
   const to   = fmResolve(req.session.user, toRel);
   if (!to) return res.status(403).json({ error: 'Invalid path' });
   if (fs.existsSync(to)) return res.status(409).json({ error: 'Уже существует' });
-  try { fs.renameSync(from, to); res.json({ ok: true }); }
+  try {
+    fs.renameSync(from, to);
+    logActivity(req.session.user, 'Переименование', 'Переименован объект ' + oldPath + ' в ' + toRel);
+    res.json({ ok: true });
+  }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // DELETE /api/fm/delete  body: { path }
 app.delete('/api/fm/delete', auth, (req, res) => {
-  const full = fmResolve(req.session.user, req.body.path || req.query.path || '');
+  const targetRel = req.body.path || req.query.path || '';
+  const full = fmResolve(req.session.user, targetRel);
   if (!full) return res.status(403).json({ error: 'Invalid path' });
   if (!fs.existsSync(full)) return res.status(404).json({ error: 'Not found' });
   try {
@@ -1430,6 +1464,7 @@ app.delete('/api/fm/delete', auth, (req, res) => {
       fs.unlinkSync(full);
       removeUploadedFile(req.session.user, baseName);
     }
+    logActivity(req.session.user, 'Удаление', 'Удален объект: ' + targetRel);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1453,7 +1488,11 @@ app.post('/api/fm/move', auth, (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
-  try { fs.renameSync(from, to); res.json({ ok: true }); }
+  try {
+    fs.renameSync(from, to);
+    logActivity(req.session.user, 'Перемещение', 'Перемещен объект из ' + req.body.from + ' в ' + req.body.to);
+    res.json({ ok: true });
+  }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1475,6 +1514,11 @@ app.get('/api/fm/recent', auth, (req, res) => {
   walk(base, '');
   results.sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
   res.json({ entries: results.slice(0, 50) });
+});
+
+// GET /api/activity
+app.get('/api/activity', auth, (req, res) => {
+  res.json(loadActivity());
 });
 
 // GET /api/fm/search?q=
@@ -1501,10 +1545,12 @@ app.get('/api/fm/search', auth, (req, res) => {
 
 // GET /api/fm/download?path=
 app.get('/api/fm/download', auth, (req, res) => {
-  const full = fmResolve(req.session.user, req.query.path || '');
+  const relPath = req.query.path || '';
+  const full = fmResolve(req.session.user, relPath);
   if (!full || !fs.existsSync(full)) return res.status(404).send('Not found');
   const stats = fs.statSync(full);
   if (stats.isDirectory()) {
+    logActivity(req.session.user, 'Скачивание', 'Скачана папка как ZIP: ' + relPath);
     const archiveName = (path.basename(full) || 'folder') + '.zip';
     res.attachment(archiveName);
     const archive = archiver('zip', { zlib: { level: 9 } });
@@ -1518,6 +1564,7 @@ app.get('/api/fm/download', auth, (req, res) => {
     archive.directory(full, false);
     archive.finalize();
   } else {
+    logActivity(req.session.user, 'Скачивание', 'Скачан файл: ' + relPath);
     res.download(full, path.basename(full));
   }
 });
@@ -1765,6 +1812,7 @@ app.post('/api/fm/add-url', auth, async (req, res) => {
       error: '',
     };
     saveMediaJobs(jobs);
+    logActivity(req.session.user, 'Загрузка по ссылке', 'Добавлена задача скачивания URL: ' + dlUrl + (relPath ? ' в ' + relPath : ''));
     res.json({ ok: true, gid });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1785,6 +1833,7 @@ app.post('/api/fm/media', auth, (req, res) => {
     if (!available) return res.status(500).json({ error: 'yt-dlp is not installed on server' });
     try {
       const job = startMediaJob({ username: req.session.user, url: dlUrl, dir, relPath, mode, filename });
+      logActivity(req.session.user, 'Загрузка по ссылке', 'Добавлена медиа-задача (' + mode + '): ' + dlUrl + (relPath ? ' в ' + relPath : ''));
       res.json({ ok: true, job: mediaJobPublic(job) });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -1824,8 +1873,11 @@ app.delete('/api/fm/media-jobs/:id', auth, (req, res) => {
 
 // POST /api/fm/zip  body: { items, name }
 app.post('/api/fm/zip', auth, (req, res) => {
-  fmZipItems(req.session.user, req.body.items || [], (req.body.name || 'cloudspace.zip').trim(), (err, z) => {
+  const archiveName = (req.body.name || 'cloudspace.zip').trim();
+  const items = req.body.items || [];
+  fmZipItems(req.session.user, items, archiveName, (err, z) => {
     if (err) return res.status(400).json({ error: err.message });
+    logActivity(req.session.user, 'Архивация', 'Создан архив ' + archiveName + ' (' + items.length + ' объектов)');
     res.json({ ok: true, token: z.token, url: z.url, count: z.count });
   });
 });
@@ -1841,10 +1893,12 @@ app.post('/api/fm/share', auth, (req, res) => {
     const shares = loadShares();
     shares[token] = Object.assign({ path: picked[0].rel, user: req.session.user, created: new Date().toISOString(), kind: 'fm-file' }, shareOptions);
     saveShares(shares);
+    logActivity(req.session.user, 'Доступ', 'Создана ссылка доступа для ' + picked[0].rel);
     return res.json({ ok: true, token, url: '/share/' + token });
   }
   fmZipItems(req.session.user, picked.map(x => x.rel), 'cloudspace-share.zip', (err, z) => {
     if (err) return res.status(400).json({ error: err.message });
+    logActivity(req.session.user, 'Доступ', 'Создана ссылка доступа (архив) для ' + picked.length + ' объектов');
     res.json({ ok: true, token: z.token, url: z.url, archived: true, count: z.count });
   }, shareOptions);
 });
@@ -1925,6 +1979,8 @@ app.post('/api/fm/upload', auth, (req, res) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.files || !req.files.length) return res.status(400).json({ error: 'Нет файлов' });
     req.files.forEach(f => registerUploadedFile(req.session.user, f.filename));
+    const fileNames = req.files.map(f => f.filename).join(', ');
+    logActivity(req.session.user, 'Загрузка с ПК', 'Загружено ' + req.files.length + ' файл(ов): ' + fileNames);
     res.json({ ok: true, files: req.files.map(f => ({ name: f.filename, size: f.size })) });
   });
 });
@@ -3521,7 +3577,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div class="nav-item active" data-action="nav-dashboard"><span class="material-symbols-outlined">dashboard</span><span>Главная</span></div>' +
   '<div class="nav-item" data-action="nav-files"><span class="material-symbols-outlined">folder</span><span>Мои файлы</span></div>' +
   '<div class="nav-item" data-action="nav-recent"><span class="material-symbols-outlined">schedule</span><span>Недавние</span></div>' +
-  '<div class="nav-item" data-action="nav-url-history"><span class="material-symbols-outlined">history</span><span>История URL</span></div>' +
+  '<div class="nav-item" data-action="nav-activity"><span class="material-symbols-outlined">list_alt</span><span>Активность</span></div>' +
   '<div class="nav-item" data-action="nav-settings"><span class="material-symbols-outlined">settings</span><span>Настройки</span></div>' +
   '<div style="flex:1"></div>' +
   '<div class="profile-card card" style="margin:0;padding:14px;background:linear-gradient(180deg,rgba(160,120,255,.12),rgba(27,27,29,.92));border-color:rgba(160,120,255,.32)">' +
@@ -3580,12 +3636,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="transfers-chip" data-action="restore-transfers"><span class="material-symbols-outlined">downloading</span><span id="transfers-chip-text">Загрузка...</span></div>' +
   '</main>' +
   '<nav class="mobile-bottom-nav">' +
-  '<button class="bottom-nav-item active" data-action="nav-dashboard"><span class="material-symbols-outlined">home</span><span>Home</span></button>' +
-  '<button class="bottom-nav-item" data-action="nav-files"><span class="material-symbols-outlined">folder</span><span>Files</span></button>' +
-  '<button class="bottom-nav-item" data-action="nav-recent"><span class="material-symbols-outlined">schedule</span><span>Recent</span></button>' +
-  '<button class="bottom-nav-item" data-action="nav-url-history"><span class="material-symbols-outlined">history</span><span>URL</span></button>' +
-  '<button class="bottom-nav-item" data-action="nav-settings"><span class="material-symbols-outlined">settings</span><span>Settings</span></button>' +
-  '<button class="bottom-nav-item" data-action="upload-btn"><span class="material-symbols-outlined">upload</span><span>Upload</span></button>' +
+  '<button class="bottom-nav-item active" data-action="nav-dashboard"><span class="material-symbols-outlined">home</span><span>Главная</span></button>' +
+  '<button class="bottom-nav-item" data-action="nav-files"><span class="material-symbols-outlined">folder</span><span>Файлы</span></button>' +
+  '<button class="bottom-nav-item" data-action="nav-recent"><span class="material-symbols-outlined">schedule</span><span>Недавние</span></button>' +
+  '<button class="bottom-nav-item" data-action="nav-activity"><span class="material-symbols-outlined">list_alt</span><span>Активность</span></button>' +
+  '<button class="bottom-nav-item" data-action="nav-settings"><span class="material-symbols-outlined">settings</span><span>Настройки</span></button>' +
+  '<button class="bottom-nav-item" data-action="upload-btn"><span class="material-symbols-outlined">upload</span><span>Загрузить</span></button>' +
   '</nav>' +
   '<aside id="preview-panel" class="preview-panel">' +
   '<div id="preview-resizer" class="preview-resizer"></div>' +
@@ -3745,17 +3801,17 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'if(currentView!=="grid")currentView="list";' +
   'function encPath(p){return (p||"").split("/").filter(Boolean).map(encodeURIComponent).join("/");}' +
   'function decPath(p){return (p||"").split("/").filter(Boolean).map(function(x){try{return decodeURIComponent(x);}catch(e){return x;}}).join("/");}' +
-  'function hashForPath(p){if(p==="__dashboard__")return "dashboard";if(p==="__recent__")return "recent";if(p==="__url_history__")return "url-history";if(p==="__settings__")return "settings";return p?"files/"+encPath(p):"files";}' +
-  'function parseHash(){var h=(window.location.hash||"").replace(/^#/,"");if(!h)return null;if(h==="dashboard"||h==="__dashboard__")return {type:"dashboard"};if(h==="recent"||h==="__recent__")return {type:"recent"};if(h==="url-history"||h==="__url_history__")return {type:"url-history"};if(h==="settings"||h==="__settings__")return {type:"settings"};if(h==="files")return {type:"files",path:""};if(h.indexOf("files/")===0)return {type:"files",path:decPath(h.slice(6))};return {type:"files",path:decPath(h)};}' +
+  'function hashForPath(p){if(p==="__dashboard__")return "dashboard";if(p==="__recent__")return "recent";if(p==="__activity__")return "activity";if(p==="__settings__")return "settings";return p?"files/"+encPath(p):"files";}' +
+  'function parseHash(){var h=(window.location.hash||"").replace(/^#/,"");if(!h)return null;if(h==="dashboard"||h==="__dashboard__")return {type:"dashboard"};if(h==="recent"||h==="__recent__")return {type:"recent"};if(h==="activity"||h==="__activity__")return {type:"activity"};if(h==="settings"||h==="__settings__")return {type:"settings"};if(h==="files")return {type:"files",path:""};if(h.indexOf("files/")===0)return {type:"files",path:decPath(h.slice(6))};return {type:"files",path:decPath(h)};}' +
   'function savePath(p){try{localStorage.setItem("fm-path",p);if(!window._ignoreHash){var next="#"+hashForPath(p);if(window.location.hash!==next)window.location.hash=next;}}catch(e){}}' +
   'function handleHash(){' +
   '  var h=parseHash();if(!h)h={type:"dashboard"};' +
-  '  var target=h.type==="dashboard"?"__dashboard__":h.type==="recent"?"__recent__":h.type==="url-history"?"__url_history__":h.type==="settings"?"__settings__":(h.path||"");' +
+  '  var target=h.type==="dashboard"?"__dashboard__":h.type==="recent"?"__recent__":h.type==="activity"?"__activity__":h.type==="settings"?"__settings__":(h.path||"");' +
   '  if(target===currentPath)return;' +
   '  window._ignoreHash=true;' +
   '  if(h.type==="dashboard")loadDashboard();' +
   '  else if(h.type==="recent")loadRecent();' +
-  '  else if(h.type==="url-history")loadUrlHistory();' +
+  '  else if(h.type==="activity")loadActivityLog();' +
   '  else if(h.type==="settings")loadCloudSettings();' +
   '  else navigateTo(h.path||"");' +
   '  window._ignoreHash=false;' +
@@ -3837,7 +3893,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function clearSelection(refresh){selectedItems={};updateSelectionBar();if(refresh)renderContent(lastEntries,lastBase);}' +
   'function toggleSelect(fp,name,isDir,checked){if(checked)selectedItems[fp]={fp:fp,name:name,isDir:isDir};else delete selectedItems[fp];updateSelectionBar();renderContent(lastEntries,lastBase);}' +
   'function selectAllVisible(checked){selectedItems={};if(checked){for(var i=0;i<lastEntries.length;i++){var f=lastEntries[i];var fp=lastBase?(lastBase+"/"+f.name):f.name;selectedItems[fp]={fp:fp,name:f.name,isDir:!!f.isDir};}}updateSelectionBar();renderContent(lastEntries,lastBase);}' +
-  'function refreshCurrent(){if(currentPath==="__dashboard__")loadDashboard();else if(currentPath==="__recent__")loadRecent();else if(currentPath==="__url_history__")loadUrlHistory();else if(currentPath==="__settings__")loadCloudSettings();else loadDir();}' +
+  'function refreshCurrent(){if(currentPath==="__dashboard__")loadDashboard();else if(currentPath==="__recent__")loadRecent();else if(currentPath==="__activity__")loadActivityLog();else if(currentPath==="__settings__")loadCloudSettings();else loadDir();}' +
   'function goBackPath(){var p=activePath();if(!p)return;navigateTo(parentPath(p));}' +
   'function allVisibleSelected(files,base){if(!files.length)return false;for(var i=0;i<files.length;i++){var fp=base?(base+"/"+files[i].name):files[i].name;if(!selectedItems[fp])return false;}return true;}' +
   'function selectedPayload(){return selectedList().map(function(x){return {path:x.fp,isDir:x.isDir};});}' +
@@ -3905,7 +3961,15 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
 
   /* ── NAVIGATE & LOAD ── */
-  'function navigateTo(p){p=p||"";activeFilter="all";if(p!==currentPath)clearSelection(false);currentPath=p;savePath(p);loadDir();}' +
+  'function navigateTo(p){' +
+  '  p=p||"";' +
+  '  var s=document.getElementById("search-inp");if(s)s.value="";' +
+  '  activeFilter="all";' +
+  '  if(p!==currentPath)clearSelection(false);' +
+  '  currentPath=p;' +
+  '  savePath(p);' +
+  '  loadDir();' +
+  '}' +
   'function loadDir(){' +
   '  setSectionChrome("files");' +
   '  setNavActive("nav-files");' +
@@ -3938,12 +4002,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   "  h+='</div>';" +
   "  h+='</section>';" +
   "  h+='<section style=\"display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:18px\">';" +
-  "  h+=dashActionCard(\"history\",\"История URL\",\"Повторы и медиа-задачи\",\"nav-url-history\",\"#ffd166\");" +
+  "  h+=dashActionCard(\"list_alt\",\"Активность\",\"Лог действий с файлами\",\"nav-activity\",\"#ffd166\");" +
   "  h+=dashActionCard(\"settings\",\"Настройки\",\"Пароль, токен, аккаунты\",\"nav-settings\",\"#8ff0a4\");" +
   "  h+=dashActionCard(\"create_new_folder\",\"Новая папка\",\"Сразу перейти в файлы\",\"nav-files\",\"#9ddcff\");" +
   "  h+='</section>';" +
   "  h+='<section style=\"display:grid;grid-template-columns:minmax(0,1fr);gap:18px;margin-top:18px\">';" +
-  "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px\"><div style=\"font-size:18px;font-weight:900;color:#fff;margin-bottom:14px\">Сейчас</div><div style=\"display:grid;gap:10px\"><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Активные загрузки</span><b id=\"dash-active-count\">0</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>История URL</span><b id=\"dash-history-count\">...</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Текущий режим</span><b>Cloud</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Версия сайта</span><b style=\"color:#d2bbff\">v' + SITE_VERSION + '</b></div></div></div>';" +
+  "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px\"><div style=\"font-size:18px;font-weight:900;color:#fff;margin-bottom:14px\">Сейчас</div><div style=\"display:grid;gap:10px\"><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Активные загрузки</span><b id=\"dash-active-count\">0</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Текущий режим</span><b>Cloud</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Версия сайта</span><b style=\"color:#d2bbff\">v' + SITE_VERSION + '</b></div></div></div>';" +
   "  h+='</section>';" +
   "  document.getElementById(\"file-area\").innerHTML=h;" +
   "  fetch(\"/api/fm/list?path=\").then(function(r){return r.json();}).then(function(d){" +
@@ -3956,7 +4020,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   "    var list=document.getElementById(\"dash-recent-list\");if(list)list.innerHTML=files.length?files.map(function(f){var fp=f.name;return '<div data-action=\"preview\" data-fp=\"'+H(fp)+'\" data-name=\"'+H(f.name)+'\" style=\"display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #2d2936;border-radius:14px;cursor:pointer;background:#161619\">'+fileThumb(f.name,fp,false)+'<div style=\"min-width:0;flex:1\"><div style=\"font-size:13px;font-weight:800;color:#e4e1e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\">'+H(f.name)+'</div><div style=\"font-size:11px;color:#958ea0\">'+fmtSize(f.size)+' · '+fmtDate(f.mtime)+'</div></div></div>';}).join(\"\"):'<div style=\"color:#494454;font-size:13px\">Пока нет файлов</div>';" +
   "  }).catch(function(){});" +
   "  fetch(\"/api/downloads\").then(function(r){return r.json();}).then(function(items){var el=document.getElementById(\"dash-active-count\");if(el)el.textContent=Array.isArray(items)?items.length:0;}).catch(function(){});" +
-  "  fetch(\"/api/fm/media-jobs?scope=history\").then(function(r){return r.json();}).then(function(items){var el=document.getElementById(\"dash-history-count\");if(el)el.textContent=Array.isArray(items)?items.length:0;}).catch(function(){});" +
   "}" +
   "function dashActionCard(icon,title,body,action,color){return '<button class=\"card\" data-action=\"'+action+'\" style=\"margin:0;padding:18px;border-radius:20px;text-align:left;cursor:pointer;background:#18181b;color:#e4e1e6;min-height:132px\"><span class=\"material-symbols-outlined\" style=\"font-size:30px;color:'+color+'\">'+icon+'</span><div style=\"font-size:16px;font-weight:900;margin-top:18px\">'+title+'</div><div style=\"font-size:12px;color:#958ea0;margin-top:5px;line-height:1.4\">'+body+'</div></button>';}" +
   'function addDashboardUrlDownload(){var url=document.getElementById("dash-url-inp").value.trim(),name=document.getElementById("dash-name-inp").value.trim(),mode=document.getElementById("dash-mode-inp").value,st=document.getElementById("dash-url-status");if(!url){st.textContent="Вставь URL";return;}var media=mode!=="file";if(media)name=stripInputMediaExt(name);st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:"",mode:mode})}).then(function(r){return r.json();}).then(function(d){if(d.ok){var gid=d.gid||(d.job&&d.job.id);if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,"");}document.getElementById("dash-url-inp").value="";document.getElementById("dash-name-inp").value="";st.textContent="Загрузка запущена";loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
@@ -3999,7 +4062,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function renderContent(entries,base){' +
   '  lastEntries=entries||[];lastBase=(base!==undefined)?base:currentPath;' +
   '  var filtered=getFilteredEntries(lastEntries);' +
-  '  var isFiles=(currentPath!=="__dashboard__"&&currentPath!=="__recent__"&&currentPath!=="__url_history__"&&currentPath!=="__settings__");' +
+  '  var isFiles=(currentPath!=="__dashboard__"&&currentPath!=="__recent__"&&currentPath!=="__settings__"&&currentPath!=="__activity__");' +
   '  var filterHtml="";' +
   '  if(isFiles){' +
   '    filterHtml=\'<div class="filter-bar" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">\' +' +
@@ -4036,16 +4099,55 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\\u041e\\u0448\\u0438\\u0431\\u043a\\u0430</div>\';});' +
   '}' +
 
-  'function loadUrlHistory(){' +
-  '  clearSelection(false);setSectionChrome("url-history");currentPath="__url_history__";savePath("__url_history__");setNavActive("nav-url-history");renderBreadcrumb("");' +
-  '  document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">\\u0417\\u0430\\u0433\\u0440\\u0443\\u0437\\u043a\\u0430 \\u0438\\u0441\\u0442\\u043e\\u0440\\u0438\\u0438...</div>\';' +
-  '  fetch("/api/fm/media-jobs?scope=history").then(function(r){return r.json();})' +
-  '  .then(function(items){items=Array.isArray(items)?items:[];if(!items.length){document.getElementById("file-area").innerHTML=\'<div style="color:#494454;padding:40px;text-align:center">\\u0418\\u0441\\u0442\\u043e\\u0440\\u0438\\u044f URL \\u043f\\u043e\\u043a\\u0430 \\u043f\\u0443\\u0441\\u0442\\u0430\\u044f</div>\';return;}var h=\'<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px"><div style="font-size:18px;font-weight:800;color:#e4e1e6">\\u0418\\u0441\\u0442\\u043e\\u0440\\u0438\\u044f URL-\\u0437\\u0430\\u0433\\u0440\\u0443\\u0437\\u043e\\u043a</div><button class="btn-ghost" data-action="nav-home"><span class="material-symbols-outlined">folder</span> \\u041c\\u043e\\u0438 \\u0444\\u0430\\u0439\\u043b\\u044b</button></div>\';h+=\'<div style="border:1px solid #494454;border-radius:12px;overflow:hidden">\';for(var i=0;i<items.length;i++){var x=items[i],ok=x.status==="complete",bad=x.status==="error"||x.status==="cancelled";h+=\'<div class="history-row"><div style="min-width:0"><div class="history-name">\'+H(x.name||x.file||"Media download")+\'</div><div class="history-meta">\'+H(x.url||"")+\'</div></div><div class="history-meta">\'+H((x.mode||"media")+" / "+(x.status||"unknown"))+\'</div><div class="history-meta">\'+Math.round(x.progress||0)+\'%</div><div style="display:flex;gap:8px;justify-content:flex-end">\';h+=\'<button class="btn-ghost" data-action="retry-url" data-url="\'+H(x.url||"")+\'" title="Повторить"><span class="material-symbols-outlined">refresh</span></button>\';if(ok)h+=\'<button class="btn-ghost" data-action="navigate" data-fp="\'+H(x.folder||"")+\'" title="Open folder"><span class="material-symbols-outlined">folder_open</span></button>\';if(bad&&x.error)h+=\'<button class="btn-ghost" data-action="show-history-error" data-error="\'+H(x.error)+\'" title="Error"><span class="material-symbols-outlined">error</span></button>\';h+=\'</div></div>\';}h+=\'</div>\';document.getElementById("file-area").innerHTML=h;})' +
-  '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\\u041e\\u0448\\u0438\\u0431\\u043a\\u0430 \\u0438\\u0441\\u0442\\u043e\\u0440\\u0438\\u0438</div>\';});' +
+  'function getActivityActionStyle(action){' +
+  '  var icon="info",color="#958ea0";' +
+  '  if(action==="Создание папки"){icon="create_new_folder";color="#10b981";}' +
+  '  else if(action==="Переименование"){icon="edit";color="#ffd166";}' +
+  '  else if(action==="Удаление"){icon="delete";color="#ffb4ab";}' +
+  '  else if(action==="Перемещение"){icon="drive_file_move";color="#a078ff";}' +
+  '  else if(action==="Скачивание"){icon="download";color="#06b6d4";}' +
+  '  else if(action==="Загрузка с ПК"){icon="upload_file";color="#9ddcff";}' +
+  '  else if(action==="Архивация"){icon="folder_zip";color="#f59e0b";}' +
+  '  else if(action==="Доступ"){icon="link";color="#38bdf8";}' +
+  '  else if(action==="Загрузка по ссылке"){icon="cloud_download";color="#d2bbff";}' +
+  '  return {icon:icon,color:color};' +
+  '}' +
+  'function loadActivityLog(){' +
+  '  clearSelection(false);setSectionChrome("activity");currentPath="__activity__";savePath("__activity__");setNavActive("nav-activity");renderBreadcrumb("");' +
+  '  document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">Загрузка истории активности...</div>\';' +
+  '  fetch("/api/activity").then(function(r){return r.json();})' +
+  '  .then(function(items){' +
+  '    items=Array.isArray(items)?items:[];' +
+  '    if(!items.length){' +
+  '      document.getElementById("file-area").innerHTML=\'<div style="color:#494454;padding:40px;text-align:center">История активности пустая</div>\';' +
+  '      return;' +
+  '    }' +
+  '    var h=\'<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px"><div style="text-align:left;"><div style="font-size:20px;font-weight:900;color:#e4e1e6">История активности</div><div style="font-size:13px;color:#958ea0;margin-top:2px">Лог последних действий с файлами и папками</div></div><button class="btn-ghost" data-action="nav-home"><span class="material-symbols-outlined">folder</span> Мои файлы</button></div>\';' +
+  '    h+=\'<div style="display:flex;flex-direction:column;gap:10px">\';' +
+  '    for(var i=0;i<items.length;i++){' +
+  '      var x=items[i],style=getActivityActionStyle(x.action);' +
+  '      h+=\'<div class="history-row" style="background:#1b1b1e;border:1px solid #2d2936;border-radius:14px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px;transition:all .2s">\' +' +
+  '        \'<div style="display:flex;align-items:center;gap:14px;min-width:0;flex:1">\' +' +
+  '          \'<div style="width:40px;height:40px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:\\\' + style.color + \\\'"><span class="material-symbols-outlined" style="font-size:22px">\\\' + style.icon + \\\'</span></div>\' +' +
+  '          \'<div style="min-width:0;text-align:left;">\' +' +
+  '            \'<div style="font-size:14px;font-weight:700;color:#e4e1e6">\\\' + H(x.action) + \\\'</div>\' +' +
+  '            \'<div style="font-size:12px;color:#cbc3d7;margin-top:4px;word-break:break-all">\\\' + H(x.details||"") + \\\'</div>\' +' +
+  '          \'</div>\' +' +
+  '        \'</div>\' +' +
+  '        \'<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;text-align:right">\' +' +
+  '          \'<span style="font-size:11px;font-weight:600;color:\\\' + style.color + \\\';background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);padding:2px 8px;border-radius:6px">@\\\' + H(x.username) + \\\'</span>\' +' +
+  '          \'<span style="font-size:11px;color:#958ea0;margin-top:2px">\\\' + fmtDateTime(x.timestamp) + \\\'</span>\' +' +
+  '        \'</div>\' +' +
+  '      \'</div>\';' +
+  '    }' +
+  '    h+=\'</div>\';' +
+  '    document.getElementById("file-area").innerHTML=h;' +
+  '  })' +
+  '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">Ошибка загрузки активности</div>\';});' +
   '}' +
 
   'function doSearch(q){' +
-  '  if(currentPath==="__dashboard__"||currentPath==="__recent__"||currentPath==="__url_history__"||currentPath==="__settings__")return;' +
+  '  if(currentPath==="__dashboard__"||currentPath==="__recent__"||currentPath==="__activity__"||currentPath==="__settings__")return;' +
   '  if(!q.trim())return navigateTo(activePath());' +
   '  clearSelection(false);' +
   '  document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">Поиск...</div>\';' +
@@ -4451,7 +4553,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="nav-home"||action==="nav-dashboard"){loadDashboard();}' +
   '  else if(action==="nav-files"){navigateTo("");}' +
   '  else if(action==="nav-recent"){loadRecent();}' +
-  '  else if(action==="nav-url-history"){loadUrlHistory();}' +
+  '  else if(action==="nav-activity"){loadActivityLog();}' +
   '  else if(action==="nav-settings"){loadCloudSettings();}' +
   '  else if(action==="settings-save-retention"){saveCloudRetention();}' +
   '  else if(action==="settings-save-profile"){saveCloudProfile();}' +
@@ -4670,7 +4772,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  });' +
   '})();' +
   'applyTheme();' +
-  '(function(){var h=parseHash();if(h){if(h.type==="dashboard")loadDashboard();else if(h.type==="recent")loadRecent();else if(h.type==="url-history")loadUrlHistory();else if(h.type==="settings")loadCloudSettings();else navigateTo(h.path||"");return;}var saved=localStorage.getItem("fm-path");if(saved===null)loadDashboard();else if(saved==="__dashboard__")loadDashboard();else if(saved==="__recent__")loadRecent();else if(saved==="__url_history__")loadUrlHistory();else if(saved==="__settings__")loadCloudSettings();else navigateTo(saved||"");})();' +
+  '(function(){var h=parseHash();if(h){if(h.type==="dashboard")loadDashboard();else if(h.type==="recent")loadRecent();else if(h.type==="activity")loadActivityLog();else if(h.type==="settings")loadCloudSettings();else navigateTo(h.path||"");return;}var saved=localStorage.getItem("fm-path");if(saved===null)loadDashboard();else if(saved==="__dashboard__")loadDashboard();else if(saved==="__recent__")loadRecent();else if(saved==="__activity__")loadActivityLog();else if(saved==="__settings__")loadCloudSettings();else navigateTo(saved||"");})();' +
   'loadDisk();' +
   'loadTransfers();' +
   'checkConnection(true);' +
