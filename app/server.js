@@ -3451,7 +3451,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.btn-primary{background:var(--accent-color);color:#fff;border-radius:9999px;padding:10px 24px;font-weight:700;font-size:14px;border:none;cursor:pointer;transition:transform var(--m3-spring) .35s,box-shadow .25s,opacity .2s;min-height:44px;letter-spacing:.01em}' +
   '.btn-primary:hover{opacity:.92;transform:translateY(-2px) scale(1.04);box-shadow:0 8px 28px var(--accent-glow)}' +
   '.btn-primary:active{transform:scale(.97);transition-duration:100ms}' +
-  '.btn-ghost{background:var(--surf-hi);border:none;color:var(--on-surf);border-radius:9999px;padding:8px 18px;font-weight:700;font-size:13px;cursor:pointer;transition:background .2s,transform var(--m3-spring) .32s,box-shadow .2s;min-height:40px}' +
+  '.btn-ghost{background:var(--surf-hi);border:none;color:var(--on-surf);border-radius:9999px;padding:8px 18px;font-weight:700;font-size:13px;cursor:pointer;transition:background .2s,transform var(--m3-spring) .32s,box-shadow .2s;min-height:40px;display:inline-flex;align-items:center;justify-content:center;gap:6px}' +
   '.btn-ghost:hover{background:color-mix(in srgb,var(--accent-color) 18%,var(--surf-hi));transform:translateY(-1px);box-shadow:0 4px 14px rgba(0,0,0,.2)}' +
   '.btn-ghost:active{transform:scale(.97);transition-duration:100ms}' +
   '.nav-item{display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:9999px;cursor:pointer;color:var(--on-surf-var);font-size:13px;font-weight:600;transition:background .2s,color .2s,transform var(--m3-spring) .3s;text-decoration:none;margin:1px 8px}' +
@@ -3722,7 +3722,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.mobile-toolbar #breadcrumb{display:flex!important;width:100%!important;order:10!important;margin-top:4px!important;padding:8px 0!important;border-top:1px solid #1f1f22!important;overflow-x:auto!important;white-space:nowrap!important;scrollbar-width:none!important}' +
   '.mobile-toolbar #breadcrumb::-webkit-scrollbar{display:none}' +
   '.mobile-toolbar>div[style*="position:relative"]{display:block!important;flex:1;min-width:0}' +
-  '#search-inp{width:100%!important;height:58px;border-radius:9999px!important;background:var(--surf-hi)!important;border:none!important;color:var(--on-surf)!important;font-size:16px!important;padding-left:54px!important}' +
+  '#search-inp{width:100%!important;height:58px;border-radius:9999px!important;background:var(--surf-hi)!important;border:none!important;outline:none!important;color:var(--on-surf)!important;font-size:16px!important;padding-left:54px!important;font-family:Manrope,sans-serif!important}' +
   '#search-inp::placeholder{color:var(--on-surf-var)}' +
   '#search-inp::-webkit-search-decoration,#search-inp::-webkit-search-cancel-button,#search-inp::-webkit-search-results-button,#search-inp::-webkit-search-results-decoration{display:none;-webkit-appearance:none}' +
   '.mobile-toolbar>div[style*="position:relative"] span{left:20px!important;color:var(--on-surf-var)!important}' +
@@ -3868,12 +3868,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<button id="go-back-btn" class="btn-ghost" data-action="go-back" data-drop-path="" title="Назад" style="padding:6px 10px;flex-shrink:0"><span class="material-symbols-outlined">arrow_back</span></button>' +
   '<div id="breadcrumb" style="flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;font-size:14px;color:var(--on-surf-var)"></div>' +
   '<div id="toolbar-search-wrap" style="position:relative;flex-shrink:0">' +
-  '<input id="search-inp" type="search" class="inp" placeholder="Search files, folders..." style="width:260px;padding:10px 16px 10px 44px;border-radius:9999px;background:var(--surf-hi);border:none;border-bottom:none;font-size:14px;height:42px" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="cloud-search-x7k">' +
+  '<input id="search-inp" type="text" role="searchbox" placeholder="Search files, folders..." style="width:260px;padding:10px 16px 10px 44px;border-radius:9999px;background:var(--surf-hi);border:none;outline:none;font-size:14px;height:42px;color:var(--on-surf);font-family:Manrope,sans-serif" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-form-type="other" data-lpignore="true" data-1p-ignore tabindex="0">' +
   '<span class="material-symbols-outlined" style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--accent-light);font-size:20px;pointer-events:none">search</span>' +
   '</div>' +
-  '<button id="toolbar-view-list" class="btn-ghost" data-action="view-list" title="Список" style="width:40px;height:40px;padding:0;flex-shrink:0"><span class="material-symbols-outlined">view_list</span></button>' +
-  '<button id="toolbar-view-grid" class="btn-ghost" data-action="view-grid" title="Сетка" style="width:40px;height:40px;padding:0;flex-shrink:0"><span class="material-symbols-outlined">grid_view</span></button>' +
-  '<button id="toolbar-theme" class="btn-ghost" data-action="toggle-theme" title="Theme" style="width:40px;height:40px;padding:0;flex-shrink:0"><span class="material-symbols-outlined">contrast</span></button>' +
+  '<button id="toolbar-view-list" class="btn-ghost" data-action="view-list" title="Список" style="width:40px;height:40px;padding:0;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center"><span class="material-symbols-outlined" style="font-size:20px">view_list</span></button>' +
+  '<button id="toolbar-view-grid" class="btn-ghost" data-action="view-grid" title="Сетка" style="width:40px;height:40px;padding:0;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center"><span class="material-symbols-outlined" style="font-size:20px">grid_view</span></button>' +
+  '<button id="toolbar-theme" class="btn-ghost" data-action="toggle-theme" title="Тема" style="width:40px;height:40px;padding:0;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center"><span class="material-symbols-outlined" style="font-size:20px">contrast</span></button>' +
   '<button id="toolbar-upload" class="btn-primary" data-action="upload-btn" style="flex-shrink:0;gap:6px;display:flex;align-items:center"><span class="material-symbols-outlined" style="font-size:18px;font-variation-settings:\'FILL\' 1,\'wght\' 700,\'GRAD\' 0,\'opsz\' 20">upload</span>Загрузить</button>' +
   '</div>' +
   '<section id="mobile-storage" class="card" style="display:none">' +
@@ -4434,15 +4434,15 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '      var x=items[i],style=getActivityActionStyle(x.action);' +
   '      h+=\'<div class="history-row" style="background:#1b1b1e;border:1px solid #2d2936;border-radius:14px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px;transition:all .2s">\' +' +
   '        \'<div style="display:flex;align-items:center;gap:14px;min-width:0;flex:1">\' +' +
-  '          \'<div style="width:40px;height:40px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:\\\' + style.color + \\\'"><span class="material-symbols-outlined" style="font-size:22px">\\\' + style.icon + \\\'</span></div>\' +' +
+  '          \'<div style="width:40px;height:40px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:\' + style.color + \'"><span class="material-symbols-outlined" style="font-size:22px">\' + style.icon + \'</span></div>\' +' +
   '          \'<div style="min-width:0;text-align:left;">\' +' +
-  '            \'<div style="font-size:14px;font-weight:700;color:#e4e1e6">\\\' + H(x.action) + \\\'</div>\' +' +
-  '            \'<div style="font-size:12px;color:#cbc3d7;margin-top:4px;word-break:break-all">\\\' + H(x.details||"") + \\\'</div>\' +' +
+  '            \'<div style="font-size:14px;font-weight:700;color:#e4e1e6">\' + H(x.action) + \'</div>\' +' +
+  '            \'<div style="font-size:12px;color:#cbc3d7;margin-top:4px;word-break:break-all">\' + H(x.details||"") + \'</div>\' +' +
   '          \'</div>\' +' +
   '        \'</div>\' +' +
   '        \'<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;text-align:right">\' +' +
-  '          \'<span style="font-size:11px;font-weight:600;color:\\\' + style.color + \\\';background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);padding:2px 8px;border-radius:6px">@\\\' + H(x.username) + \\\'</span>\' +' +
-  '          \'<span style="font-size:11px;color:#958ea0;margin-top:2px">\\\' + fmtDateTime(x.timestamp) + \\\'</span>\' +' +
+  '          \'<span style="font-size:11px;font-weight:600;color:\' + style.color + \';background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);padding:2px 8px;border-radius:6px">@\' + H(x.username) + \'</span>\' +' +
+  '          \'<span style="font-size:11px;color:#958ea0;margin-top:2px">\' + fmtDateTime(x.timestamp) + \'</span>\' +' +
   '        \'</div>\' +' +
   '      \'</div>\';' +
   '    }' +
