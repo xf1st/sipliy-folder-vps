@@ -54,6 +54,21 @@ function shareIsExpired(s) {
 
 const TOKENS_FILE = '/opt/vps-downloader/tokens.json';
 const SETTINGS_FILE = '/opt/vps-downloader/settings.json';
+const TG_TOKEN = '8981938565:AAGrVbZwhuuw_AEFauvwr4tWVVhOgUCHNQ4';
+const TG_BOT_NAME = 'SiplyiFolderUpload_bot';
+const TG_USERS_FILE = '/opt/vps-downloader/tg-users.json';
+function loadTgUsers() {
+  try { return JSON.parse(fs.readFileSync(TG_USERS_FILE, 'utf8')); }
+  catch { return {}; }
+}
+function saveTgUsers(t) { fs.writeFileSync(TG_USERS_FILE, JSON.stringify(t)); }
+async function tgApi(method, params = {}) {
+  const r = await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, params, { timeout: 35000 });
+  return r.data;
+}
+async function tgSend(chatId, text) {
+  return tgApi('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true });
+}
 
 function loadTokens() {
   try { return JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8')); }
@@ -76,7 +91,7 @@ const VT_API = 'https://www.virustotal.com/api/v3';
 
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.4.5';
+const SITE_VERSION = '2.5.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -1218,7 +1233,141 @@ app.delete('/api/files/:file', auth, (req, res) => {
   catch { res.status(404).json({ error: 'Not found' }); }
 });
 
+// ─── Telegram API ─────────────────────────────────────────
+app.get('/api/tg/status', auth, (req, res) => {
+  const tgUsers = loadTgUsers();
+  const entry = Object.entries(tgUsers).find(([, v]) => v.username === req.session.user);
+  if (!entry) return res.json({ linked: false });
+  res.json({ linked: true, telegramId: entry[0], connectedAt: entry[1].connectedAt, firstName: entry[1].firstName || '' });
+});
+
+app.get('/api/tg/connect-link', auth, (req, res) => {
+  const tokens = loadTokens();
+  const token = tokens[req.session.user];
+  if (!token) return res.status(400).json({ error: 'Нет токена. Сначала получите токен расширения.' });
+  res.json({ url: `https://t.me/${TG_BOT_NAME}?start=${token}` });
+});
+
+app.post('/api/tg/unlink', auth, (req, res) => {
+  const tgUsers = loadTgUsers();
+  const key = Object.keys(tgUsers).find(k => tgUsers[k].username === req.session.user);
+  if (key) { delete tgUsers[key]; saveTgUsers(tgUsers); }
+  res.json({ ok: true });
+});
+
 app.listen(PORT, () => console.log('Running on port ' + PORT));
+
+// ─── Telegram bot polling ─────────────────────────────────
+let tgOffset = 0;
+async function handleTgUpdate(update) {
+  const msg = update.message;
+  if (!msg) return;
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
+  const text = (msg.text || '').trim();
+  const tgUsers = loadTgUsers();
+
+  // /start [token]
+  if (text.startsWith('/start')) {
+    const token = text.slice(6).trim();
+    if (!token) {
+      await tgSend(chatId, '👋 Это бот <b>Sipliy Folder VPS</b>.\n\nЧтобы подключить аккаунт:\n1. Откройте <a href="https://sipliyfolder.ru/cloud">sipliyfolder.ru/cloud</a>\n2. Настройки → Токен расширения → Показать\n3. Нажмите <b>Подключить Telegram</b>\n\nИли вручную: /start ВАШ_ТОКЕН');
+      return;
+    }
+    const tokens = loadTokens();
+    const username = Object.keys(tokens).find(u => tokens[u] === token);
+    if (!username) {
+      await tgSend(chatId, '❌ Неверный токен. Проверьте в Настройках → Токен расширения на sipliyfolder.ru');
+      return;
+    }
+    tgUsers[fromId] = { username, chatId, firstName: msg.from.first_name || '', connectedAt: new Date().toISOString() };
+    saveTgUsers(tgUsers);
+    const users = loadUsers();
+    const label = (users[username] && users[username].label) || username;
+    await tgSend(chatId, `✅ Подключено к аккаунту <b>${label}</b>!\n\nОтправляйте файлы сюда — они сохранятся в ваше хранилище на VPS.\n\n📁 Документы, фото, видео, аудио — всё принимаю.\n🔗 <a href="https://sipliyfolder.ru/cloud">Открыть хранилище</a>`);
+    return;
+  }
+  if (text === '/status') {
+    const u = tgUsers[fromId];
+    if (!u) { await tgSend(chatId, '❌ Не подключён. Введите /start'); return; }
+    await tgSend(chatId, `✅ Аккаунт: <b>${u.username}</b>\n📅 Подключён: ${new Date(u.connectedAt).toLocaleString('ru')}\n\nОтправьте файл — сохраню на VPS.`);
+    return;
+  }
+  if (text === '/disconnect') {
+    delete tgUsers[fromId];
+    saveTgUsers(tgUsers);
+    await tgSend(chatId, '🔌 Аккаунт отключён.');
+    return;
+  }
+
+  const user = tgUsers[fromId];
+  if (!user) {
+    if (text && !text.startsWith('/')) await tgSend(chatId, '❌ Сначала подключите аккаунт: /start');
+    return;
+  }
+
+  // Определяем файл из сообщения
+  let fileId, fileName;
+  if (msg.document) {
+    fileId = msg.document.file_id;
+    fileName = msg.document.file_name || ('file_' + Date.now());
+  } else if (msg.photo) {
+    fileId = msg.photo[msg.photo.length - 1].file_id;
+    fileName = 'photo_' + Date.now() + '.jpg';
+  } else if (msg.video) {
+    fileId = msg.video.file_id;
+    fileName = msg.video.file_name || ('video_' + Date.now() + '.mp4');
+  } else if (msg.audio) {
+    fileId = msg.audio.file_id;
+    fileName = msg.audio.file_name || ('audio_' + Date.now() + '.mp3');
+  } else if (msg.voice) {
+    fileId = msg.voice.file_id;
+    fileName = 'voice_' + Date.now() + '.ogg';
+  }
+  if (!fileId) {
+    if (text && !text.startsWith('/')) await tgSend(chatId, '📁 Отправьте файл, фото, видео или аудио.');
+    return;
+  }
+
+  try {
+    const fileInfo = await tgApi('getFile', { file_id: fileId });
+    const filePath = fileInfo.result.file_path;
+    const dlUrl = `https://api.telegram.org/file/bot${TG_TOKEN}/${filePath}`;
+    const dir = userDir(user.username);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    let safeName = fileName.replace(/[/\\:*?"<>|]/g, '_');
+    let dest = path.join(dir, safeName);
+    if (fs.existsSync(dest)) {
+      const ext = path.extname(safeName);
+      const base = path.basename(safeName, ext);
+      dest = path.join(dir, base + '_' + Date.now() + ext);
+      safeName = path.basename(dest);
+    }
+    const resp = await axios.get(dlUrl, { responseType: 'stream', timeout: 120000 });
+    const writer = fs.createWriteStream(dest);
+    resp.data.pipe(writer);
+    await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
+    const stat = fs.statSync(dest);
+    await tgSend(chatId, `✅ <b>${safeName}</b>\n📦 ${fmtBytes(stat.size)}\n\n<a href="https://sipliyfolder.ru/cloud">Открыть хранилище</a>`);
+  } catch (e) {
+    await tgSend(chatId, `❌ Ошибка: ${e.message}`);
+  }
+}
+async function tgPoll() {
+  let hadUpdates = false;
+  try {
+    const r = await tgApi('getUpdates', { offset: tgOffset, timeout: 25, allowed_updates: ['message'] });
+    if (r.ok && r.result && r.result.length) {
+      hadUpdates = true;
+      for (const upd of r.result) {
+        tgOffset = upd.update_id + 1;
+        handleTgUpdate(upd).catch(() => {});
+      }
+    }
+  } catch (e) {}
+  setTimeout(tgPoll, hadUpdates ? 300 : 5000);
+}
+tgPoll();
 
 // ─── File Manager helper ─────────────────────────────────
 function fmResolve(username, relPath) {
@@ -3175,6 +3324,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  root.style.setProperty("--accent-hover",t.hover);' +
   '  root.style.setProperty("--accent-bg",t.bg);' +
   '  root.style.setProperty("--accent-light",t.light);' +
+  '  root.style.setProperty("--accent-gradient","linear-gradient(135deg,"+t.color+","+t.hover+")");' +
   '}' +
   'applyAccentColor();' +
   '</script>' +
@@ -3258,7 +3408,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '#toast{display:none;position:fixed;right:24px;bottom:24px;z-index:650;width:min(380px,calc(100vw - 48px));background:#1f1f22;border:1px solid var(--accent-color);border-radius:12px;padding:10px 14px;box-shadow:0 8px 32px rgba(0,0,0,.55);animation:slideUp .18s ease both}' +
   '#connection-pill{display:none;position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:700;align-items:center;gap:8px;background:rgba(31,31,34,.94);border:1px solid var(--accent-color);border-radius:9999px;padding:8px 12px;color:#e4e1e6;font-size:12px;font-weight:800;box-shadow:0 10px 34px rgba(0,0,0,.42);backdrop-filter:blur(16px)}' +
   '#connection-pill.offline{display:flex;border-color:#93000a;color:#ffdad6}' +
-  '#connection-pill.checking{display:flex;border-color:#6650a4;color:#d2bbff}' +
+  '#connection-pill.checking{display:flex;border-color:var(--accent-color);color:var(--accent-light)}' +
   '#connection-pill .dot{width:8px;height:8px;border-radius:9999px;background:var(--accent-color);box-shadow:0 0 12px var(--accent-glow)}' +
   '#connection-pill.offline .dot{background:#ff5449;box-shadow:0 0 12px rgba(255,84,73,.8)}' +
   '.speed-result{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}' +
@@ -3273,13 +3423,13 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.preview-body{padding:14px;overflow:auto;flex:1;min-height:0}' +
   '.preview-body.media-preview{display:flex;align-items:center;justify-content:center;background:#0e0e10}' +
   '.preview-media{max-width:100%;max-height:72vh;border-radius:12px;object-fit:contain;display:block}' +
-  ':root{--plyr-color-main:var(--accent-color);--accent-color:#a078ff;--accent-glow:rgba(160,120,255,0.24);--accent-hover:#7c3aed;--accent-bg:rgba(160,120,255,0.14);--accent-light:#d2bbff}' +
+  ':root{--plyr-color-main:var(--accent-color);--accent-color:#a078ff;--accent-glow:rgba(160,120,255,0.24);--accent-hover:#7c3aed;--accent-bg:rgba(160,120,255,0.14);--accent-light:#d2bbff;--accent-gradient:linear-gradient(135deg,#a078ff,#7c3aed)}' +
   '.mv-stage .plyr,.preview-media-wrap .plyr{width:auto;max-width:100%;border-radius:14px;background:#000;box-shadow:0 24px 90px rgba(0,0,0,.38);overflow:hidden}' +
   '.mv-stage .plyr{max-height:100%;height:auto}' +
   '.mv-stage .plyr video,.preview-media-wrap .plyr video{width:100%;height:100%;max-width:100%;max-height:72vh;object-fit:contain}' +
   '.mv-stage .plyr__video-wrapper,.preview-media-wrap .plyr__video-wrapper{background:#000!important;aspect-ratio:auto!important}' +
   '.preview-media-wrap .plyr audio{width:100%}' +
-  '.plyr--full-ui input[type=range]{color:#a078ff}' +
+  '.plyr--full-ui input[type=range]{color:var(--accent-color)}' +
   '.preview-media-wrap{width:100%;min-height:260px;display:flex;align-items:center;justify-content:center}' +
   '.preview-media-wrap:fullscreen{background:#050506;padding:24px}' +
   '.preview-media-wrap:fullscreen .preview-media{max-width:100vw;max-height:100vh}' +
@@ -3416,6 +3566,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'body.light .filter-pill{background:#fff;border-color:#c9bfe0;color:#4a3b6e}' +
   'body.light .filter-pill:hover{background:var(--accent-bg);color:var(--accent-hover);border-color:var(--accent-color)}' +
   'body.light .filter-pill.active{background:var(--accent-color);color:#fff;border-color:var(--accent-color)}' +
+  '.settings-hero{position:relative;overflow:hidden;border:1px solid color-mix(in srgb,var(--accent-color) 42%,transparent);border-radius:24px;padding:24px;background:radial-gradient(circle at 14% -20%,var(--accent-bg),transparent 42%),linear-gradient(135deg,#201b2b,#151518 64%,#101114);box-shadow:0 24px 70px rgba(0,0,0,.28);margin-bottom:18px}' +
+  '.settings-hero-icon{width:52px;height:52px;border-radius:18px;background:var(--accent-gradient);display:flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 14px 36px var(--accent-glow)}' +
+  '.settings-card-title{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:900;margin-bottom:12px;color:#e4e1e6}' +
+  '.settings-card-title .material-symbols-outlined{color:var(--accent-light)}' +
+  '.settings-subtle{font-size:12px;color:#958ea0;line-height:1.45}' +
   '.settings-grid{display:grid;grid-template-columns:1fr;gap:18px}' +
   '@media(min-width:1024px){.settings-grid{grid-template-columns:1fr 1fr!important}}' +
   '.theme-card{display:flex;align-items:center;gap:12px;padding:14px;border-radius:14px;background:#0e0e11;border:1px solid #4a4455;cursor:pointer;transition:all .2s}' +
@@ -3425,6 +3580,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'body.light .theme-card:hover{background:var(--accent-bg)}' +
   'body.light .theme-card.active{background:var(--accent-bg);border-color:var(--accent-color)}' +
   '.theme-card-dot{width:22px;height:22px;border-radius:9999px;flex:0 0 auto}' +
+  'body.light .settings-hero{background:radial-gradient(circle at 14% -20%,var(--accent-bg),transparent 42%),linear-gradient(135deg,#fff,#f7f2ff);border-color:color-mix(in srgb,var(--accent-color) 38%,#e2d9f3);box-shadow:0 22px 58px rgba(62,45,92,.12)}' +
+  'body.light .settings-hero [style*="color:#fff"],body.light .theme-card [style*="color:#e4e1e6"]{color:#17151c!important}' +
+  'body.light .settings-card-title{color:#17151c}' +
+  'body.light .settings-subtle{color:#7b6f93}' +
   '.code-hl-kw{color:#ff79c6;font-weight:bold}' +
   '.code-hl-str{color:#f1fa8c}' +
   '.code-hl-cmt{color:#6272a4;font-style:italic}' +
@@ -3441,8 +3600,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'body{display:block!important;min-height:100dvh;overflow-x:hidden;padding:0 0 96px;background:#131315}' +
   '.mobile-topbar{display:flex;position:sticky;top:0;z-index:60;height:64px;align-items:center;justify-content:space-between;padding:0 20px;background:rgba(14,14,16,.86);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-bottom:1px solid rgba(53,52,55,.65)}' +
   '.mobile-brand{font-size:28px;line-height:34px;font-weight:800;color:#fff;letter-spacing:0;text-shadow:0 2px 12px rgba(0,0,0,.45)}' +
-  '.mobile-avatar{width:36px;height:36px;border-radius:9999px;background:#353437;border:1px solid #4a4455;display:flex;align-items:center;justify-content:center;color:#d2bbff}' +
-  '.mobile-icon-btn{width:44px;height:44px;border:0;border-radius:9999px;background:transparent;color:#8b5cf6;display:flex;align-items:center;justify-content:center}' +
+  '.mobile-avatar{width:36px;height:36px;border-radius:9999px;background:#353437;border:1px solid #4a4455;display:flex;align-items:center;justify-content:center;color:var(--accent-light)}' +
+  '.mobile-icon-btn{width:44px;height:44px;border:0;border-radius:9999px;background:transparent;color:var(--accent-color);display:flex;align-items:center;justify-content:center}' +
   '.mobile-icon-btn .material-symbols-outlined{font-size:32px}' +
   '.sidebar{display:none!important}' +
   '#main-area{min-height:calc(100dvh - 64px);display:block!important}' +
@@ -3471,7 +3630,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '#file-area>div[style*="background:#1b1b1e"]{background:transparent!important;border:0!important;border-radius:0!important;overflow:visible!important;display:flex!important;flex-direction:column!important;gap:14px!important}' +
   '.file-row:first-child{display:none!important}' +
   '.file-row{min-height:80px;gap:14px!important;padding:16px 22px!important;background:#0e0e10!important;border:1px solid rgba(31,31,34,.65)!important;border-radius:18px!important;box-shadow:none;transform:none!important}' +
-  '.file-row.selected{border-color:#7c3aed!important;box-shadow:0 0 0 2px rgba(124,58,237,.18);background:#1b1427!important}' +
+  '.file-row.selected{border-color:var(--accent-color)!important;box-shadow:0 0 0 2px var(--accent-glow);background:var(--accent-bg)!important}' +
   '.file-row>div:nth-child(4),.file-row>div:nth-child(5){display:none!important}' +
   '.file-row>div:nth-child(3){min-width:0;font-size:18px!important;line-height:24px!important;font-weight:700!important;color:#e5e1e4!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
   '.file-row>div:nth-child(3)::after{content:attr(data-meta);display:block;font-size:14px;line-height:20px;color:#ccc3d8;font-weight:600;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
@@ -3483,7 +3642,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.card{margin:0 20px 24px!important;padding:20px!important;border-radius:18px!important}' +
   '.mobile-bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:55;height:88px;align-items:center;justify-content:space-around;padding:8px 18px calc(8px + env(safe-area-inset-bottom));background:rgba(14,14,16,.88);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid rgba(53,52,55,.7)}' +
   '.bottom-nav-item{min-width:68px;height:64px;border:0;background:transparent;color:#8d8994;border-radius:22px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:12px;font-weight:800}' +
-  '.bottom-nav-item.active{background:#211734;color:#d2bbff}' +
+  '.bottom-nav-item.active{background:var(--accent-bg);color:var(--accent-light)}' +
   '.bottom-nav-item .material-symbols-outlined{font-size:30px}' +
   '#upload-panel{left:20px!important;right:20px!important;bottom:104px!important;width:auto!important;border-radius:18px!important}' +
   '#toast{left:20px!important;right:20px!important;bottom:24px!important;top:auto!important;width:auto!important}' +
@@ -3568,7 +3727,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   /* ── SIDEBAR ── */
   '<aside class="sidebar flex flex-col py-6 px-4 gap-2 sticky top-0 h-screen overflow-y-auto">' +
   '<div class="flex items-center gap-3 px-2 mb-6">' +
-  '<div style="background:linear-gradient(135deg,#a078ff,#6d3bd7);border-radius:10px;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-size:18px;"><span class="material-symbols-outlined">cloud</span></div>' +
+  '<div style="background:var(--accent-gradient);border-radius:10px;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 12px 28px var(--accent-glow)"><span class="material-symbols-outlined">cloud</span></div>' +
   '<div><div style="font-weight:700;font-size:16px;color:#e4e1e6">CloudSpace</div>' +
   '<div style="font-size:12px;color:#958ea0">' + safeUsername + '</div></div>' +
   '</div>' +
@@ -3580,13 +3739,13 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div class="nav-item" data-action="nav-activity"><span class="material-symbols-outlined">list_alt</span><span>Активность</span></div>' +
   '<div class="nav-item" data-action="nav-settings"><span class="material-symbols-outlined">settings</span><span>Настройки</span></div>' +
   '<div style="flex:1"></div>' +
-  '<div class="profile-card card" style="margin:0;padding:14px;background:linear-gradient(180deg,rgba(160,120,255,.12),rgba(27,27,29,.92));border-color:rgba(160,120,255,.32)">' +
+  '<div class="profile-card card" style="margin:0;padding:14px;background:linear-gradient(180deg,var(--accent-bg),rgba(27,27,29,.92));border-color:var(--accent-color)">' +
   '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
-  '<div id="profile-avatar-sidebar" style="width:38px;height:38px;border-radius:14px;background:linear-gradient(135deg,#a078ff,#6d3bd7);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:16px;flex:0 0 auto">' + safeProfileInitial + '</div>' +
+  '<div id="profile-avatar-sidebar" style="width:38px;height:38px;border-radius:14px;background:var(--accent-gradient);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:16px;flex:0 0 auto">' + safeProfileInitial + '</div>' +
   '<div style="min-width:0;flex:1"><div id="profile-label-sidebar" style="font-size:14px;font-weight:900;color:#e4e1e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + safeProfileLabel + '</div><div id="profile-meta-sidebar" style="font-size:11px;color:#958ea0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@' + safeUsername + ' &middot; ' + safeProfileRole + '</div></div>' +
   '<button class="btn-ghost" data-action="nav-settings" title="Профиль" style="width:34px;height:34px;min-height:34px;padding:0;display:flex;align-items:center;justify-content:center"><span class="material-symbols-outlined" style="font-size:20px">manage_accounts</span></button>' +
   '</div>' +
-  '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;padding:7px 9px;border:1px solid rgba(160,120,255,.22);border-radius:10px;background:rgba(14,14,16,.38)"><span style="font-size:10px;color:#958ea0;text-transform:uppercase;letter-spacing:.08em;font-weight:900">Версия сайта</span><span style="font-size:11px;color:#d2bbff;font-weight:900">v' + SITE_VERSION + '</span></div>' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;padding:7px 9px;border:1px solid color-mix(in srgb,var(--accent-color) 34%,transparent);border-radius:10px;background:var(--accent-bg)"><span style="font-size:10px;color:#958ea0;text-transform:uppercase;letter-spacing:.08em;font-weight:900">Версия сайта</span><span style="font-size:11px;color:var(--accent-light);font-weight:900">v' + SITE_VERSION + '</span></div>' +
   '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px"><span style="font-size:11px;color:#958ea0">Диск</span><span style="font-size:11px;color:#cbc3d7" id="disk-label">Загрузка...</span></div>' +
   '<div class="disk-bar"><div class="disk-fill" id="disk-fill" style="width:0%"></div></div>' +
   '</div>' +
@@ -3597,14 +3756,14 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div class="desktop-toolbar mobile-toolbar" style="background:#0e0e11;border-bottom:1px solid #1f1f22;padding:12px 24px;display:flex;align-items:center;gap:16px;flex-shrink:0">' +
   '<button id="go-back-btn" class="btn-ghost" data-action="go-back" data-drop-path="" title="Назад" style="padding:6px 10px"><span class="material-symbols-outlined">arrow_back</span></button>' +
   '<div id="breadcrumb" style="flex:1;display:flex;align-items:center;flex-wrap:wrap;font-size:14px;color:#cbc3d7"></div>' +
-  '<div style="position:relative">' +
+  '<div id="toolbar-search-wrap" style="position:relative">' +
   '<input id="search-inp" class="inp" placeholder="Search files, folders..." style="width:200px;padding-left:32px">' +
   '<span class="material-symbols-outlined" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#958ea0">search</span>' +
   '</div>' +
-  '<button class="btn-ghost" data-action="view-list" title="Список"><span class="material-symbols-outlined">view_list</span></button>' +
-  '<button class="btn-ghost" data-action="view-grid" title="Сетка"><span class="material-symbols-outlined">grid_view</span></button>' +
-  '<button class="btn-ghost" data-action="toggle-theme" title="Theme">Theme</button>' +
-  '<button class="btn-primary" data-action="upload-btn">Загрузить</button>' +
+  '<button id="toolbar-view-list" class="btn-ghost" data-action="view-list" title="Список"><span class="material-symbols-outlined">view_list</span></button>' +
+  '<button id="toolbar-view-grid" class="btn-ghost" data-action="view-grid" title="Сетка"><span class="material-symbols-outlined">grid_view</span></button>' +
+  '<button id="toolbar-theme" class="btn-ghost" data-action="toggle-theme" title="Theme">Theme</button>' +
+  '<button id="toolbar-upload" class="btn-primary" data-action="upload-btn">Загрузить</button>' +
   '</div>' +
   '<section id="mobile-storage" class="card" style="display:none">' +
   '<div style="display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:18px">' +
@@ -3695,7 +3854,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="upload-files" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px"></div>' +
   '<div class="progress-track" style="height:8px;margin-bottom:8px"><div id="upload-fill" class="progress-fill" style="width:0%"></div></div>' +
   '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px">' +
-  '<div id="upload-status" style="font-size:13px;font-weight:700;color:#d2bbff;min-width:36px">0%</div>' +
+  '<div id="upload-status" style="font-size:13px;font-weight:700;color:var(--accent-light);min-width:36px">0%</div>' +
   '<div id="upload-speed" style="font-size:12px;color:#8ff0a4"></div>' +
   '</div>' +
   '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
@@ -3883,7 +4042,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function fmtSpeed(b){return fmtSize(b||0)+"/s";}' +
   'function fmtDate(ts){if(!ts)return "";return new Date(ts).toLocaleDateString("ru-RU",{day:"2-digit",month:"short",year:"numeric"});}' +
   'function fmtDateTime(ts){if(!ts)return "";return new Date(ts).toLocaleString("ru-RU",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"});}' +
-  'function activePath(){return (currentPath==="__dashboard__"||currentPath==="__recent__"||currentPath==="__url_history__"||currentPath==="__settings__")?"":currentPath;}' +
+  'function activePath(){return (currentPath==="__dashboard__"||currentPath==="__recent__"||currentPath==="__activity__"||currentPath==="__url_history__"||currentPath==="__settings__")?"":currentPath;}' +
   'function setNavActive(action){document.querySelectorAll(".nav-item,.bottom-nav-item").forEach(function(x){x.classList.toggle("active",x.dataset.action===action);});}' +
   'function parentPath(p){var parts=(p||"").split("/").filter(Boolean);parts.pop();return parts.join("/");}' +
   'function splitExt(name,isDir){if(isDir)return {base:name,ext:""};var dot=name.lastIndexOf(".");if(dot<=0)return {base:name,ext:""};return {base:name.slice(0,dot),ext:name.slice(dot)};}' +
@@ -3898,7 +4057,21 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function allVisibleSelected(files,base){if(!files.length)return false;for(var i=0;i<files.length;i++){var fp=base?(base+"/"+files[i].name):files[i].name;if(!selectedItems[fp])return false;}return true;}' +
   'function selectedPayload(){return selectedList().map(function(x){return {path:x.fp,isDir:x.isDir};});}' +
   'function itemParent(fp){var parts=(fp||"").split("/").filter(Boolean);parts.pop();return parts.join("/");}' +
-  'function setSectionChrome(kind){var a=document.querySelector(".mobile-actions");if(a)a.style.display=kind==="files"?"flex":"none";if(kind!=="files"){try{clearTimeout(searchTimer);var s=document.getElementById("search-inp");if(s)s.value="";}catch(e){}}}' +
+  'function setSmartVisible(el,on,display){if(el)el.style.display=on?display:"none";}' +
+  'function updateSmartToolbar(kind){' +
+  '  var isFiles=kind==="files",isDashboard=kind==="dashboard";' +
+  '  var toolbar=document.querySelector(".desktop-toolbar"),back=document.getElementById("go-back-btn"),bc=document.getElementById("breadcrumb"),search=document.getElementById("toolbar-search-wrap"),viewList=document.getElementById("toolbar-view-list"),viewGrid=document.getElementById("toolbar-view-grid"),theme=document.getElementById("toolbar-theme"),upload=document.getElementById("toolbar-upload");' +
+  '  var hasParent=isFiles&&!!(currentPath||"");' +
+  '  setSmartVisible(back,hasParent,"flex");' +
+  '  setSmartVisible(bc,!isDashboard,"flex");' +
+  '  setSmartVisible(search,isFiles,"block");' +
+  '  setSmartVisible(viewList,isFiles,"flex");' +
+  '  setSmartVisible(viewGrid,isFiles,"flex");' +
+  '  setSmartVisible(upload,isFiles,"inline-flex");' +
+  '  setSmartVisible(theme,true,"inline-flex");' +
+  '  if(toolbar)toolbar.style.justifyContent=isDashboard?"flex-end":"flex-start";' +
+  '}' +
+  'function setSectionChrome(kind){var a=document.querySelector(".mobile-actions");if(a)a.style.display=kind==="files"?"flex":"none";updateSmartToolbar(kind);if(kind!=="files"){try{clearTimeout(searchTimer);var s=document.getElementById("search-inp");if(s)s.value="";}catch(e){}}}' +
   'function moveItemTo(from,name,dest){dest=dest||"";if(!from||dest===from||dest.indexOf(from+"/")===0)return;var to=dest?(dest+"/"+name):name;if(to===from)return;fetch("/api/fm/move",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({from:from,to:to})}).then(function(r){return r.json();}).then(function(d){if(d.ok)navigateTo(activePath());else alert(d.error||"Ошибка перемещения");});}' +
   'function showToast(title,body,url){title=title||"";body=body||"";toastUrl=url||"";if(!title&&!body&&!url)return hideToast();document.getElementById("toast-title").textContent=title;document.getElementById("toast-body").textContent=body||url||"";document.getElementById("toast").style.display="flex";if(url&&navigator.clipboard)navigator.clipboard.writeText(url).catch(function(){});}' +
   'function hideToast(){document.getElementById("toast").style.display="none";}' +
@@ -3950,7 +4123,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  var el=document.getElementById("breadcrumb");' +
   '  var parts=p?p.split("/").filter(Boolean):[];' +
   '  var back=document.getElementById("go-back-btn");if(back)back.dataset.dropPath=parentPath(p);' +
-  '  var html=\'<span data-action="navigate" data-drop-path="" data-fp="" style="color:#a078ff;cursor:pointer;font-weight:600">Мои файлы</span>\';' +
+  '  var html=\'<span data-action="navigate" data-drop-path="" data-fp="" style="color:var(--accent-color);cursor:pointer;font-weight:600">Мои файлы</span>\';' +
   '  var built="";' +
   '  for(var i=0;i<parts.length;i++){' +
   '    built=built?(built+"/"+parts[i]):parts[i];' +
@@ -3985,10 +4158,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
   "function loadDashboard(){" +
   "  currentPath=\"__dashboard__\";savePath(\"__dashboard__\");clearSelection(false);setSectionChrome(\"dashboard\");setNavActive(\"nav-dashboard\");" +
-  "  var bc=document.getElementById(\"breadcrumb\");if(bc)bc.innerHTML='<span style=\"color:#a078ff;font-weight:800\">CloudSpace</span><span class=\"breadcrumb-sep\">/</span><span>Главная</span>';" +
+  "  var bc=document.getElementById(\"breadcrumb\");if(bc)bc.innerHTML='<span style=\"color:var(--accent-color);font-weight:800\">CloudSpace</span><span class=\"breadcrumb-sep\">/</span><span>Главная</span>';" +
   "  var h='';" +
   "  h+='<section style=\"display:grid;grid-template-columns:minmax(0,1.55fr) minmax(300px,.85fr);gap:18px;align-items:stretch\">';" +
-  "  h+='<div style=\"position:relative;overflow:hidden;border:1px solid rgba(160,120,255,.36);border-radius:24px;padding:28px;background:radial-gradient(circle at 12% 0%,rgba(160,120,255,.34),transparent 34%),linear-gradient(135deg,#211934 0%,#141416 58%,#101114 100%);min-height:290px;box-shadow:0 24px 80px rgba(0,0,0,.32)\">';" +
+  "  h+='<div style=\"position:relative;overflow:hidden;border:1px solid color-mix(in srgb,var(--accent-color) 46%,transparent);border-radius:24px;padding:28px;background:radial-gradient(circle at 12% 0%,var(--accent-bg),transparent 34%),linear-gradient(135deg,#211934 0%,#141416 58%,#101114 100%);min-height:290px;box-shadow:0 24px 80px rgba(0,0,0,.32)\">';" +
   "  h+='<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:20px;color:#d7c7ff;font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.08em\"><span class=\"material-symbols-outlined\">bolt</span> Быстрая отправка на VPS</div>';" +
   "  h+='<h1 style=\"font-size:34px;line-height:1.08;margin:0 0 10px;color:#fff;font-weight:900;max-width:760px\">Скачай файл на сервер и забери с любого устройства</h1>';" +
   "  h+='<div style=\"color:#bfb5d6;font-size:14px;line-height:1.55;max-width:780px;margin-bottom:22px\">Вставь ссылку, выбери режим или закинь файл с компьютера. Всё попадёт в CloudSpace, без прыжков между вкладками.</div>';" +
@@ -4007,7 +4180,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   "  h+=dashActionCard(\"create_new_folder\",\"Новая папка\",\"Сразу перейти в файлы\",\"nav-files\",\"#9ddcff\");" +
   "  h+='</section>';" +
   "  h+='<section style=\"display:grid;grid-template-columns:minmax(0,1fr);gap:18px;margin-top:18px\">';" +
-  "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px\"><div style=\"font-size:18px;font-weight:900;color:#fff;margin-bottom:14px\">Сейчас</div><div style=\"display:grid;gap:10px\"><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Активные загрузки</span><b id=\"dash-active-count\">0</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Текущий режим</span><b>Cloud</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Версия сайта</span><b style=\"color:#d2bbff\">v' + SITE_VERSION + '</b></div></div></div>';" +
+  "  h+='<div class=\"card\" style=\"margin:0;padding:22px;border-radius:24px\"><div style=\"font-size:18px;font-weight:900;color:#fff;margin-bottom:14px\">Сейчас</div><div style=\"display:grid;gap:10px\"><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Активные загрузки</span><b id=\"dash-active-count\">0</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Текущий режим</span><b>Cloud</b></div><div style=\"display:flex;justify-content:space-between;gap:12px;color:#cbc3d7\"><span>Версия сайта</span><b style=\"color:var(--accent-light)\">v" + SITE_VERSION + "</b></div></div></div>';" +
   "  h+='</section>';" +
   "  document.getElementById(\"file-area\").innerHTML=h;" +
   "  fetch(\"/api/fm/list?path=\").then(function(r){return r.json();}).then(function(d){" +
@@ -4029,11 +4202,16 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function setSpeedStatus(msg,ok){var el=document.getElementById("speed-status");if(!el)return;el.textContent=msg||"";el.style.color=ok?"#8ff0a4":"#958ea0";}' +
   'async function runSpeedTest(){var st=document.getElementById("speed-status"),p=document.getElementById("speed-ping"),d=document.getElementById("speed-down"),u=document.getElementById("speed-up");if(!st||!p||!d||!u)return;p.textContent=d.textContent=u.textContent="...";setSpeedStatus("\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0437\\u0430\\u0434\\u0435\\u0440\\u0436\\u043a\\u0443...",false);try{var pingTimes=[];for(var i=0;i<4;i++){var t0=performance.now();await fetch("/api/speedtest/ping?x="+Date.now()+"-"+i,{cache:"no-store"});pingTimes.push(performance.now()-t0);}var ping=Math.round(pingTimes.reduce(function(a,b){return a+b;},0)/pingTimes.length);p.textContent=ping+" ms";setSpeedStatus("\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0441\\u043a\\u0430\\u0447\\u0438\\u0432\\u0430\\u043d\\u0438\\u0435...",false);var size=10*1024*1024,t1=performance.now();var r=await fetch("/api/speedtest/download?size="+size+"&x="+Date.now(),{cache:"no-store"});var buf=await r.arrayBuffer();var downMs=performance.now()-t1;d.textContent=fmtMbps(buf.byteLength,downMs);setSpeedStatus("\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0432\\u044b\\u0433\\u0440\\u0443\\u0437\\u043a\\u0443...",false);var upSize=4*1024*1024,payload=new Uint8Array(upSize);for(var j=0;j<upSize;j+=4096)payload[j]=j%251;var t2=performance.now();await fetch("/api/speedtest/upload?x="+Date.now(),{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:payload,cache:"no-store"});var upMs=performance.now()-t2;u.textContent=fmtMbps(upSize,upMs);setSpeedStatus("\\u0413\\u043e\\u0442\\u043e\\u0432\\u043e",true);}catch(e){setSpeedStatus("\\u041d\\u0435 \\u0443\\u0434\\u0430\\u043b\\u043e\\u0441\\u044c \\u0432\\u044b\\u043f\\u043e\\u043b\\u043d\\u0438\\u0442\\u044c \\u0442\\u0435\\u0441\\u0442",false);if(p.textContent==="...")p.textContent="\\u2014";if(d.textContent==="...")d.textContent="\\u2014";if(u.textContent==="...")u.textContent="\\u2014";}}' +
   'function loadCloudSettings(){currentPath="__settings__";savePath("__settings__");clearSelection(false);setSectionChrome("settings");setNavActive("nav-settings");var bc=document.getElementById("breadcrumb");if(bc)bc.innerHTML=\'<span style="color:#a078ff;font-weight:700">Настройки</span>\';var html=\'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">\';html+=settingsCard("\u041f\u0440\u043e\u0444\u0438\u043b\u044c",\'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px"><div id="settings-profile-avatar" style="width:48px;height:48px;border-radius:16px;background:linear-gradient(135deg,#a078ff,#6d3bd7);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:18px;flex:0 0 auto">?</div><div style="min-width:0;flex:1"><div id="settings-profile-login" style="font-size:12px;color:#958ea0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@...</div><div id="settings-profile-role" style="font-size:12px;color:#d2bbff;margin-top:2px"></div></div></div><div style="font-size:12px;color:#958ea0;margin-bottom:8px">\u0418\u043c\u044f \u0432 \u043f\u0440\u043e\u0444\u0438\u043b\u0435</div><input id="cloud-profile-label" class="inp" maxlength="40" placeholder="CloudSpace" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-save-profile">\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c</button><div id="cloud-profile-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard("Хранение файлов",\'<div style="font-size:12px;color:#958ea0;margin-bottom:10px">Автоудаление старых файлов</div><select id="cloud-retention" class="inp" style="margin-bottom:10px"><option value="1">1 день</option><option value="3">3 дня</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="0">Никогда</option></select><button class="btn-primary" data-action="settings-save-retention">Сохранить</button><div id="cloud-retention-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard("Уведомления",\'<div id="cloud-notif-status" style="font-size:12px;color:#958ea0;margin-bottom:10px">Проверяю...</div><button class="btn-ghost" data-action="settings-notif"><span class="material-symbols-outlined">notifications</span> Разрешить уведомления</button>\');html+=settingsCard("Speed test",\'<div style="font-size:12px;color:#958ea0;margin-bottom:10px">\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0441\u043a\u043e\u0440\u043e\u0441\u0442\u0438 \u043c\u0435\u0436\u0434\u0443 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u043e\u043c \u0438 VPS</div><button class="btn-primary" data-action="settings-speedtest"><span class="material-symbols-outlined">speed</span> \u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u0442\u0435\u0441\u0442</button><div id="speed-status" style="font-size:12px;color:#958ea0;margin-top:10px;min-height:16px"></div><div id="speed-result" class="speed-result"><div class="speed-metric"><b id="speed-ping">\u2014</b><span>Ping</span></div><div class="speed-metric"><b id="speed-down">\u2014</b><span>Download</span></div><div class="speed-metric"><b id="speed-up">\u2014</b><span>Upload</span></div></div>\');html+=settingsCard("Токен расширения",\'<div id="cloud-token-display" style="font-size:12px;color:#d2bbff;word-break:break-all;margin-bottom:10px">Скрыт</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="settings-load-token">Показать</button><button class="btn-ghost" data-action="settings-copy-token">Копировать</button><button class="btn-ghost" data-action="settings-reset-token" style="color:#ffb4ab;border-color:#93000a">Сбросить</button></div><div id="cloud-token-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard("Пароль",\'<input id="cloud-pass-current" class="inp" type="password" placeholder="Текущий пароль" style="margin-bottom:10px"><input id="cloud-pass-new" class="inp" type="password" placeholder="Новый пароль" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-change-password">Сменить пароль</button><div id="cloud-pass-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=\'<div id="cloud-users-section" class="card" style="margin:0;padding:18px;display:none"><div style="font-size:15px;font-weight:800;margin-bottom:12px;color:#e4e1e6">Аккаунты</div><div id="cloud-users-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px"><input id="cloud-new-username" class="inp" placeholder="Логин"><input id="cloud-new-password" class="inp" placeholder="Пароль"><input id="cloud-new-label" class="inp" placeholder="Имя"></div><button class="btn-primary" data-action="settings-add-user">Добавить аккаунт</button><div id="cloud-users-status" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>\';html+="</div>";document.getElementById("file-area").innerHTML=html;loadCloudProfile();loadCloudRetention();updateCloudNotifStatus();loadCloudUsers();}' +
+  'function settingsThemeCard(id,label,desc,c1,c2,current){return \'<button class="theme-card \'+(current===id?"active":"")+\'" data-action="set-accent" data-theme="\'+id+\'" type="button"><span class="theme-card-dot" style="background:linear-gradient(135deg,\'+c1+\',\'+c2+\')"></span><span style="min-width:0;flex:1;text-align:left"><b style="display:block;color:#e4e1e6;font-size:13px">\'+label+\'</b><span class="settings-subtle" style="display:block;margin-top:2px">\'+desc+\'</span></span><span class="material-symbols-outlined" style="color:var(--accent-light);font-size:20px">\'+(current===id?"check_circle":"radio_button_unchecked")+\'</span></button>\';}' +
+  'function loadCloudSettings(){currentPath="__settings__";savePath("__settings__");clearSelection(false);setSectionChrome("settings");setNavActive("nav-settings");var bc=document.getElementById("breadcrumb");if(bc)bc.innerHTML=\'<span style="color:var(--accent-color);font-weight:800">Настройки</span>\';var currentAccent=localStorage.getItem("cloud-accent")||"violet";var html="";html+=\'<section class="settings-hero"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px"><div style="display:flex;gap:14px;align-items:flex-start;min-width:0"><div class="settings-hero-icon"><span class="material-symbols-outlined" style="font-size:30px">tune</span></div><div style="min-width:0"><div style="font-size:24px;font-weight:900;color:#fff;line-height:1.12">Настройки CloudSpace</div><div class="settings-subtle" style="margin-top:7px;max-width:760px">Профиль, внешний вид, безопасность и системные параметры собраны в одном месте.</div></div></div><button class="btn-ghost" data-action="nav-files"><span class="material-symbols-outlined">folder</span> Мои файлы</button></div></section>\';html+=\'<div class="settings-grid">\';html+=settingsCard(\'Внешний вид\',\'<div class="settings-subtle" style="margin-bottom:12px">Акцент применяется к кнопкам, навигации, прогрессу, плееру и выделенным состояниям.</div><div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">\'+settingsThemeCard("violet","Violet","Классический CloudSpace","#a078ff","#7c3aed",currentAccent)+settingsThemeCard("emerald","Emerald","Зеленый рабочий акцент","#10b981","#059669",currentAccent)+settingsThemeCard("ruby","Ruby","Контрастный красный","#f43f5e","#e11d48",currentAccent)+settingsThemeCard("glacier","Glacier","Холодный cyan","#06b6d4","#0891b2",currentAccent)+\'</div><div style="display:flex;align-items:center;gap:10px;margin-top:14px"><button class="btn-ghost" data-action="toggle-theme"><span class="material-symbols-outlined">contrast</span> Светлая / темная</button><span class="settings-subtle">Выбранный цвет сохраняется в браузере.</span></div>\');html+=settingsCard(\'Профиль\',\'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px"><div id="settings-profile-avatar" style="width:48px;height:48px;border-radius:16px;background:var(--accent-gradient);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:18px;flex:0 0 auto">?</div><div style="min-width:0;flex:1"><div id="settings-profile-login" class="settings-subtle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@...</div><div id="settings-profile-role" style="font-size:12px;color:var(--accent-light);margin-top:2px;font-weight:800"></div></div></div><div class="settings-subtle" style="margin-bottom:8px">Имя в профиле</div><input id="cloud-profile-label" class="inp" maxlength="40" placeholder="CloudSpace" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-save-profile">Сохранить</button><div id="cloud-profile-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Хранение файлов\',\'<div class="settings-subtle" style="margin-bottom:10px">Автоудаление старых файлов</div><select id="cloud-retention" class="inp" style="margin-bottom:10px"><option value="1">1 день</option><option value="3">3 дня</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="0">Никогда</option></select><button class="btn-primary" data-action="settings-save-retention">Сохранить</button><div id="cloud-retention-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Уведомления\',\'<div id="cloud-notif-status" class="settings-subtle" style="margin-bottom:10px">Проверяю...</div><button class="btn-ghost" data-action="settings-notif"><span class="material-symbols-outlined">notifications</span> Разрешить уведомления</button>\');html+=settingsCard(\'Speed test\',\'<div class="settings-subtle" style="margin-bottom:10px">Проверка скорости между браузером и VPS</div><button class="btn-primary" data-action="settings-speedtest"><span class="material-symbols-outlined">speed</span> Запустить тест</button><div id="speed-status" class="settings-subtle" style="margin-top:10px;min-height:16px"></div><div id="speed-result" class="speed-result"><div class="speed-metric"><b id="speed-ping">—</b><span>Ping</span></div><div class="speed-metric"><b id="speed-down">—</b><span>Download</span></div><div class="speed-metric"><b id="speed-up">—</b><span>Upload</span></div></div>\');html+=settingsCard(\'Токен расширения\',\'<div id="cloud-token-display" style="font-size:12px;color:var(--accent-light);word-break:break-all;margin-bottom:10px">Скрыт</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="settings-load-token">Показать</button><button class="btn-ghost" data-action="settings-copy-token">Копировать</button><button class="btn-ghost" data-action="settings-reset-token" style="color:#ffb4ab;border-color:#93000a">Сбросить</button></div><div id="cloud-token-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Telegram\',\'<div id="tg-linked" style="display:none"><div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px 12px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px"><span style="font-size:22px;flex-shrink:0">✅</span><div><div style="font-size:13px;font-weight:700;color:#4ade80">Telegram подключён</div><div id="tg-linked-info" class="settings-subtle" style="margin-top:2px"></div></div></div><button class="btn-ghost" data-action="settings-tg-unlink" style="color:#ffb4ab;border-color:#93000a">Отключить</button></div><div id="tg-unlinked"><div class="settings-subtle" style="margin-bottom:12px">Отправляйте файлы в Telegram — они сохранятся прямо в ваше хранилище на VPS. Поддерживаются документы, фото, видео, аудио.</div><button class="btn-primary" data-action="settings-tg-connect" style="background:linear-gradient(135deg,#0ea5e9,#2563eb)">🤖 Подключить Telegram</button><div class="settings-subtle" style="margin-top:8px">Откроется @SiplyiFolderUpload_bot</div></div><div id="tg-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Пароль\',\'<input id="cloud-pass-current" class="inp" type="password" placeholder="Текущий пароль" style="margin-bottom:10px"><input id="cloud-pass-new" class="inp" type="password" placeholder="Новый пароль" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-change-password">Сменить пароль</button><div id="cloud-pass-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=\'<div id="cloud-users-section" class="card" style="margin:0;padding:18px;display:none"><div class="settings-card-title"><span class="material-symbols-outlined">group</span> Аккаунты</div><div id="cloud-users-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px"><input id="cloud-new-username" class="inp" placeholder="Логин"><input id="cloud-new-password" class="inp" placeholder="Пароль"><input id="cloud-new-label" class="inp" placeholder="Имя"></div><button class="btn-primary" data-action="settings-add-user">Добавить аккаунт</button><div id="cloud-users-status" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>\';html+="</div>";document.getElementById("file-area").innerHTML=html;applyAccentColor();loadCloudProfile();loadCloudRetention();updateCloudNotifStatus();loadCloudUsers();loadTelegramStatus();}' +
   'function loadCloudRetention(){fetch("/api/settings").then(function(r){return r.json();}).then(function(d){var el=document.getElementById("cloud-retention");if(el)el.value=String(d.retention);}).catch(function(){});}' +
   'function saveCloudRetention(){var v=document.getElementById("cloud-retention").value;fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({retention:parseInt(v,10)})}).then(function(r){return r.json();}).then(function(d){setCloudStatus("cloud-retention-status",d.ok?"Сохранено":(d.error||"Ошибка"),!!d.ok);}).catch(function(){setCloudStatus("cloud-retention-status","Ошибка",false);});}' +
   'function updateCloudNotifStatus(){var el=document.getElementById("cloud-notif-status");if(!el)return;if(!("Notification" in window)){el.textContent="Браузерные уведомления недоступны";return;}el.textContent=Notification.permission==="granted"?"Уведомления включены":Notification.permission==="denied"?"Уведомления запрещены в браузере":"Уведомления еще не разрешены";}' +
   'function requestCloudNotif(){if(!("Notification" in window))return;Notification.requestPermission().then(updateCloudNotifStatus);}' +
   'function loadCloudToken(){fetch("/api/mytoken").then(function(r){return r.json();}).then(function(d){document.getElementById("cloud-token-display").textContent=d.token||"";setCloudStatus("cloud-token-status","Токен загружен",true);}).catch(function(){setCloudStatus("cloud-token-status","Ошибка токена",false);});}' +
+  'function loadTelegramStatus(){fetch("/api/tg/status").then(function(r){return r.json();}).then(function(d){var linked=document.getElementById("tg-linked"),unlinked=document.getElementById("tg-unlinked"),info=document.getElementById("tg-linked-info");if(!linked)return;if(d.linked){linked.style.display="";unlinked.style.display="none";if(info)info.textContent=(d.firstName?"@"+d.firstName+" · ":"")+"Подключён "+new Date(d.connectedAt).toLocaleDateString("ru");}else{linked.style.display="none";unlinked.style.display="";}}).catch(function(){});}' +
+  'function connectTelegram(){var st=document.getElementById("tg-status");if(st)st.textContent="Открываю бота...";fetch("/api/tg/connect-link").then(function(r){return r.json();}).then(function(d){if(d.url){window.open(d.url,"_blank");if(st)st.textContent="Бот открыт в Telegram. После подтверждения нажмите кнопку ниже.";var btn=document.createElement("button");btn.className="btn-ghost";btn.style.marginTop="8px";btn.textContent="Проверить подключение";btn.onclick=function(){loadTelegramStatus();if(st)st.textContent="";};var stParent=st&&st.parentNode;if(stParent)stParent.insertBefore(btn,st.nextSibling);}else{if(st)st.textContent=d.error||"Ошибка";}}).catch(function(){if(st)st.textContent="Ошибка";});}' +
+  'function unlinkTelegram(){if(!confirm("Отключить Telegram?"))return;fetch("/api/tg/unlink",{method:"POST"}).then(function(r){return r.json();}).then(function(){loadTelegramStatus();}).catch(function(){});}' +
   'function copyCloudToken(){var t=(document.getElementById("cloud-token-display")||{}).textContent||"";if(!t||t==="Скрыт"){loadCloudToken();return;}navigator.clipboard&&navigator.clipboard.writeText(t).then(function(){setCloudStatus("cloud-token-status","Скопировано",true);});}' +
   'function resetCloudToken(){if(!confirm("Сбросить токен расширения? Старый перестанет работать."))return;fetch("/api/mytoken/reset",{method:"POST"}).then(function(r){return r.json();}).then(function(d){document.getElementById("cloud-token-display").textContent=d.token||"";setCloudStatus("cloud-token-status","Новый токен готов",true);}).catch(function(){setCloudStatus("cloud-token-status","Ошибка сброса",false);});}' +
   'function updateSidebarProfile(d){var label=d.label||d.username||"",user=d.username||"",role=d.isAdmin?"Admin":"User";var ls=document.getElementById("profile-label-sidebar"),av=document.getElementById("profile-avatar-sidebar"),ms=document.getElementById("profile-meta-sidebar"),sl=document.getElementById("settings-profile-login"),sr=document.getElementById("settings-profile-role"),sa=document.getElementById("settings-profile-avatar");if(ls)ls.textContent=label;if(av)av.textContent=(label||user||"?").trim().charAt(0).toUpperCase()||"?";if(sa)sa.textContent=(label||user||"?").trim().charAt(0).toUpperCase()||"?";if(ms)ms.textContent="@"+user+" \u00b7 "+role;if(sl)sl.textContent="@"+user;if(sr)sr.textContent=role;}\n' +
@@ -4303,7 +4481,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    bottom.innerHTML=\'<button class="mv-icon" data-action="mv-zoom-out"><span class="material-symbols-outlined">zoom_out</span></button><button class="mv-icon" data-action="mv-fit"><span class="material-symbols-outlined">fit_screen</span></button><button class="mv-icon" data-action="mv-zoom-in"><span class="material-symbols-outlined">zoom_in</span></button><div style="flex:1"></div><div class="mv-time">Image viewer</div>\';' +
   '  } else {' +
   '    var autoplayAttr=startPlayback?"autoplay":"";' +
-  '    stage.innerHTML=`<\\${previewKind==="audio"?"audio":"video"} id="mv-media" src="\\${previewSrc}" playsinline controls style="max-height:100%" \${autoplayAttr}></\\${previewKind==="audio"?"audio":"video"}>`;' +
+  '    var mvTag=previewKind==="audio"?"audio":"video";' +
+  '    stage.innerHTML=\'<\'+mvTag+\' id="mv-media" src="\'+previewSrc+\'" playsinline controls style="max-height:100%" \'+autoplayAttr+\'></\'+mvTag+\'>\';' +
   '    bottom.innerHTML="";' +
   '    setTimeout(function() {' +
   '      if(typeof Plyr === "undefined") { console.error("Plyr is not loaded!"); return; }' +
@@ -4543,7 +4722,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="preview-prev"||action==="playlist-prev"){playSibling("prev",true);}' +
   '  else if(action==="preview-next"||action==="playlist-next"){playSibling("next",true);}' +
   '  else if(action==="filter-category"){activeFilter=el.dataset.filter;renderContent(lastEntries,lastBase);}' +
-  '  else if(action==="set-accent"){var themeName=el.dataset.theme;localStorage.setItem("cloud-accent",themeName);applyAccentColor();document.querySelectorAll(".theme-card").forEach(function(x){x.classList.toggle("active",x.dataset.theme===themeName);});}' +
+  '  else if(action==="set-accent"){var themeName=el.dataset.theme;localStorage.setItem("cloud-accent",themeName);applyAccentColor();document.querySelectorAll(".theme-card").forEach(function(x){var on=x.dataset.theme===themeName;x.classList.toggle("active",on);var i=x.querySelector(".material-symbols-outlined:last-child");if(i)i.textContent=on?"check_circle":"radio_button_unchecked";});}' +
   '  else if(action==="download-preview"){if(previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);}' +
   '  else if(action==="share-preview"){if(previewFp)shareOne(previewFp);}' +
   '  else if(action==="transfer-pause"){fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid)+"/pause",{method:"POST"}).then(loadTransfers);}' +
@@ -4562,6 +4741,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="settings-load-token"){loadCloudToken();}' +
   '  else if(action==="settings-copy-token"){copyCloudToken();}' +
   '  else if(action==="settings-reset-token"){resetCloudToken();}' +
+  '  else if(action==="settings-tg-connect"){connectTelegram();}' +
+  '  else if(action==="settings-tg-unlink"){unlinkTelegram();}' +
   '  else if(action==="settings-change-password"){changeCloudPassword();}' +
   '  else if(action==="settings-add-user"){addCloudUser();}' +
   '  else if(action==="settings-delete-user"){deleteCloudUser(el.dataset.user);}' +

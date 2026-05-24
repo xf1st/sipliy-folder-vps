@@ -13,6 +13,7 @@ if (!fs.existsSync('./mock_opt')) {
 // 3. Patch the file system paths in code to use local directory
 code = code.replace(/\/opt\/vps-downloader/g, './mock_opt');
 code = code.replace(/\/var\/downloads/g, './mock_opt');
+code = code.replace(/app\.listen\(PORT,[\s\S]*?\);/, '/* app.listen skipped by syntax checker */');
 
 // 4. Mock global things
 const sandbox = {
