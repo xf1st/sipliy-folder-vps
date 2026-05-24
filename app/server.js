@@ -91,7 +91,7 @@ const VT_API = 'https://www.virustotal.com/api/v3';
 
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.6.0';
+const SITE_VERSION = '2.7.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
