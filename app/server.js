@@ -91,7 +91,7 @@ const VT_API = 'https://www.virustotal.com/api/v3';
 
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.7.0';
+const SITE_VERSION = '2.8.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -3446,7 +3446,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '::-webkit-scrollbar-thumb{background:var(--outline-var);border-radius:9999px}' +
   '::-webkit-scrollbar-thumb:hover{background:var(--outline)}' +
   '.mobile-topbar,.mobile-bottom-nav{display:none}' +
-  '.sidebar{background:var(--surf);width:272px;min-height:100vh;flex-shrink:0;border-right:1px solid rgba(255,255,255,.05)}' +
+  '.sidebar{background:var(--surf);width:272px;min-height:100vh;flex-shrink:0;border-radius:0 28px 28px 0;box-shadow:6px 0 40px rgba(0,0,0,.38),inset -1px 0 0 rgba(255,255,255,.05),inset 0 1px 0 rgba(255,255,255,.04)}' +
   '.card{background:var(--surf-cont);border:none;border-radius:24px;box-shadow:0 1px 0 rgba(255,255,255,.06) inset,0 2px 16px rgba(0,0,0,.28)}' +
   '.btn-primary{background:var(--accent-color);color:#fff;border-radius:9999px;padding:10px 24px;font-weight:700;font-size:14px;border:none;cursor:pointer;transition:transform var(--m3-spring) .35s,box-shadow .25s,opacity .2s;min-height:44px;letter-spacing:.01em}' +
   '.btn-primary:hover{opacity:.92;transform:translateY(-2px) scale(1.04);box-shadow:0 8px 28px var(--accent-glow)}' +
@@ -3518,14 +3518,18 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.speed-metric{border:none;border-radius:16px;padding:12px;background:var(--surf);min-width:0}' +
   '.speed-metric b{display:block;color:var(--on-surf);font-size:18px;line-height:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
   '.speed-metric span{display:block;color:var(--outline);font-size:11px;margin-top:3px}' +
-  '.preview-panel{display:none;width:380px;max-width:38vw;border-left:1px solid color-mix(in srgb,var(--outline-var) 40%,transparent);background:#18151f;flex-shrink:0;flex-direction:column;overflow:hidden;transform-origin:right center;position:relative!important}' +
+  '.preview-panel{display:none;width:380px;max-width:38vw;border-left:none;background:var(--surf-cont);flex-shrink:0;flex-direction:column;overflow:hidden;transform-origin:right center;position:relative!important;border-radius:24px 0 0 24px;box-shadow:-4px 0 32px rgba(0,0,0,.32),inset 1px 0 0 rgba(255,255,255,.05)}' +
   '.preview-resizer{position:absolute;left:0;top:0;bottom:0;width:6px;cursor:col-resize;z-index:100;background:transparent;transition:background 0.2s}' +
   '.preview-resizer:hover,.preview-resizer.dragging{background:var(--accent-color)!important}' +
   '.preview-panel.open{display:flex;animation:panelIn .28s var(--m3-std) both}' +
-  '.preview-head{display:flex;align-items:center;gap:6px;padding:12px 16px;border-bottom:1px solid color-mix(in srgb,var(--outline-var) 40%,transparent);flex-shrink:0}' +
-  '.preview-body{padding:16px;overflow:auto;flex:1;min-height:0}' +
-  '.preview-body.media-preview{display:flex;align-items:center;justify-content:center;background:#0d0b13}' +
-  '.preview-media{max-width:100%;max-height:72vh;border-radius:16px;object-fit:contain;display:block}' +
+  '.preview-head{display:flex;align-items:center;gap:4px;padding:18px 16px 14px;flex-shrink:0}' +
+  '.preview-body{overflow:auto;max-height:48%;flex-shrink:0;padding:0}' +
+  '.preview-body.media-preview{display:flex;align-items:center;justify-content:center;background:#0c0a12;max-height:48%;flex-shrink:0;padding:0}' +
+  '.preview-media{max-width:100%;max-height:100%;object-fit:contain;display:block}' +
+  '.preview-info-section{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0}' +
+  '.preview-meta-chip{background:var(--surf-hi);border-radius:12px;padding:10px 12px}' +
+  '.preview-meta-label{font-size:10px;font-weight:600;color:var(--on-surf-var);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px}' +
+  '.preview-action-btn{width:100%;justify-content:center;gap:8px;display:flex;align-items:center;font-size:14px;font-weight:600}' +
   '.mv-stage .plyr,.preview-media-wrap .plyr{width:auto;max-width:100%;border-radius:14px;background:#000;box-shadow:0 24px 90px rgba(0,0,0,.38);overflow:hidden}' +
   '.mv-stage .plyr{max-height:100%;height:auto}' +
   '.mv-stage .plyr video,.preview-media-wrap .plyr video{width:100%;height:100%;max-width:100%;max-height:72vh;object-fit:contain}' +
@@ -3564,7 +3568,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.mv-select option{background:#18161f;color:#fff}' +
   '.mv-hint{position:absolute;left:50%;top:18px;transform:translateX(-50%);background:rgba(18,16,26,.86);border:1px solid rgba(255,255,255,.12);border-radius:9999px;padding:7px 14px;color:var(--on-surf-var);font-size:12px;opacity:0;pointer-events:none;transition:opacity .18s}' +
   '.mv-hint.show{opacity:1}' +
-  '#preview-info{padding:14px 16px;border-top:1px solid color-mix(in srgb,var(--outline-var) 40%,transparent);flex-shrink:0;max-height:260px;overflow-y:auto;background:#15121c}' +
+  '#preview-info{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0;border-top:1px solid color-mix(in srgb,var(--outline-var) 30%,transparent);background:var(--surf-cont)}' +
   '.meta-row{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid color-mix(in srgb,var(--outline-var) 28%,transparent);font-size:12px}' +
   '.meta-row:last-child{border-bottom:none}' +
   '.meta-lbl{color:var(--outline);flex-shrink:0;padding-top:1px}' +
@@ -3577,12 +3581,22 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '#modal-qr .modal{z-index:121}' +
   '.modal{background:var(--surf-cont);border:none;border-radius:28px;padding:28px;min-width:360px;max-width:90vw;animation:popIn .32s var(--m3-spring) both;box-shadow:0 1px 0 rgba(255,255,255,.06) inset,0 28px 80px rgba(0,0,0,.6)}' +
   '.modal h3,.modal h2{font-family:var(--font-display);font-weight:700;letter-spacing:-.01em}' +
+  '.url-mode-card{border-radius:16px;padding:16px 14px;cursor:pointer;transition:background .18s var(--m3-std),border-color .18s var(--m3-std),box-shadow .18s var(--m3-std);background:var(--surf-hi);border:1.5px solid transparent;user-select:none}' +
+  '.url-mode-card:hover{background:color-mix(in srgb,var(--on-surf) 6%,var(--surf-hi))}' +
+  '.url-mode-card.selected{background:var(--accent-bg);border-color:var(--accent-color);box-shadow:0 0 0 1px color-mix(in srgb,var(--accent-color) 22%,transparent)}' +
+  '.url-mode-card.selected:hover{background:color-mix(in srgb,var(--accent-color) 20%,var(--surf-hi))}' +
+  '.url-dl-inp-wrap{position:relative;margin-bottom:20px}' +
+  '.url-dl-inp-wrap .url-inp-icon{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--on-surf-var);font-size:20px;pointer-events:none}' +
+  '#url-dl-inp{width:100%;box-sizing:border-box;padding:13px 16px 13px 44px;border-radius:14px;background:var(--surf-hi);border:1.5px solid var(--outline-var);outline:none;font-size:14px;color:var(--on-surf);font-family:Manrope,sans-serif;transition:border-color .2s,box-shadow .2s}' +
+  '#url-dl-inp:focus{border-color:var(--accent-color);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent-color) 18%,transparent)}' +
+  '#url-name-inp{width:100%;box-sizing:border-box;padding:11px 16px;border-radius:14px;background:var(--surf-hi);border:1.5px solid var(--outline-var);outline:none;font-size:13px;color:var(--on-surf);font-family:Manrope,sans-serif;transition:border-color .2s,box-shadow .2s;margin-bottom:6px}' +
+  '#url-name-inp:focus{border-color:var(--accent-color);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent-color) 18%,transparent)}' +
   '.inp{background:color-mix(in srgb,var(--accent-color) 8%,var(--surf));border:none;border-bottom:2px solid var(--outline-var);border-radius:10px 10px 0 0;color:var(--on-surf);padding:10px 14px;font-size:14px;width:100%;outline:none;font-family:Manrope,sans-serif;transition:border-color .2s,background .2s}' +
   '.inp:focus{border-bottom-color:var(--accent-color);background:color-mix(in srgb,var(--accent-color) 12%,var(--surf));box-shadow:0 2px 0 var(--accent-color)}' +
   '.disk-bar{background:var(--surf-hi);border-radius:9999px;height:10px;overflow:hidden}' +
   '.disk-fill{height:100%;border-radius:9999px;background:linear-gradient(90deg,var(--accent-color),color-mix(in srgb,var(--accent-color) 60%,var(--accent-hover)));transition:width .6s var(--m3-std)}' +
   'body.light{background:var(--bg,#f3eff8);color:#1c1a23}' +
-  'body.light .sidebar{background:#fff;border-right:1px solid #e2d9f3}' +
+  'body.light .sidebar{background:#fff;box-shadow:6px 0 40px rgba(0,0,0,.08),inset -1px 0 0 rgba(0,0,0,.05)}' +
   'body.light .sidebar [style*="color:#e4e1e6"]{color:#17151c!important}' +
   'body.light .sidebar [style*="color:#958ea0"]{color:#7b6f93!important}' +
   'body.light .sidebar [style*="color:#494454"]{color:#4a3b6e!important}' +
@@ -3625,7 +3639,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'body.light .preview-panel{background:#fff;border-left-color:#e2d9f3}' +
   'body.light .preview-head{border-bottom-color:#e2d9f3}' +
   'body.light #preview-title{color:#1c1a23}' +
-  'body.light #preview-info{background:#faf8ff;border-top-color:#e2d9f3}' +
+  'body.light #preview-info{background:#fff;border-top-color:#e2d9f3}' +
+  'body.light .preview-panel{background:#fff;box-shadow:-4px 0 32px rgba(0,0,0,.08),inset 1px 0 0 rgba(0,0,0,.05)}' +
   'body.light .doc-preview{background:#fff;color:#1c1a23}' +
   'body.light .doc-preview h1,body.light .doc-preview h2,body.light .doc-preview h3{color:#1c1a23}' +
   'body.light .doc-preview td,body.light .doc-preview th,body.light .archive-table td,body.light .archive-table th{border-bottom-color:#e2d9f3}' +
@@ -3867,7 +3882,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div class="desktop-toolbar mobile-toolbar" style="background:rgba(19,19,23,.82);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-bottom:1px solid rgba(255,255,255,.06);padding:10px 24px;display:flex;align-items:center;gap:12px;flex-shrink:0">' +
   '<button id="go-back-btn" class="btn-ghost" data-action="go-back" data-drop-path="" title="Назад" style="padding:6px 10px;flex-shrink:0"><span class="material-symbols-outlined">arrow_back</span></button>' +
   '<div id="breadcrumb" style="flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;font-size:14px;color:var(--on-surf-var)"></div>' +
-  '<div id="toolbar-search-wrap" style="position:relative;flex-shrink:0">' +
+  '<div id="toolbar-search-wrap" style="display:none;position:relative;flex-shrink:0">' +
   '<input id="search-inp" type="text" role="searchbox" placeholder="Search files, folders..." style="width:260px;padding:10px 16px 10px 44px;border-radius:9999px;background:var(--surf-hi);border:none;outline:none;font-size:14px;height:42px;color:var(--on-surf);font-family:Manrope,sans-serif" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-form-type="other" data-lpignore="true" data-1p-ignore tabindex="0">' +
   '<span class="material-symbols-outlined" style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--accent-light);font-size:20px;pointer-events:none">search</span>' +
   '</div>' +
@@ -3916,12 +3931,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<aside id="preview-panel" class="preview-panel">' +
   '<div id="preview-resizer" class="preview-resizer"></div>' +
   '<div class="preview-head">' +
-  '<div id="preview-title" style="font-weight:700;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Предпросмотр</div>' +
+  '<div id="preview-title" style="font-weight:700;font-size:17px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-display);color:var(--on-surf)">Детали</div>' +
   '<button id="preview-btn-prev" class="btn-ghost" data-action="preview-prev" style="padding:5px 9px;display:none" title="Предыдущий"><span class="material-symbols-outlined">navigate_before</span></button>' +
   '<button id="preview-btn-next" class="btn-ghost" data-action="preview-next" style="padding:5px 9px;display:none" title="Следующий"><span class="material-symbols-outlined">navigate_next</span></button>' +
-  '<button class="btn-ghost" data-action="fullscreen-preview" style="padding:5px 9px" title="На весь экран"><span class="material-symbols-outlined">fullscreen</span></button>' +
-  '<button class="btn-ghost" data-action="download-preview" style="padding:5px 9px" title="Скачать"><span class="material-symbols-outlined">download</span></button>' +
-  '<button class="btn-ghost" data-action="share-preview" style="padding:5px 9px" title="Публичная ссылка"><span class="material-symbols-outlined">link</span></button>' +
+  '<button class="btn-ghost" data-action="fullscreen-preview" style="padding:5px 9px" title="На весь экран"><span class="material-symbols-outlined">open_in_full</span></button>' +
   '<button class="btn-ghost" data-action="close-preview" style="padding:5px 9px" title="Закрыть"><span class="material-symbols-outlined">close</span></button>' +
   '</div>' +
   '<div id="preview-body" class="preview-body"></div>' +
@@ -3997,17 +4010,87 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</div></div></div>' +
 
   '<div id="modal-url" class="modal-backdrop" style="display:none">' +
-  '<div class="modal" style="width:460px">' +
-  '<div style="font-weight:700;font-size:18px;margin-bottom:6px">Загрузить по URL</div>' +
-  '<div style="font-size:12px;color:#958ea0;margin-bottom:14px">Файл попадёт в текущую папку CloudSpace</div>' +
-  '<input id="url-dl-inp" class="inp" placeholder="https://example.com/file.zip" style="margin-bottom:10px">' +
-  '<select id="url-mode-inp" class="inp" style="margin-bottom:10px"><option value="file">Обычный файл</option><option value="video">Медиа: видео</option><option value="audio">Медиа: MP3 audio</option><option value="best">Медиа: лучший доступный файл</option></select>' +
-  '<input id="url-name-inp" class="inp" placeholder="Имя без расширения, если нужно" style="margin-bottom:6px">' +
-  '<div id="url-name-hint" style="font-size:11px;color:#958ea0;margin-bottom:12px">Для медиа расширение добавится автоматически: .mp4 или .mp3</div>' +
-  '<div id="url-status" style="font-size:12px;color:#958ea0;min-height:16px;margin-bottom:12px"></div>' +
+  '<div class="modal" style="width:520px">' +
+
+  /* header */
+  '<div style="display:flex;align-items:center;gap:14px;margin-bottom:22px">' +
+  '<div style="width:48px;height:48px;border-radius:16px;background:var(--accent-bg);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+  '<span class="material-symbols-outlined" style="color:var(--accent-color);font-size:26px;font-variation-settings:\'FILL\' 1">download</span>' +
+  '</div>' +
+  '<div><div style="font-weight:700;font-size:20px;font-family:var(--font-display);color:var(--on-surf)">Загрузить по URL</div>' +
+  '<div style="font-size:13px;color:var(--on-surf-var);margin-top:3px">Файл попадёт в текущую папку CloudSpace</div>' +
+  '</div></div>' +
+
+  /* url input */
+  '<div class="url-dl-inp-wrap">' +
+  '<span class="material-symbols-outlined url-inp-icon">link</span>' +
+  '<input id="url-dl-inp" type="text" placeholder="https://example.com/file.zip или ссылка YouTube..." autocomplete="off" data-form-type="other" data-lpignore="true" data-1p-ignore>' +
+  '</div>' +
+
+  /* mode label */
+  '<div style="font-size:11px;font-weight:600;color:var(--on-surf-var);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px">Тип загрузки</div>' +
+
+  /* hidden select used by addUrlDownload */
+  '<select id="url-mode-inp" style="display:none"><option value="file">file</option><option value="video">video</option><option value="audio">audio</option><option value="best">best</option></select>' +
+
+  /* cards 2×2 */
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px">' +
+
+  '<div id="url-card-file" class="url-mode-card selected" onclick="selectUrlMode(\'file\')">' +
+  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+  '<div style="width:36px;height:36px;border-radius:10px;background:color-mix(in srgb,var(--accent-color) 16%,transparent);display:flex;align-items:center;justify-content:center">' +
+  '<span class="material-symbols-outlined" style="font-size:20px;color:var(--accent-color);font-variation-settings:\'FILL\' 1">insert_drive_file</span>' +
+  '</div>' +
+  '<div style="font-size:14px;font-weight:700;color:var(--on-surf)">Файл</div>' +
+  '</div>' +
+  '<div style="font-size:12px;color:var(--on-surf-var);line-height:1.45">Прямая ссылка на любой файл</div>' +
+  '</div>' +
+
+  '<div id="url-card-video" class="url-mode-card" onclick="selectUrlMode(\'video\')">' +
+  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+  '<div style="width:36px;height:36px;border-radius:10px;background:rgba(255,100,80,.13);display:flex;align-items:center;justify-content:center">' +
+  '<span class="material-symbols-outlined" style="font-size:20px;color:#ff6454;font-variation-settings:\'FILL\' 1">movie</span>' +
+  '</div>' +
+  '<div style="font-size:14px;font-weight:700;color:var(--on-surf)">Видео</div>' +
+  '</div>' +
+  '<div style="font-size:12px;color:var(--on-surf-var);line-height:1.45">YouTube, Vimeo и другие площадки</div>' +
+  '</div>' +
+
+  '<div id="url-card-audio" class="url-mode-card" onclick="selectUrlMode(\'audio\')">' +
+  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+  '<div style="width:36px;height:36px;border-radius:10px;background:rgba(80,180,255,.13);display:flex;align-items:center;justify-content:center">' +
+  '<span class="material-symbols-outlined" style="font-size:20px;color:#50b4ff;font-variation-settings:\'FILL\' 1">music_note</span>' +
+  '</div>' +
+  '<div style="font-size:14px;font-weight:700;color:var(--on-surf)">MP3 аудио</div>' +
+  '</div>' +
+  '<div style="font-size:12px;color:var(--on-surf-var);line-height:1.45">Извлечь аудиодорожку в MP3</div>' +
+  '</div>' +
+
+  '<div id="url-card-best" class="url-mode-card" onclick="selectUrlMode(\'best\')">' +
+  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+  '<div style="width:36px;height:36px;border-radius:10px;background:rgba(180,120,255,.13);display:flex;align-items:center;justify-content:center">' +
+  '<span class="material-symbols-outlined" style="font-size:20px;color:#b478ff;font-variation-settings:\'FILL\' 1">hd</span>' +
+  '</div>' +
+  '<div style="font-size:14px;font-weight:700;color:var(--on-surf)">Лучшее качество</div>' +
+  '</div>' +
+  '<div style="font-size:12px;color:var(--on-surf-var);line-height:1.45">Наилучший доступный медиаформат</div>' +
+  '</div>' +
+
+  '</div>' + /* end grid */
+
+  /* optional filename */
+  '<input id="url-name-inp" type="text" placeholder="Имя без расширения (необязательно)" autocomplete="off" data-form-type="other" data-lpignore="true" data-1p-ignore>' +
+  '<div id="url-name-hint" style="font-size:11px;color:var(--on-surf-var);margin-bottom:14px">Для медиа расширение добавится автоматически: .mp4 или .mp3</div>' +
+
+  /* status */
+  '<div id="url-status" style="font-size:12px;color:var(--on-surf-var);min-height:18px;margin-bottom:14px"></div>' +
+
+  /* buttons */
   '<div style="display:flex;gap:10px;justify-content:flex-end">' +
   '<button class="btn-ghost" data-action="close-url-modal">Отмена</button>' +
-  '<button class="btn-primary" data-action="confirm-url-download">Загрузить</button>' +
+  '<button class="btn-primary" data-action="confirm-url-download" style="display:inline-flex;align-items:center;gap:8px">' +
+  '<span class="material-symbols-outlined" style="font-size:18px;font-variation-settings:\'FILL\' 1">download</span>Загрузить' +
+  '</button>' +
   '</div></div></div>' +
 
   '<div id="modal-share" class="modal-backdrop" style="display:none">' +
@@ -4501,7 +4584,16 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
 
   /* ── DELETE ── */
-  'function openUrlModal(prefill){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value=prefill||"";document.getElementById("url-name-inp").value="";document.getElementById("url-mode-inp").value="file";document.getElementById("url-status").textContent="";setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
+  'function selectUrlMode(mode){' +
+  '  document.getElementById("url-mode-inp").value=mode;' +
+  '  var modes=["file","video","audio","best"];' +
+  '  for(var i=0;i<modes.length;i++){' +
+  '    var card=document.getElementById("url-card-"+modes[i]);' +
+  '    if(!card)continue;' +
+  '    if(modes[i]===mode){card.classList.add("selected");}else{card.classList.remove("selected");}' +
+  '  }' +
+  '}' +
+  'function openUrlModal(prefill){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value=prefill||"";document.getElementById("url-name-inp").value="";selectUrlMode("file");document.getElementById("url-status").textContent="";setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
   'function closeUrlModal(){document.getElementById("modal-url").style.display="none";}' +
   'function stripInputMediaExt(name){return String(name||"").replace(/\\.(mp4|webm|mkv|mov|m4v|mp3|m4a|opus|ogg|wav|flac|aac)$/i,"");}' +
   'function addUrlDownload(){var url=document.getElementById("url-dl-inp").value.trim();var name=document.getElementById("url-name-inp").value.trim();var mode=document.getElementById("url-mode-inp").value;var st=document.getElementById("url-status");var folder=activePath();if(!url){st.textContent="Вставь URL";return;}var media=mode!=="file";if(media)name=stripInputMediaExt(name);st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:folder,mode:mode})}).then(function(r){return r.json();}).then(function(d){if(d.ok){var gid=d.gid||(d.job&&d.job.id);if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,folder);}st.textContent=media?"Медиа-загрузка запущена":"Загрузка добавлена";closeUrlModal();loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
@@ -4514,7 +4606,60 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
   'function closePreview(){if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}document.getElementById("preview-panel").classList.remove("open");document.getElementById("preview-body").classList.remove("media-preview");document.getElementById("preview-body").innerHTML="";document.getElementById("preview-info").innerHTML="";previewKind="";previewSrc="";updatePreviewNavButtons();}' +
   'function metaRow(label,value){return \'<div class="meta-row"><div class="meta-lbl">\'+H(label)+\'</div><div class="meta-val">\'+(value||"—")+\'</div></div>\';}' +
-  'function renderPreviewInfo(fp,name){var info=document.getElementById("preview-info");info.innerHTML=\'<div style="font-size:12px;color:#958ea0">Загрузка информации...</div>\';fetch("/api/fm/meta?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(m){if(m.error){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);return;}var links=m.publicLinks||[];var linkHtml=links.length?links.map(function(x){var full=window.location.origin+x.url;return \'<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><a href="\'+H(x.url)+\'" target="_blank" style="color:#d2bbff;min-width:0;overflow:hidden;text-overflow:ellipsis">\'+H(full)+\'</a><button class="btn-ghost" data-action="qr-link" data-url="\'+H(full)+\'" style="padding:2px 7px;min-height:24px;font-size:11px">QR</button></div>\';}).join(""):"Нет";var h="";h+=metaRow("Имя",m.name||name);h+=metaRow("Путь",m.path||fp);h+=metaRow("Размер",m.isDir?"—":fmtSize(m.size));h+=metaRow("Тип",m.isDir?"Папка":(m.ext?m.ext.slice(1).toUpperCase():"Файл"));h+=metaRow("Загружен",fmtDateTime(m.created));h+=metaRow("Изменён",fmtDateTime(m.mtime));h+=metaRow("Публичная ссылка",linkHtml);info.innerHTML=h;}).catch(function(){info.innerHTML=metaRow("Имя",name)+metaRow("Путь",fp);});}' +
+  'function renderPreviewInfo(fp,name){' +
+  '  var info=document.getElementById("preview-info");' +
+  '  info.innerHTML=\'<div style="padding:20px;text-align:center;font-size:12px;color:var(--on-surf-var)">Загрузка информации...</div>\';' +
+  '  fetch("/api/fm/meta?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(m){' +
+  '    if(m.error){info.innerHTML=\'<div style="padding:16px;color:#ffb4ab;font-size:13px">\'+H(m.error)+\'</div>\';return;}' +
+  '    var links=m.publicLinks||[];var isDir=!!m.isDir;' +
+  '    var ext=m.ext?m.ext.slice(1).toUpperCase():(isDir?"Папка":"Файл");' +
+  '    var h="";' +
+
+  /* name */
+  '    h+=\'<div style="padding:18px 16px 0">\';' +
+  '    h+=\'<div class="preview-meta-label">Название</div>\';' +
+  '    h+=\'<div style="font-size:15px;font-weight:700;color:var(--on-surf);word-break:break-all;line-height:1.45;font-family:var(--font-display)">\'+H(m.name||name)+\'</div>\';' +
+  '    h+=\'</div>\';' +
+
+  /* size + type chips */
+  '    if(!isDir){' +
+  '      h+=\'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px 16px 0">\';' +
+  '      h+=\'<div class="preview-meta-chip"><div class="preview-meta-label">Размер</div><div style="font-size:14px;font-weight:700;color:var(--on-surf)">\'+fmtSize(m.size)+\'</div></div>\';' +
+  '      h+=\'<div class="preview-meta-chip"><div class="preview-meta-label">Тип</div><div style="font-size:14px;font-weight:700;color:var(--on-surf)">\'+H(ext)+\'</div></div>\';' +
+  '      h+=\'</div>\';' +
+  '    }' +
+
+  /* date */
+  '    h+=\'<div style="padding:14px 16px 0">\';' +
+  '    h+=\'<div class="preview-meta-label">Загружен</div>\';' +
+  '    h+=\'<div style="font-size:13px;color:var(--on-surf)">\'+fmtDateTime(m.created)+\'</div>\';' +
+  '    h+=\'</div>\';' +
+
+  /* path chip */
+  '    h+=\'<div style="padding:14px 16px 0">\';' +
+  '    h+=\'<div class="preview-meta-label">Путь</div>\';' +
+  '    h+=\'<div style="background:var(--surf-hi);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--accent-light);word-break:break-all;line-height:1.5">\'+H(m.path||fp)+\'</div>\';' +
+  '    h+=\'</div>\';' +
+
+  /* public links */
+  '    if(links.length){' +
+  '      var lh=links.map(function(x){var full=window.location.origin+x.url;return \'<div style="display:flex;align-items:center;gap:6px;margin-top:5px"><a href="\'+H(x.url)+\'" target="_blank" style="color:var(--accent-light);font-size:12px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">\'+H(full)+\'</a><button class="btn-ghost" data-action="qr-link" data-url="\'+H(full)+\'" style="padding:2px 7px;min-height:24px;font-size:11px">QR</button></div>\';}).join("");' +
+  '      h+=\'<div style="padding:14px 16px 0"><div class="preview-meta-label">Публичная ссылка</div>\'+lh+\'</div>\';' +
+  '    }' +
+
+  /* push buttons to bottom */
+  '    h+=\'<div style="flex:1;min-height:16px"></div>\';' +
+
+  /* action buttons */
+  '    h+=\'<div style="padding:16px;display:flex;flex-direction:column;gap:8px">\';' +
+  '    h+=\'<button class="btn-primary preview-action-btn" data-action="download-preview"><span class="material-symbols-outlined" style="font-size:18px">download</span>Скачать</button>\';' +
+  '    h+=\'<button class="btn-ghost preview-action-btn" data-action="share-preview"><span class="material-symbols-outlined" style="font-size:18px">share</span>Поделиться</button>\';' +
+  '    if(!isDir)h+=\'<button class="btn-ghost preview-action-btn" data-action="delete-preview" style="color:#ffb4ab;border-color:rgba(147,0,10,.45)"><span class="material-symbols-outlined" style="font-size:18px">delete</span>Удалить</button>\';' +
+  '    h+=\'</div>\';' +
+
+  '    info.innerHTML=h;' +
+  '  }).catch(function(){info.innerHTML=\'<div style="padding:16px;color:#ffb4ab;font-size:13px">Ошибка загрузки метаданных</div>\';});' +
+  '}' +
   'function fitPlyrToVideo(media,player){if(!media||!player)return;var container=player.elements&&player.elements.container;if(!container)return;function fit(){var vw=media.videoWidth||0,vh=media.videoHeight||0;if(!vw||!vh)return;var host=media.closest(".preview-media-wrap")||media.closest(".mv-stage")||container.parentElement;if(!host)return;var maxW=host.clientWidth||window.innerWidth,maxH=host.clientHeight||Math.round(window.innerHeight*.72);if(host.classList&&host.classList.contains("mv-stage"))maxH=Math.max(220,maxH-4);else maxH=Math.min(maxH||Math.round(window.innerHeight*.72),Math.round(window.innerHeight*.72));var ratio=vw/vh,w=maxW,h=w/ratio;if(h>maxH){h=maxH;w=h*ratio;}container.style.width=Math.max(180,Math.floor(w))+"px";container.style.maxWidth="100%";container.style.aspectRatio=vw+" / "+vh;var wrap=container.querySelector(".plyr__video-wrapper");if(wrap){wrap.style.aspectRatio=vw+" / "+vh;wrap.style.height=Math.floor(h)+"px";}media.style.objectFit="contain";}media.addEventListener("loadedmetadata",fit,{once:false});window.addEventListener("resize",fit);setTimeout(fit,80);setTimeout(fit,400);}\n' +
   'function getPlayableMediaFiles(kind){' +
   '  var exts=[];' +
@@ -4853,6 +4998,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="set-accent"){var themeName=el.dataset.theme;localStorage.setItem("cloud-accent",themeName);applyAccentColor();document.querySelectorAll(".theme-card").forEach(function(x){var on=x.dataset.theme===themeName;x.classList.toggle("active",on);var i=x.querySelector(".material-symbols-outlined:last-child");if(i)i.textContent=on?"check_circle":"radio_button_unchecked";});}' +
   '  else if(action==="download-preview"){if(previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);}' +
   '  else if(action==="share-preview"){if(previewFp)shareOne(previewFp);}' +
+  '  else if(action==="delete-preview"){if(previewFp&&confirm("Удалить файл?"))fetch("/api/fm/delete",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:previewFp,isDir:false})}).then(function(r){return r.json();}).then(function(d){if(d.ok){closePreview();refreshCurrent();}else alert(d.error||"Ошибка удаления");}).catch(function(){alert("Ошибка удаления");});}' +
   '  else if(action==="transfer-pause"){fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid)+"/pause",{method:"POST"}).then(loadTransfers);}' +
   '  else if(action==="transfer-resume"){fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid)+"/resume",{method:"POST"}).then(loadTransfers);}' +
   '  else if(action==="transfer-remove"){if(confirm("Убрать загрузку?"))fetch("/api/downloads/"+encodeURIComponent(el.dataset.gid),{method:"DELETE"}).then(loadTransfers);}' +
