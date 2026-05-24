@@ -91,7 +91,7 @@ const VT_API = 'https://www.virustotal.com/api/v3';
 
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.5.0';
+const SITE_VERSION = '2.6.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -1243,7 +1243,7 @@ app.get('/api/tg/status', auth, (req, res) => {
 
 app.get('/api/tg/connect-link', auth, (req, res) => {
   const tokens = loadTokens();
-  const token = tokens[req.session.user];
+  const token = Object.keys(tokens).find(t => tokens[t] === req.session.user);
   if (!token) return res.status(400).json({ error: 'Нет токена. Сначала получите токен расширения.' });
   res.json({ url: `https://t.me/${TG_BOT_NAME}?start=${token}` });
 });
@@ -1275,7 +1275,7 @@ async function handleTgUpdate(update) {
       return;
     }
     const tokens = loadTokens();
-    const username = Object.keys(tokens).find(u => tokens[u] === token);
+    const username = tokens[token];
     if (!username) {
       await tgSend(chatId, '❌ Неверный токен. Проверьте в Настройках → Токен расширения на sipliyfolder.ru');
       return;
