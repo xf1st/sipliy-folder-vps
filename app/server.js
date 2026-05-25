@@ -1914,6 +1914,39 @@ app.get('/api/fm/preview', auth, (req, res) => {
     return;
   }
   if (['.mp4','.webm','.ogg','.mov','.mkv','.m4v'].includes(ext)) {
+    const quality = req.query.quality;
+    if (quality && ['360', '480', '720'].includes(quality)) {
+      const height = parseInt(quality, 10);
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Cache-Control', 'no-cache');
+      const { spawn } = require('child_process');
+      console.log(`Transcoding video ${full} to ${quality}p`);
+      const ffmpeg = spawn('ffmpeg', [
+        '-y',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', full,
+        '-vf', `scale=-2:${height}`,
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-tune', 'fastdecode',
+        '-threads', '1',
+        '-crf', '28',
+        '-c:a', 'copy',
+        '-f', 'mp4',
+        '-movflags', 'frag_keyframe+empty_moov',
+        'pipe:1'
+      ]);
+      ffmpeg.stdout.pipe(res);
+      ffmpeg.on('error', (err) => {
+        console.error('Failed to start ffmpeg transcoding process:', err);
+      });
+      req.on('close', () => {
+        console.log(`Killing transcoding child process for ${quality}p`);
+        ffmpeg.kill('SIGKILL');
+      });
+      return;
+    }
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'private, max-age=3600');
     const typeMap = { '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.ogg': 'video/ogg', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska' };
@@ -3526,7 +3559,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.select-check{width:16px;height:16px;accent-color:var(--accent-color);cursor:pointer;flex:0 0 auto}' +
   '#selection-bar{display:none;align-items:center;gap:10px;padding:10px 24px;border-bottom:1px solid color-mix(in srgb,var(--outline-var) 45%,transparent);background:var(--surf);flex-shrink:0}' +
   '#upload-panel{display:none;position:fixed;right:24px;bottom:24px;z-index:350;width:min(420px,calc(100vw - 48px));background:var(--surf-cont);border:none;border-radius:24px;padding:20px;box-shadow:0 20px 70px rgba(0,0,0,.55);animation:slideUp .32s var(--m3-spring) both}' +
-  '#toast{display:none;position:fixed;right:24px;bottom:24px;z-index:650;width:min(380px,calc(100vw - 48px));background:var(--surf-cont);border:none;border-left:3px solid var(--accent-color);border-radius:16px;padding:12px 16px;box-shadow:0 8px 32px rgba(0,0,0,.5);animation:slideUp .28s var(--m3-spring) both}' +
+  '#toast{display:none;flex-direction:column;position:fixed;right:24px;bottom:24px;z-index:650;width:min(360px,calc(100vw - 48px));background:#18181c;border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,0.5);animation:slideUp .28s var(--m3-spring) both;box-sizing:border-box} #toast .toast-circle{transition:transform .2s cubic-bezier(.4,0,.2,1)} #toast .toast-circle:hover{transform:scale(1.08);background:color-mix(in srgb,var(--accent-color) 18%,#1b1b1e)!important}' +
   '#connection-pill{display:none;position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:700;align-items:center;gap:8px;background:rgba(28,25,33,.94);border:1px solid var(--accent-color);border-radius:9999px;padding:8px 14px;color:var(--on-surf);font-size:12px;font-weight:800;box-shadow:0 10px 34px rgba(0,0,0,.42);backdrop-filter:blur(18px)}' +
   '#connection-pill.offline{display:flex;border-color:#93000a;color:#ffdad6}' +
   '#connection-pill.checking{display:flex;border-color:var(--accent-color);color:var(--accent-light)}' +
@@ -3551,7 +3584,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.mv-stage .plyr,.preview-media-wrap .plyr{width:auto;max-width:100%;border-radius:14px;background:#000;box-shadow:0 24px 90px rgba(0,0,0,.38);overflow:hidden}' +
   '.mv-stage .plyr{max-height:100%;height:auto}' +
   '.mv-stage .plyr video,.preview-media-wrap .plyr video{width:100%;height:100%;max-width:100%;max-height:72vh;object-fit:contain}' +
-  '.mv-stage .plyr__video-wrapper,.preview-media-wrap .plyr__video-wrapper{background:#000!important;aspect-ratio:auto!important}' +
+  '.mv-stage .plyr__video-wrapper,.preview-media-wrap .plyr__video-wrapper{background:#000!important;aspect-ratio:auto!important;padding-bottom:0!important;height:100%!important;display:flex;align-items:center;justify-content:center}' +
   '.preview-media-wrap .plyr audio{width:100%}' +
   '.plyr--full-ui input[type=range]{color:var(--accent-color)}' +
   '.preview-media-wrap{width:100%;min-height:260px;display:flex;align-items:center;justify-content:center}' +
@@ -3650,7 +3683,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'body.light .file-grid-item [style*="color:#d0bcff"],body.light .file-row [style*="color:#d0bcff"]{color:var(--accent-hover)!important}' +
   'body.light .modal{background:#fff;color:#1c1a23;box-shadow:0 24px 80px rgba(80,60,120,.2)}' +
   'body.light #upload-panel{background:#fff}' +
-  'body.light #toast{background:#fff;color:#1c1a23}' +
+  'body.light #toast{background:#f5f3f7;border-color:rgba(0,0,0,0.08);color:#1c1a23} body.light #toast .toast-circle{background:#fff;border-color:rgba(0,0,0,0.06)}' +
   'body.light #connection-pill{background:rgba(255,255,255,.94);color:#1c1a23}' +
   'body.light .speed-metric{background:#faf8ff}' +
   'body.light .speed-metric b{color:#1c1a23}' +
@@ -4018,15 +4051,31 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="mv-bottom" class="mv-bottom"></div>' +
   '</div>' +
   '<div id="ctx-menu"></div>' +
-  '<div id="toast" style="display:none;align-items:center;gap:10px">' +
-  '  <div style="flex:1;min-width:0">' +
-  '    <div id="toast-title" style="font-weight:700;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>' +
-  '    <div id="toast-body" style="font-size:11.5px;color:#cbc3d7;word-break:break-all;max-height:2.8em;overflow:hidden;line-height:1.4;margin-top:2px"></div>' +
+'<div id="toast" style="display:none;flex-direction:column;gap:14px;box-sizing:border-box">' +
+  '  <div style="display:flex;justify-content:space-between;align-items:center;width:100%">' +
+  '    <div id="toast-title" style="font-weight:800;font-size:16px;font-family:var(--font-display);color:#fff">Поделиться ссылкой</div>' +
+  '    <button class="btn-ghost" data-action="hide-toast" style="padding:4px;min-height:auto;min-width:auto;border-color:transparent;border-radius:50%;color:#958ea0;display:flex;align-items:center;justify-content:center;background:transparent" title="Закрыть"><span class="material-symbols-outlined" style="font-size:18px">close</span></button>' +
   '  </div>' +
-  '  <div style="display:flex;gap:5px;flex-shrink:0">' +
-  '    <button class="btn-ghost" data-action="open-toast-qr" style="padding:3px 8px;font-size:11px">QR</button>' +
-  '    <button class="btn-ghost" data-action="copy-toast" style="padding:3px 8px;font-size:11px">📋</button>' +
-  '    <button class="btn-ghost" data-action="hide-toast" style="padding:3px 8px;font-size:11px">✕</button>' +
+  '  <div id="toast-body" style="font-size:12px;color:#958ea0;word-break:break-all;line-height:1.4"></div>' +
+  '  <div id="toast-share-actions" style="display:flex;justify-content:space-around;align-items:center;margin-top:4px;width:100%">' +
+  '    <div style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer" data-action="copy-toast">' +
+  '      <div class="toast-circle" style="width:54px;height:54px;border-radius:50%;background:color-mix(in srgb,var(--accent-color) 12%,#1b1b1e);border:1px solid color-mix(in srgb,var(--accent-color) 20%,transparent);display:flex;align-items:center;justify-content:center;transition:transform .2s cubic-bezier(.4,0,.2,1)">' +
+  '        <span class="material-symbols-outlined" style="color:var(--accent-light);font-size:22px">content_copy</span>' +
+  '      </div>' +
+  '      <span style="font-size:11px;font-weight:600;color:#958ea0">Копировать</span>' +
+  '    </div>' +
+  '    <div style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer" data-action="open-toast-qr">' +
+  '      <div class="toast-circle" style="width:54px;height:54px;border-radius:50%;background:color-mix(in srgb,var(--accent-color) 12%,#1b1b1e);border:1px solid color-mix(in srgb,var(--accent-color) 20%,transparent);display:flex;align-items:center;justify-content:center;transition:transform .2s cubic-bezier(.4,0,.2,1)">' +
+  '        <span class="material-symbols-outlined" style="color:var(--accent-light);font-size:22px">qr_code_2</span>' +
+  '      </div>' +
+  '      <span style="font-size:11px;font-weight:600;color:#958ea0">QR-код</span>' +
+  '    </div>' +
+  '    <div style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer" data-action="open-toast-link">' +
+  '      <div class="toast-circle" style="width:54px;height:54px;border-radius:50%;background:color-mix(in srgb,var(--accent-color) 12%,#1b1b1e);border:1px solid color-mix(in srgb,var(--accent-color) 20%,transparent);display:flex;align-items:center;justify-content:center;transition:transform .2s cubic-bezier(.4,0,.2,1)">' +
+  '        <span class="material-symbols-outlined" style="color:var(--accent-light);font-size:22px">open_in_new</span>' +
+  '      </div>' +
+  '      <span style="font-size:11px;font-weight:600;color:#958ea0">Перейти</span>' +
+  '    </div>' +
   '  </div>' +
   '</div>' +
   '<div id="connection-pill"><span class="dot"></span><span id="connection-text">Проверяю соединение...</span></div>' +
@@ -4330,7 +4379,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
   'function setSectionChrome(kind){var a=document.querySelector(".mobile-actions");if(a)a.style.display=kind==="files"?"flex":"none";updateSmartToolbar(kind);if(kind!=="files"){try{clearTimeout(searchTimer);var s=document.getElementById("search-inp");if(s)s.value="";}catch(e){}}}' +
   'function moveItemTo(from,name,dest){dest=dest||"";if(!from||dest===from||dest.indexOf(from+"/")===0)return;var to=dest?(dest+"/"+name):name;if(to===from)return;fetch("/api/fm/move",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({from:from,to:to})}).then(function(r){return r.json();}).then(function(d){if(d.ok)navigateTo(activePath());else alert(d.error||"Ошибка перемещения");});}' +
-  'function showToast(title,body,url){title=title||"";body=body||"";toastUrl=url||"";if(!title&&!body&&!url)return hideToast();document.getElementById("toast-title").textContent=title;document.getElementById("toast-body").textContent=body||url||"";document.getElementById("toast").style.display="flex";if(url&&navigator.clipboard)navigator.clipboard.writeText(url).catch(function(){});}' +
+  'function showToast(title,body,url){title=title||"";body=body||"";toastUrl=url||"";if(!title&&!body&&!url)return hideToast();document.getElementById("toast-title").textContent=title;document.getElementById("toast-body").textContent=body||url||"";var actions=document.getElementById("toast-share-actions");if(actions){actions.style.display=url?"flex":"none";}document.getElementById("toast").style.display="flex";if(url&&navigator.clipboard)navigator.clipboard.writeText(url).catch(function(){});}' +
   'function hideToast(){document.getElementById("toast").style.display="none";}' +
   'function copyToast(){if(toastUrl&&navigator.clipboard)navigator.clipboard.writeText(toastUrl).then(function(){showToast("Скопировано",toastUrl,toastUrl);});}' +
   'function qrImageUrl(url){return "/api/qr?data="+encodeURIComponent(url);}' +
@@ -5161,7 +5210,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  var s=Math.floor(secs%60);' +
   '  return m+":"+(s<10?"0":"")+s;' +
   '}' +
-  'function openPreview(fp,name,isDir,startTime,autoPlay){if(isDir){navigateTo(fp);return;}if(window.previewPlyrInstance){try{window.previewPlyrInstance.destroy();}catch(e){}window.previewPlyrInstance=null;}var body=document.getElementById("preview-body");body.innerHTML="";previewFp=fp;previewName=name;previewKind="";previewSrc="";var ext=(name.split(".").pop()||"").toLowerCase();if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext))previewKind="image";else if(["mp4","webm","ogg","mov","mkv"].includes(ext))previewKind="video";else if(["mp3","wav","m4a","flac","aac","oga"].includes(ext))previewKind="audio";updatePreviewNavButtons();var panel=document.getElementById("preview-panel");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");renderPreviewInfo(fp,name);var src="/api/fm/preview?path="+encodeURIComponent(fp);if(previewKind==="image"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(previewKind==="video"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video id="preview-plyr" src="${src}" playsinline controls></video></div>`;setTimeout(function(){try{if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}window.previewPlyrInstance=initPlyr("#preview-plyr",true,"plyr_time_"+src,startTime,autoPlay);}catch(e){console.error(e);}},50);return;}if(previewKind==="audio"){previewSrc=src;playGlobalAudio(fp,name,false);body.classList.add("media-preview");body.innerHTML=\'<div style="padding:24px;text-align:center;color:var(--outline)"><span class="material-symbols-outlined" style="font-size:48px;color:var(--accent-color);margin-bottom:10px">music_note</span><div style="font-size:14px;font-weight:700;color:var(--on-surf);margin-bottom:4px">Воспроизведение...</div><div style="font-size:12px;color:var(--outline)">Трек загружен в плеер сайдбара</div></div>\';return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf","py","sh"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){if(t.length<150000&&["js","css","html","xml","json","py","sh","yml","yaml","md"].includes(ext)){var highlighted=highlightCode(t,ext);body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0;font-family:\'Fira Code\',Consolas,monospace;background:#18181f;padding:12px;border-radius:10px;color:#f8f8f2">${highlighted}</pre>`;}else{body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
+  'function openPreview(fp,name,isDir,startTime,autoPlay){if(isDir){navigateTo(fp);return;}if(window.previewPlyrInstance){try{window.previewPlyrInstance.destroy();}catch(e){}window.previewPlyrInstance=null;}var body=document.getElementById("preview-body");body.innerHTML="";previewFp=fp;previewName=name;previewKind="";previewSrc="";var ext=(name.split(".").pop()||"").toLowerCase();if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext))previewKind="image";else if(["mp4","webm","ogg","mov","mkv"].includes(ext))previewKind="video";else if(["mp3","wav","m4a","flac","aac","oga"].includes(ext))previewKind="audio";updatePreviewNavButtons();var panel=document.getElementById("preview-panel");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");renderPreviewInfo(fp,name);var src="/api/fm/preview?path="+encodeURIComponent(fp);if(previewKind==="image"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(previewKind==="video"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video id="preview-plyr" crossorigin="anonymous" playsinline controls><source src="${src}" type="video/mp4" size="1080"><source src="${src}&quality=720" type="video/mp4" size="720"><source src="${src}&quality=480" type="video/mp4" size="480"><source src="${src}&quality=360" type="video/mp4" size="360"></video></div>`;setTimeout(function(){try{if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}window.previewPlyrInstance=initPlyr("#preview-plyr",true,"plyr_time_"+src,startTime,autoPlay);}catch(e){console.error(e);}},50);return;}if(previewKind==="audio"){previewSrc=src;playGlobalAudio(fp,name,false);body.classList.add("media-preview");body.innerHTML=\'<div style="padding:24px;text-align:center;color:var(--outline)"><span class="material-symbols-outlined" style="font-size:48px;color:var(--accent-color);margin-bottom:10px">music_note</span><div style="font-size:14px;font-weight:700;color:var(--on-surf);margin-bottom:4px">Воспроизведение...</div><div style="font-size:12px;color:var(--outline)">Трек загружен в плеер сайдбара</div></div>\';return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf","py","sh"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){if(t.length<150000&&["js","css","html","xml","json","py","sh","yml","yaml","md"].includes(ext)){var highlighted=highlightCode(t,ext);body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0;font-family:\'Fira Code\',Consolas,monospace;background:#18181f;padding:12px;border-radius:10px;color:#f8f8f2">${highlighted}</pre>`;}else{body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
   'function openPreviewShell(fp,name){if(window.previewPlyrInstance){try{window.previewPlyrInstance.destroy();}catch(e){}window.previewPlyrInstance=null;}var body=document.getElementById("preview-body");body.innerHTML="";previewFp=fp;previewName=name;previewKind="";previewSrc="";updatePreviewNavButtons();var panel=document.getElementById("preview-panel");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");renderPreviewInfo(fp,name);return body;}' +
   'function renderDocPreview(fp,name){var body=openPreviewShell(fp,name);body.innerHTML=\'<div style="color:#958ea0;padding:20px">Загрузка документа...</div>\';fetch("/api/fm/doc-preview?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(d){if(!d.ok){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">\'+H(d.error||"Не удалось открыть документ")+\'</div>\';return;}if(d.type==="sheet"){var sheets=d.sheets||[];if(!sheets.length){body.innerHTML=\'<div style="padding:24px;color:#958ea0">В таблице нет листов</div>\';return;}var h=\'<div class="doc-tabs">\';for(var i=0;i<sheets.length;i++)h+=\'<button class="doc-tab" data-sheet="\'+i+\'">\'+H(sheets[i].name)+\'</button>\';h+=\'</div><div id="sheet-preview" class="doc-preview">\'+(sheets[0].html||"")+\'</div>\';body.innerHTML=h;body.querySelectorAll("[data-sheet]").forEach(function(btn){btn.addEventListener("click",function(){var idx=parseInt(btn.dataset.sheet,10)||0;document.getElementById("sheet-preview").innerHTML=sheets[idx].html||"";});});return;}body.innerHTML=\'<div class="doc-preview">\'+(d.html||"")+\'</div>\';}).catch(function(){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">Ошибка предпросмотра</div>\';});}' +
   'function renderArchivePreview(fp,name){var body=openPreviewShell(fp,name);body.innerHTML=\'<div style="color:#958ea0;padding:20px">Читаю архив...</div>\';fetch("/api/fm/archive/list?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(d){if(!d.ok){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">\'+H(d.error||"Не удалось открыть архив")+\'<div style="margin-top:8px;color:#958ea0;font-size:12px">\'+H(d.details||"")+\'</div></div>\';return;}var items=d.entries||[];if(!items.length){body.innerHTML=\'<div style="padding:24px;color:#958ea0">Архив пуст</div>\';return;}var h=\'<div style="display:flex;justify-content:space-between;gap:10px;margin-bottom:10px;color:#958ea0;font-size:12px"><span>\'+items.length+\' items</span><a class="btn-ghost" href="/api/fm/download?path=\'+encodeURIComponent(fp)+\'" download style="text-decoration:none;padding:4px 10px;min-height:28px">Скачать архив</a></div><table class="archive-table"><tbody>\';items.forEach(function(x){var icon=x.isDir?"folder":"draft";var cls=x.isDir?"archive-path archive-dir":"archive-path";h+=\'<tr><td style="width:28px"><span class="material-symbols-outlined" style="font-size:18px">\'+icon+\'</span></td><td><div class="\'+cls+\'" title="\'+H(x.path)+\'">\'+H(x.path)+\'</div></td><td style="width:76px;color:#958ea0;white-space:nowrap">\'+(x.isDir?"":fmtSize(x.size||0))+\'</td><td style="width:42px;text-align:right">\'+(x.isDir?"":\'<a class="btn-ghost" href="/api/fm/archive/download?path=\'+encodeURIComponent(fp)+\'&entry=\'+encodeURIComponent(x.path)+\'" download style="padding:3px 8px;min-height:24px;text-decoration:none">↓</a>\')+\'</td></tr>\';});h+=\'</tbody></table>\';body.innerHTML=h;}).catch(function(){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">Ошибка чтения архива</div>\';});}' +
@@ -5275,8 +5324,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    }, 50);' +
   '  } else {' +
   '    var autoplayAttr=startPlayback?"autoplay":"";' +
-  '    var mvTag=previewKind==="audio"?"audio":"video";' +
-  '    stage.innerHTML=\'<\' + mvTag + \' id="mv-media" src="\' + previewSrc + \'" crossorigin="anonymous" playsinline controls style="max-height:100%" \' + autoplayAttr + \'></\' + mvTag + \'>\';' +
+  '    if(previewKind==="video"){' +
+  '      stage.innerHTML=\'<video id="mv-media" crossorigin="anonymous" playsinline controls style="max-height:100%" \' + autoplayAttr + \'><source src="\' + previewSrc + \'" type="video/mp4" size="1080"><source src="\' + previewSrc + \'&quality=720" type="video/mp4" size="720"><source src="\' + previewSrc + \'&quality=480" type="video/mp4" size="480"><source src="\' + previewSrc + \'&quality=360" type="video/mp4" size="360"></video>\';' +
+  '    }else{' +
+  '      stage.innerHTML=\'<audio id="mv-media" src="\' + previewSrc + \'" crossorigin="anonymous" playsinline controls style="max-height:100%" \' + autoplayAttr + \'></audio>\';' +
+  '    }' +
   '    var mediaFiles=getPlayableMediaFiles(previewKind);' +
   '    var plHtml=\'<div class="plyr-playlist" style="width:100%;padding:10px 16px;background:rgba(20,20,24,0.72);border-top:1px solid rgba(255,255,255,0.06);box-sizing:border-box">\';' +
   '    plHtml+=\'<div style="font-size:12px;font-weight:700;color:var(--accent-light);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Плейлист папки</div>\';' +
@@ -5560,6 +5612,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="hide-toast"){hideToast();}' +
   '  else if(action==="copy-toast"){copyToast();}' +
   '  else if(action==="open-toast-qr"){openQrModal(toastUrl);}' +
+  '  else if(action==="open-toast-link"){if(toastUrl)window.open(toastUrl,"_blank");}' +
   '  else if(action==="qr-link"){openQrModal(el.dataset.url);}' +
   '  else if(action==="close-qr"){closeQrModal();}' +
   '  else if(action==="close-share-manager"){closeShareManager();}' +
