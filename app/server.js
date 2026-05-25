@@ -108,7 +108,7 @@ function getUserMaxTgSize(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.9.0';
+const SITE_VERSION = '2.10.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -973,7 +973,7 @@ app.post('/api/ext/share', extCors, authToken, (req, res) => {
   res.set(EXT_CORS).json({ ok: true, token, url: '/share/' + token, fullUrl });
 });
 // Версия расширения (без авторизации — для OTA проверки)
-const EXT_VERSION = '2.4.5';
+const EXT_VERSION = '2.10.0';
 app.get('/api/ext/version', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').json({
     version: EXT_VERSION,
@@ -1726,6 +1726,46 @@ app.delete('/api/fm/delete', auth, (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 // POST /api/fm/move  body: { from, to }
+// POST /api/fm/video-screenshot  body: { path, folder, img }
+app.post('/api/fm/video-screenshot', auth, (req, res) => {
+  const videoRelPath = req.body.path || '';
+  const folderRelPath = req.body.folder || '';
+  const base64Data = req.body.img || '';
+  
+  if (!videoRelPath || !base64Data) {
+    return res.status(400).json({ error: 'Неверные параметры' });
+  }
+  
+  const videoAbsPath = fmResolve(req.session.user, videoRelPath);
+  if (!videoAbsPath || !fs.existsSync(videoAbsPath)) {
+    return res.status(404).json({ error: 'Видеофайл не найден' });
+  }
+  
+  const folderAbsPath = fmResolve(req.session.user, folderRelPath);
+  if (!folderAbsPath || !fs.existsSync(folderAbsPath)) {
+    return res.status(404).json({ error: 'Папка не найдена' });
+  }
+  
+  try {
+    const videoBase = path.basename(videoAbsPath, path.extname(videoAbsPath));
+    const cleanVideoBase = videoBase.replace(/[^a-zA-Z0-9а-яА-ЯёЁ_ -]/g, '');
+    const ts = new Date().toISOString().replace(/T/, '_').replace(/\..+/, '').replace(/:/g, '-');
+    const screenshotName = `${cleanVideoBase}_frame_${ts}.png`;
+    const screenshotAbsPath = path.join(folderAbsPath, screenshotName);
+    
+    const rawData = base64Data.replace(/^data:image\/png;base64,/, "");
+    const buffer = Buffer.from(rawData, 'base64');
+    
+    fs.writeFileSync(screenshotAbsPath, buffer);
+    
+    const screenshotRelPath = folderRelPath ? (folderRelPath + '/' + screenshotName) : screenshotName;
+    logActivity(req.session.user, 'Скриншот', 'Сохранён кадр видео в ' + screenshotRelPath);
+    
+    res.json({ ok: true, name: screenshotName });
+  } catch (err) {
+    res.status(500).json({ error: 'Ошибка сохранения кадра: ' + err.message });
+  }
+});
 app.post('/api/fm/move', auth, (req, res) => {
   const from = fmResolve(req.session.user, req.body.from);
   const to   = fmResolve(req.session.user, req.body.to);
@@ -3973,7 +4013,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</aside>' +
   /* ── CONTEXT MENU ── */
   '<div id="media-viewer" class="media-viewer">' +
-  '<div class="mv-top"><div id="mv-title" class="mv-title">Media</div><button class="mv-icon" data-action="playlist-prev" title="Предыдущий"><span class="material-symbols-outlined">navigate_before</span></button><button class="mv-icon" data-action="playlist-next" title="Следующий"><span class="material-symbols-outlined">navigate_next</span></button><button class="mv-icon" data-action="mv-download" title="Скачать"><span class="material-symbols-outlined">download</span></button><button class="mv-icon" data-action="mv-share" title="Публичная ссылка"><span class="material-symbols-outlined">link</span></button><button class="mv-icon" data-action="mv-close" title="Закрыть"><span class="material-symbols-outlined">close</span></button></div>' +
+  '<div class="mv-top"><div id="mv-title" class="mv-title">Media</div><button class="mv-icon" data-action="playlist-prev" title="Предыдущий"><span class="material-symbols-outlined">navigate_before</span></button><button class="mv-icon" data-action="playlist-next" title="Следующий"><span class="material-symbols-outlined">navigate_next</span></button><button class="mv-icon" id="mv-btn-screenshot" data-action="mv-screenshot" title="Сделать скриншот" style="display:none"><span class="material-symbols-outlined">photo_camera</span></button><button class="mv-icon" data-action="mv-download" title="Скачать"><span class="material-symbols-outlined">download</span></button><button class="mv-icon" data-action="mv-share" title="Публичная ссылка"><span class="material-symbols-outlined">link</span></button><button class="mv-icon" data-action="mv-close" title="Закрыть"><span class="material-symbols-outlined">close</span></button></div>' +
   '<div id="mv-stage" class="mv-stage"></div>' +
   '<div id="mv-bottom" class="mv-bottom"></div>' +
   '</div>' +
@@ -4043,10 +4083,16 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div><div style="font-weight:700;font-size:20px;font-family:var(--font-display);color:var(--on-surf)">Загрузить по URL</div>' +
   '<div style="font-size:13px;color:var(--on-surf-var);margin-top:3px">Файл попадёт в текущую папку CloudSpace</div>' +
   '</div></div>' +
+  /* batch toggle */
+  '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+  '  <div style="font-size:11px;font-weight:600;color:var(--on-surf-var);text-transform:uppercase;letter-spacing:.8px">Ссылка для загрузки</div>' +
+  '  <button class="btn-ghost" id="url-toggle-batch" onclick="toggleUrlBatchMode()" style="padding:4px 8px;font-size:11px;border-radius:8px;min-height:24px;color:var(--accent-light)">Несколько ссылок</button>' +
+  '</div>' +
   /* url input */
-  '<div class="url-dl-inp-wrap">' +
+  '<div class="url-dl-inp-wrap" style="margin-bottom:14px">' +
   '<span class="material-symbols-outlined url-inp-icon">link</span>' +
   '<input id="url-dl-inp" type="text" placeholder="https://example.com/file.zip или ссылка YouTube..." autocomplete="off" data-form-type="other" data-lpignore="true" data-1p-ignore>' +
+  '<textarea id="url-dl-inp-batch" style="display:none;width:100%;height:100px;border-radius:14px;border:1.5px solid var(--outline-var);padding:10px 14px;background:var(--surf-hi);color:var(--on-surf);font-size:13px;font-family:monospace;resize:none;outline:none;box-sizing:border-box;transition:border-color .2s,box-shadow .2s;margin-top:2px" placeholder="Вставьте одну или несколько ссылок, каждую с новой строки..." onfocus="this.style.borderColor=\'var(--accent-color)\';this.style.boxShadow=\'0 0 0 3px color-mix(in srgb,var(--accent-color) 18%,transparent)\'" onblur="this.style.borderColor=\'var(--outline-var)\';this.style.boxShadow=\'none\'"></textarea>' +
   '</div>' +
   /* mode label */
   '<div style="font-size:11px;font-weight:600;color:var(--on-surf-var);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px">Тип загрузки</div>' +
@@ -4192,6 +4238,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'var selectedItems={},lastEntries=[],lastBase="";' +
   'var previewFp="",previewName="",previewKind="",previewSrc="",mvZoom=1;' +
   'var activeAudioFp="",activeAudioName="",currentAudioQueue=[],sidebarPlayerInitialized=false;' +
+  'var urlBatchMode=false,dashUrlBatchMode=false;' +
   'var toastUrl="";' +
   'var pendingShare=null;' +
   'var shareManagerFp="",shareManagerName="";' +
@@ -4373,8 +4420,17 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   "  h+='<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:20px;color:#d7c7ff;font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.08em\"><span class=\"material-symbols-outlined\">bolt</span> Быстрая отправка на VPS</div>';" +
   "  h+='<h1 style=\"font-size:34px;line-height:1.08;margin:0 0 10px;color:#fff;font-weight:900;max-width:760px\">Скачай файл на сервер и забери с любого устройства</h1>';" +
   "  h+='<div style=\"color:#bfb5d6;font-size:14px;line-height:1.55;max-width:780px;margin-bottom:22px\">Вставь ссылку, выбери режим или закинь файл с компьютера. Всё попадёт в CloudSpace, без прыжков между вкладками.</div>';" +
-  "  h+='<div style=\"display:grid;grid-template-columns:minmax(0,1fr) 170px;gap:10px;margin-bottom:10px\"><input id=\"dash-url-inp\" class=\"inp\" placeholder=\"https://example.com/file.zip или ссылка на видео\"><select id=\"dash-mode-inp\" class=\"inp\"><option value=\"file\">Обычный файл</option><option value=\"video\">Видео</option><option value=\"audio\">MP3 audio</option><option value=\"best\">Лучший файл</option></select></div>';" +
-  "  h+='<div style=\"display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center\"><input id=\"dash-name-inp\" class=\"inp\" placeholder=\"Имя без расширения, если нужно\"><button class=\"btn-primary\" data-action=\"dashboard-url-download\"><span class=\"material-symbols-outlined\">download</span> Загрузить</button><button class=\"btn-ghost\" data-action=\"upload-btn\"><span class=\"material-symbols-outlined\">upload_file</span> С ПК</button></div>';" +
+"  h+='<div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:8px\">';" +
+  "  h+='  <div style=\"font-size:11px;font-weight:600;color:var(--on-surf-var);text-transform:uppercase;letter-spacing:.8px\">Ссылка для загрузки</div>';" +
+  "  h+='  <button class=\"btn-ghost\" id=\"dash-url-toggle-batch\" onclick=\"toggleDashUrlBatchMode()\" style=\"padding:4px 8px;font-size:11px;border-radius:8px;min-height:24px;color:var(--accent-light);border-color:transparent\">Несколько ссылок</button>';" +
+  "  h+='</div>';" +
+  "  h+='<div style=\"display:grid;grid-template-columns:minmax(0,1fr) 170px;gap:10px;margin-bottom:10px\">';" +
+  "  h+='<div style=\"position:relative;width:100%\">';" +
+  "  h+='<input id=\"dash-url-inp\" class=\"inp\" placeholder=\"https://example.com/file.zip или ссылка на видео\" style=\"width:100%;box-sizing:border-box;margin:0\">';" +
+  "  h+='<textarea id=\"dash-url-inp-batch\" style=\"display:none;width:100%;height:100px;border-radius:14px;border:1.5px solid var(--outline-var);padding:10px 14px;background:var(--surf-hi);color:var(--on-surf);font-size:13px;font-family:monospace;resize:none;outline:none;box-sizing:border-box;transition:border-color .2s,box-shadow .2s;margin:0\" placeholder=\"Вставьте одну или несколько ссылок, каждую с новой строки...\" onfocus=\"this.style.borderColor=\\'var(--accent-color)\\';this.style.boxShadow=\\'0 0 0 3px color-mix(in srgb,var(--accent-color) 18%,transparent)\\'\" onblur=\"this.style.borderColor=\\'var(--outline-var)\\';this.style.boxShadow=\\'none\\'\"></textarea>';" +
+  "  h+='</div>';" +
+  "  h+='<select id=\"dash-mode-inp\" class=\"inp\"><option value=\"file\">Обычный файл</option><option value=\"video\">Видео</option><option value=\"audio\">MP3 audio</option><option value=\"best\">Лучший файл</option></select></div>';" +
+  "  h+='<div id=\"dash-buttons-row\" style=\"display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center\"><input id=\"dash-name-inp\" class=\"inp\" placeholder=\"Имя без расширения, если нужно\" style=\"margin:0\"><button class=\"btn-primary\" data-action=\"dashboard-url-download\"><span class=\"material-symbols-outlined\">download</span> Загрузить</button><button id=\"dash-upload-btn\" class=\"btn-ghost\" data-action=\"upload-btn\"><span class=\"material-symbols-outlined\">upload_file</span> С ПК</button></div>';" +
   "  h+='<div id=\"dash-url-status\" style=\"font-size:12px;color:#8ff0a4;min-height:18px;margin-top:12px\"></div>';" +
   "  h+='</div>';" +
   "  h+='<div style=\"display:grid;grid-template-rows:auto 1fr;gap:18px\">';" +
@@ -4403,7 +4459,81 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   "  fetch(\"/api/downloads\").then(function(r){return r.json();}).then(function(items){var el=document.getElementById(\"dash-active-count\");if(el)el.textContent=Array.isArray(items)?items.length:0;}).catch(function(){});" +
   "}" +
   "function dashActionCard(icon,title,body,action,color){return '<button class=\"card\" data-action=\"'+action+'\" style=\"margin:0;padding:18px;border-radius:20px;text-align:left;cursor:pointer;background:#18181b;color:#e4e1e6;min-height:132px\"><span class=\"material-symbols-outlined\" style=\"font-size:30px;color:'+color+'\">'+icon+'</span><div style=\"font-size:16px;font-weight:900;margin-top:18px\">'+title+'</div><div style=\"font-size:12px;color:#958ea0;margin-top:5px;line-height:1.4\">'+body+'</div></button>';}" +
-  'function addDashboardUrlDownload(){var url=document.getElementById("dash-url-inp").value.trim(),name=document.getElementById("dash-name-inp").value.trim(),mode=document.getElementById("dash-mode-inp").value,st=document.getElementById("dash-url-status");if(!url){st.textContent="Вставь URL";return;}var media=mode!=="file";if(media)name=stripInputMediaExt(name);st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:"",mode:mode})}).then(function(r){return r.json();}).then(function(d){if(d.ok){var gid=d.gid||(d.job&&d.job.id);if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,"");}document.getElementById("dash-url-inp").value="";document.getElementById("dash-name-inp").value="";st.textContent="Загрузка запущена";loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
+'function toggleDashUrlBatchMode(){' +
+  '  dashUrlBatchMode=!dashUrlBatchMode;' +
+  '  var single=document.getElementById("dash-url-inp");' +
+  '  var batch=document.getElementById("dash-url-inp-batch");' +
+  '  var btn=document.getElementById("dash-url-toggle-batch");' +
+  '  var nameInp=document.getElementById("dash-name-inp");' +
+  '  var uploadBtn=document.getElementById("dash-upload-btn");' +
+  '  var row=document.getElementById("dash-buttons-row");' +
+  '  if(dashUrlBatchMode){' +
+  '    single.style.display="none";' +
+  '    batch.style.display="block";' +
+  '    btn.textContent="Одна ссылка";' +
+  '    btn.style.color="var(--accent-color)";' +
+  '    if(nameInp)nameInp.style.display="none";' +
+  '    if(uploadBtn)uploadBtn.style.display="none";' +
+  '    if(row)row.style.gridTemplateColumns="1fr auto";' +
+  '    setTimeout(function(){batch.focus();},50);' +
+  '  }else{' +
+  '    single.style.display="block";' +
+  '    batch.style.display="none";' +
+  '    btn.textContent="Несколько ссылок";' +
+  '    btn.style.color="var(--accent-light)";' +
+  '    if(nameInp)nameInp.style.display="block";' +
+  '    if(uploadBtn)uploadBtn.style.display="block";' +
+  '    if(row)row.style.gridTemplateColumns="minmax(0,1fr) auto auto";' +
+  '    setTimeout(function(){single.focus();},50);' +
+  '  }' +
+  '}' +
+  'function addDashboardUrlDownload(){' +
+  '  var mode=document.getElementById("dash-mode-inp").value;' +
+  '  var st=document.getElementById("dash-url-status");' +
+  '  var media=mode!=="file";' +
+  '  if(window.dashUrlBatchMode){' +
+  '    var text=document.getElementById("dash-url-inp-batch").value.trim();' +
+  '    if(!text){st.textContent="Вставьте ссылки";return;}' +
+  '    var urls=text.split("\\n").map(function(x){return x.trim();}).filter(Boolean);' +
+  '    if(!urls.length){st.textContent="Вставьте ссылки";return;}' +
+  '    st.textContent="Запускаю " + urls.length + " загрузок...";' +
+  '    var promises=urls.map(function(url){' +
+  '      return fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:"",path:"",mode:mode})})' +
+  '        .then(function(r){return r.json();})' +
+  '        .then(function(d){' +
+  '          if(d.ok){' +
+  '            var gid=d.gid||(d.job&&d.job.id);' +
+  '            if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,"");}' +
+  '          }' +
+  '        });' +
+  '    });' +
+  '    Promise.all(promises).then(function(){' +
+  '      st.textContent="Все загрузки запущены!";' +
+  '      document.getElementById("dash-url-inp-batch").value="";' +
+  '      loadTransfers();' +
+  '      setTimeout(function(){st.textContent="";if(window.dashUrlBatchMode){toggleDashUrlBatchMode();}},1500);' +
+  '    }).catch(function(){' +
+  '      st.textContent="Ошибка при пакетной отправке";' +
+  '    });' +
+  '  }else{' +
+  '    var url=document.getElementById("dash-url-inp").value.trim();' +
+  '    var name=document.getElementById("dash-name-inp").value.trim();' +
+  '    if(!url){st.textContent="Вставь URL";return;}' +
+  '    if(media)name=stripInputMediaExt(name);' +
+  '    st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";' +
+  '    fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:"",mode:mode})})' +
+  '    .then(function(r){return r.json();}).then(function(d){' +
+  '      if(d.ok){' +
+  '        var gid=d.gid||(d.job&&d.job.id);' +
+  '        if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,"");}' +
+  '        document.getElementById("dash-url-inp").value="";' +
+  '        document.getElementById("dash-name-inp").value="";' +
+  '        st.textContent="Загрузка запущена";' +
+  '        loadTransfers();' +
+  '      }else st.textContent=d.error||"Ошибка";' +
+  '    }).catch(function(){st.textContent="Ошибка";});' +
+  '  }' +
+  '}' +
   'function settingsCard(title,body){return \'<div class="card" style="margin:0;padding:18px">\'+\'<div style="font-size:15px;font-weight:800;margin-bottom:12px;color:#e4e1e6">\'+title+\'</div>\'+body+"</div>";}' +
   'function setCloudStatus(id,msg,ok){var el=document.getElementById(id);if(!el)return;el.textContent=msg||"";el.style.color=ok?"#8ff0a4":"#ffb4ab";}' +
   'function fmtMbps(bytes,ms){if(!ms)return "\\u2014";return ((bytes*8)/(ms/1000)/1000000).toFixed(2)+" Mbps";}' +
@@ -4599,10 +4729,93 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    if(modes[i]===mode){card.classList.add("selected");}else{card.classList.remove("selected");}' +
   '  }' +
   '}' +
-  'function openUrlModal(prefill){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value=prefill||"";document.getElementById("url-name-inp").value="";selectUrlMode("file");document.getElementById("url-status").textContent="";setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
-  'function closeUrlModal(){document.getElementById("modal-url").style.display="none";}' +
+  'function openUrlModal(prefill){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value=prefill||"";document.getElementById("url-dl-inp-batch").value="";document.getElementById("url-name-inp").value="";selectUrlMode("file");document.getElementById("url-status").textContent="";if(window.urlBatchMode){toggleUrlBatchMode();}setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
+  'function closeUrlModal(){document.getElementById("modal-url").style.display="none";document.getElementById("url-dl-inp").value="";document.getElementById("url-dl-inp-batch").value="";document.getElementById("url-name-inp").value="";document.getElementById("url-status").textContent="";if(window.urlBatchMode){toggleUrlBatchMode();}}' +
   'function stripInputMediaExt(name){return String(name||"").replace(/\\.(mp4|webm|mkv|mov|m4v|mp3|m4a|opus|ogg|wav|flac|aac)$/i,"");}' +
-  'function addUrlDownload(){var url=document.getElementById("url-dl-inp").value.trim();var name=document.getElementById("url-name-inp").value.trim();var mode=document.getElementById("url-mode-inp").value;var st=document.getElementById("url-status");var folder=activePath();if(!url){st.textContent="Вставь URL";return;}var media=mode!=="file";if(media)name=stripInputMediaExt(name);st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:folder,mode:mode})}).then(function(r){return r.json();}).then(function(d){if(d.ok){var gid=d.gid||(d.job&&d.job.id);if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,folder);}st.textContent=media?"Медиа-загрузка запущена":"Загрузка добавлена";closeUrlModal();loadTransfers();}else st.textContent=d.error||"Ошибка";}).catch(function(){st.textContent="Ошибка";});}' +
+  'function toggleUrlBatchMode(){' +
+  '  urlBatchMode=!urlBatchMode;' +
+  '  var single=document.getElementById("url-dl-inp");' +
+  '  var batch=document.getElementById("url-dl-inp-batch");' +
+  '  var btn=document.getElementById("url-toggle-batch");' +
+  '  var nameInp=document.getElementById("url-name-inp");' +
+  '  var nameHint=document.getElementById("url-name-hint");' +
+  '  var wrap=single.closest(".url-dl-inp-wrap");' +
+  '  var icon=wrap?wrap.querySelector(".url-inp-icon"):null;' +
+  '  if(urlBatchMode){' +
+  '    single.style.display="none";' +
+  '    batch.style.display="block";' +
+  '    btn.textContent="Одна ссылка";' +
+  '    btn.style.color="var(--accent-color)";' +
+  '    if(nameInp)nameInp.style.display="none";' +
+  '    if(nameHint)nameHint.style.display="none";' +
+  '    if(icon)icon.style.display="none";' +
+  '    if(wrap){' +
+  '      wrap.style.background="transparent";' +
+  '      wrap.style.border="none";' +
+  '      wrap.style.boxShadow="none";' +
+  '      wrap.style.padding="0";' +
+  '    }' +
+  '    setTimeout(function(){batch.focus();},50);' +
+  '  }else{' +
+  '    single.style.display="block";' +
+  '    batch.style.display="none";' +
+  '    btn.textContent="Несколько ссылок";' +
+  '    btn.style.color="var(--accent-light)";' +
+  '    if(nameInp)nameInp.style.display="block";' +
+  '    if(nameHint)nameHint.style.display="block";' +
+  '    if(icon)icon.style.display="block";' +
+  '    if(wrap){' +
+  '      wrap.removeAttribute("style");' +
+  '    }' +
+  '    setTimeout(function(){single.focus();},50);' +
+  '  }' +
+  '}' +
+  'function addUrlDownload(){' +
+  '  var mode=document.getElementById("url-mode-inp").value;' +
+  '  var st=document.getElementById("url-status");' +
+  '  var folder=activePath();' +
+  '  var media=mode!=="file";' +
+  '  if(window.urlBatchMode){' +
+  '    var text=document.getElementById("url-dl-inp-batch").value.trim();' +
+  '    if(!text){st.textContent="Вставьте ссылки";return;}' +
+  '    var urls=text.split("\\n").map(function(x){return x.trim();}).filter(Boolean);' +
+  '    if(!urls.length){st.textContent="Вставьте ссылки";return;}' +
+  '    st.textContent="Запускаю " + urls.length + " загрузок...";' +
+  '    var promises=urls.map(function(url){' +
+  '      return fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:"",path:folder,mode:mode})})' +
+  '        .then(function(r){return r.json();})' +
+  '        .then(function(d){' +
+  '          if(d.ok){' +
+  '            var gid=d.gid||(d.job&&d.job.id);' +
+  '            if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,folder);}' +
+  '          }' +
+  '        });' +
+  '    });' +
+  '    Promise.all(promises).then(function(){' +
+  '      st.textContent="Все загрузки добавлены!";' +
+  '      setTimeout(function(){closeUrlModal();loadTransfers();},800);' +
+  '    }).catch(function(){' +
+  '      st.textContent="Ошибка при пакетной отправке";' +
+  '    });' +
+  '  }else{' +
+  '    var url=document.getElementById("url-dl-inp").value.trim();' +
+  '    var name=document.getElementById("url-name-inp").value.trim();' +
+  '    if(!url){st.textContent="Вставь URL";return;}' +
+  '    if(media)name=stripInputMediaExt(name);' +
+  '    st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";' +
+  '    fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:folder,mode:mode})})' +
+  '      .then(function(r){return r.json();})' +
+  '      .then(function(d){' +
+  '        if(d.ok){' +
+  '          var gid=d.gid||(d.job&&d.job.id);' +
+  '          if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,folder);}' +
+  '          st.textContent=media?"Медиа-загрузка запущена":"Загрузка добавлена";' +
+  '          closeUrlModal();' +
+  '          loadTransfers();' +
+  '        }else st.textContent=d.error||"Ошибка";' +
+  '      }).catch(function(){st.textContent="Ошибка";});' +
+  '  }' +
+  '}' +
   'function updatePreviewNavButtons(){' +
   '  var prevBtn=document.getElementById("preview-btn-prev");' +
   '  var nextBtn=document.getElementById("preview-btn-next");' +
@@ -4978,9 +5191,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    openPreview(previewFp, previewName, false);' +
   '  }' +
   '}' +
-  'function openMediaViewer(){' +
+'function openMediaViewer(){' +
   '  if(!previewSrc||!previewKind)return;' +
-  '  mvZoom=1; document.getElementById("mv-title").textContent=previewName||"Media";' +
+  '  mvZoom=1; window.mvTranslateX=0; window.mvTranslateY=0;' +
+  '  document.getElementById("mv-title").textContent=previewName||"Media";' +
   '  var v=document.getElementById("media-viewer"),stage=document.getElementById("mv-stage"),bottom=document.getElementById("mv-bottom");' +
   '  var startPlayback=false,startTime=0;' +
   '  var smallMedia=document.getElementById("preview-plyr");' +
@@ -4996,14 +5210,90 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  }' +
   '  var previewBody=document.getElementById("preview-body");' +
   '  if(previewBody) previewBody.innerHTML="";' +
+  '  var shotBtn=document.getElementById("mv-btn-screenshot");' +
+  '  if(shotBtn){shotBtn.style.display=(previewKind==="video")?"block":"none";}' +
   '  if(previewKind==="image"){' +
-  '    stage.innerHTML=`<img id="mv-media" src="${previewSrc}" alt="${H(previewName)}">`;' +
-  '    bottom.innerHTML=\'<button class="mv-icon" data-action="mv-zoom-out"><span class="material-symbols-outlined">zoom_out</span></button><button class="mv-icon" data-action="mv-fit"><span class="material-symbols-outlined">fit_screen</span></button><button class="mv-icon" data-action="mv-zoom-in"><span class="material-symbols-outlined">zoom_in</span></button><div style="flex:1"></div><div class="mv-time">Image viewer</div>\';' +
+  '    stage.innerHTML=\'<img id="mv-media" src="\' + previewSrc + \'" alt="\' + H(previewName) + \'" style="max-height:100%;max-width:100%;object-fit:contain;transition:transform 0.1s ease-out;cursor:grab;transform-origin:center center">\';' +
+  '    bottom.innerHTML=\'<button class="mv-icon" data-action="mv-zoom-out"><span class="material-symbols-outlined">zoom_out</span></button><button class="mv-icon" data-action="mv-fit"><span class="material-symbols-outlined">fit_screen</span></button><button class="mv-icon" data-action="mv-zoom-in"><span class="material-symbols-outlined">zoom_in</span></button><div style="flex:1"></div><div class="mv-time">Изображение</div>\';' +
+  '    setTimeout(function(){' +
+  '      var m=document.getElementById("mv-media");' +
+  '      if(!m)return;' +
+  '      var isDragging = false;' +
+  '      var startX, startY;' +
+  '      function updateTransform() {' +
+  '        m.style.transform = "scale(" + mvZoom + ") translate(" + window.mvTranslateX + "px, " + window.mvTranslateY + "px)";' +
+  '      }' +
+  '      m.addEventListener("wheel", function(e) {' +
+  '        e.preventDefault();' +
+  '        var delta = e.deltaY < 0 ? 0.15 : -0.15;' +
+  '        mvZoom = Math.min(6, Math.max(0.25, mvZoom + delta));' +
+  '        m.style.transition = "transform 0.05s ease-out";' +
+  '        updateTransform();' +
+  '      });' +
+  '      m.addEventListener("mousedown", function(e) {' +
+  '        if (mvZoom <= 1) return;' +
+  '        isDragging = true;' +
+  '        startX = e.clientX - window.mvTranslateX * mvZoom;' +
+  '        startY = e.clientY - window.mvTranslateY * mvZoom;' +
+  '        m.style.cursor = "grabbing";' +
+  '        m.style.transition = "none";' +
+  '        e.preventDefault();' +
+  '      });' +
+  '      document.addEventListener("mousemove", function(e) {' +
+  '        if (!isDragging) return;' +
+  '        window.mvTranslateX = (e.clientX - startX) / mvZoom;' +
+  '        window.mvTranslateY = (e.clientY - startY) / mvZoom;' +
+  '        updateTransform();' +
+  '      });' +
+  '      document.addEventListener("mouseup", function() {' +
+  '        if (isDragging) {' +
+  '          isDragging = false;' +
+  '          m.style.cursor = "grab";' +
+  '        }' +
+  '      });' +
+  '      var touchStartX = 0;' +
+  '      var touchStartY = 0;' +
+  '      m.addEventListener("touchstart", function(e) {' +
+  '        if (e.touches.length === 1) {' +
+  '          touchStartX = e.touches[0].clientX;' +
+  '          touchStartY = e.touches[0].clientY;' +
+  '        }' +
+  '      }, {passive: true});' +
+  '      m.addEventListener("touchend", function(e) {' +
+  '        if (mvZoom > 1) return;' +
+  '        if (e.changedTouches.length === 1) {' +
+  '          var touchEndX = e.changedTouches[0].clientX;' +
+  '          var touchEndY = e.changedTouches[0].clientY;' +
+  '          var diffX = touchEndX - touchStartX;' +
+  '          var diffY = touchEndY - touchStartY;' +
+  '          if (Math.abs(diffX) > 60 && Math.abs(diffY) < 40) {' +
+  '            if (diffX < 0) { playSibling("next", true); }' +
+  '            else { playSibling("prev", true); }' +
+  '          }' +
+  '        }' +
+  '      }, {passive: true});' +
+  '    }, 50);' +
   '  } else {' +
   '    var autoplayAttr=startPlayback?"autoplay":"";' +
   '    var mvTag=previewKind==="audio"?"audio":"video";' +
-  '    stage.innerHTML=\'<\'+mvTag+\' id="mv-media" src="\'+previewSrc+\'" playsinline controls style="max-height:100%" \'+autoplayAttr+\'></\'+mvTag+\'>\';' +
-  '    bottom.innerHTML="";' +
+  '    stage.innerHTML=\'<\' + mvTag + \' id="mv-media" src="\' + previewSrc + \'" crossorigin="anonymous" playsinline controls style="max-height:100%" \' + autoplayAttr + \'></\' + mvTag + \'>\';' +
+  '    var mediaFiles=getPlayableMediaFiles(previewKind);' +
+  '    var plHtml=\'<div class="plyr-playlist" style="width:100%;padding:10px 16px;background:rgba(20,20,24,0.72);border-top:1px solid rgba(255,255,255,0.06);box-sizing:border-box">\';' +
+  '    plHtml+=\'<div style="font-size:12px;font-weight:700;color:var(--accent-light);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Плейлист папки</div>\';' +
+  '    plHtml+=\'<div class="pl-carousel" style="display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;scrollbar-width:thin">\';' +
+  '    for(var idx=0;idx<mediaFiles.length;idx++){' +
+  '      var item=mediaFiles[idx];' +
+  '      var entryPath=lastBase?(lastBase+"/"+item.name):item.name;' +
+  '      var isActive=entryPath===previewFp;' +
+  '      var cardStyle=\'flex:0 0 auto;width:160px;padding:8px 12px;border-radius:10px;background:\' + (isActive?\'color-mix(in srgb,var(--accent-color) 12%,#1b1b1e)\':\'#1b1b1e\') + \';border:1px solid \' + (isActive?\'var(--accent-color)\':\'rgba(255,255,255,0.08)\') + \';cursor:pointer;transition:transform .2s,border-color .2s\';' +
+  "      plHtml+='<div class=\"pl-card\" style=\"' + cardStyle + '\" onclick=\"playSiblingDirect(\\\'\' + entryPath.split(String.fromCharCode(39)).join('\\\\\\\'') + \'\\\',\\\'\' + item.name.split(String.fromCharCode(39)).join('\\\\\\\'') + \'\\\')\">';" +
+  '      plHtml+=\'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><span class="material-symbols-outlined" style="font-size:16px;color:\' + (isActive?\'var(--accent-color)\':\'#958ea0\') + \'">\' + (previewKind===\'video\'?\'movie\':\'music_note\') + \'</span>\';' +
+  '      plHtml+=\'<span style="font-size:10px;color:#958ea0">\' + fmtSize(item.size) + \'</span></div>\';' +
+  '      plHtml+=\'<div style="font-size:11px;font-weight:700;color:\' + (isActive?\'#fff\':\'#e4e1e6\') + \';overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="\' + H(item.name) + \'">\' + H(item.name) + \'</div>\';' +
+  '      plHtml+=\'</div>\';' +
+  '    }' +
+  '    plHtml+=\'</div></div>\';' +
+  '    bottom.innerHTML=plHtml;' +
   '    setTimeout(function() {' +
   '      if(typeof Plyr === "undefined") { console.error("Plyr is not loaded!"); return; }' +
   '      var isVideo = previewKind === "video";' +
@@ -5036,8 +5326,66 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  }' +
   '  v.classList.add("open");' +
   '}' +
+  'function playSiblingDirect(fp,name){' +
+  '  if(window.plyrInstance){try{window.plyrInstance.destroy();}catch(e){}window.plyrInstance=null;}' +
+  '  document.getElementById("mv-stage").innerHTML="";' +
+  '  document.getElementById("mv-bottom").innerHTML="";' +
+  '  openPreview(fp,name,false,0,true);' +
+  '  setTimeout(function(){openMediaViewer();},100);' +
+  '}' +
   'function bindMediaControls(){}' +
-  'function mediaViewerAction(action){var m=document.getElementById("mv-media"),viewer=document.getElementById("media-viewer");if(action==="mv-close")return closeMediaViewer();if(action==="mv-download"&&previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);if(action==="mv-share"&&previewFp)shareOne(previewFp);if(action==="mv-zoom-in"&&m){mvZoom=Math.min(4,mvZoom+.25);m.style.transform="scale("+mvZoom+")";}if(action==="mv-zoom-out"&&m){mvZoom=Math.max(.25,mvZoom-.25);m.style.transform="scale("+mvZoom+")";}if(action==="mv-fit"&&m){mvZoom=1;m.style.transform="scale(1)";}}' +
+'function mediaViewerAction(action){' +
+  '  var m=document.getElementById("mv-media"),viewer=document.getElementById("media-viewer");' +
+  '  if(action==="mv-close")return closeMediaViewer();' +
+  '  if(action==="mv-download"&&previewFp)window.location.href="/api/fm/download?path="+encodeURIComponent(previewFp);' +
+  '  if(action==="mv-share"&&previewFp)shareOne(previewFp);' +
+  '  if(action==="mv-zoom-in"&&m){' +
+  '    mvZoom=Math.min(6,mvZoom+.25);' +
+  '    m.style.transform="scale("+mvZoom+") translate("+(window.mvTranslateX||0)+"px, "+(window.mvTranslateY||0)+"px)";' +
+  '  }' +
+  '  if(action==="mv-zoom-out"&&m){' +
+  '    mvZoom=Math.max(.25,mvZoom-.25);' +
+  '    m.style.transform="scale("+mvZoom+") translate("+(window.mvTranslateX||0)+"px, "+(window.mvTranslateY||0)+"px)";' +
+  '  }' +
+  '  if(action==="mv-fit"&&m){' +
+  '    mvZoom=1; window.mvTranslateX=0; window.mvTranslateY=0;' +
+  '    m.style.transform="scale(1) translate(0px, 0px)";' +
+  '  }' +
+  '  if(action==="mv-screenshot"){' +
+  '    var v=document.getElementById("mv-media");' +
+  '    if(!v || previewKind!=="video")return;' +
+  '    try{' +
+  '      var canvas=document.createElement("canvas");' +
+  '      canvas.width=v.videoWidth||v.clientWidth;' +
+  '      canvas.height=v.videoHeight||v.clientHeight;' +
+  '      var ctx=canvas.getContext("2d");' +
+  '      ctx.drawImage(v,0,0,canvas.width,canvas.height);' +
+  '      var imgData=canvas.toDataURL("image/png");' +
+  '      var statusEl=document.getElementById("mv-title");' +
+  '      var oldTitle=statusEl.textContent;' +
+  '      statusEl.textContent="📸 Сохраняю скриншот...";' +
+  '      fetch("/api/fm/video-screenshot",{' +
+  '        method:"POST",' +
+  '        headers:{"Content-Type":"application/json"},' +
+  '        body:JSON.stringify({path:previewFp,folder:activePath(),img:imgData})' +
+  '      }).then(function(r){return r.json();}).then(function(d){' +
+  '        if(d.ok){' +
+  '          statusEl.textContent="📸 Кадр сохранён!";' +
+  '          refreshCurrent();' +
+  '          setTimeout(function(){statusEl.textContent=oldTitle;},2000);' +
+  '        }else{' +
+  '          statusEl.textContent="❌ Ошибка сохранения";' +
+  '          setTimeout(function(){statusEl.textContent=oldTitle;},2000);' +
+  '        }' +
+  '      }).catch(function(){' +
+  '        statusEl.textContent="❌ Ошибка сети";' +
+  '        setTimeout(function(){statusEl.textContent=oldTitle;},2000);' +
+  '      });' +
+  '    }catch(err){' +
+  '      alert("Не удалось сделать скриншот: "+err.message);' +
+  '    }' +
+  '  }' +
+  '}' +
   'function deleteItem(fp,name,isDir){' +
   '  if(!confirm("Удалить " + name + "?"))return;' +
   '  fetch("/api/fm/delete",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:fp,isDir:isDir})})' +
@@ -5370,7 +5718,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '});' +
   /* ── KEYBOARD ── */
   'document.addEventListener("keydown",function(e){' +
-  '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeUrlModal();closeShareModal();closeShareManager();closeQrModal();closeMediaViewer();closePreview();}' +
+  '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeUrlModal();closeShareModal();closeShareManager();closeQrModal();closeMediaViewer();closePreview();}  var mv=document.getElementById("media-viewer");  var isMvOpen=mv&&mv.classList.contains("open");  if(isMvOpen && previewKind==="image"){    if(e.key==="ArrowRight"){playSibling("next",true);}    else if(e.key==="ArrowLeft"){playSibling("prev",true);}  }' +
   '  if(e.key==="Enter"){' +
   '    if(document.getElementById("modal-mkdir").style.display!=="none")createFolder();' +
   '    else if(document.getElementById("modal-rename").style.display!=="none")doRename();' +
@@ -5418,7 +5766,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  clearTimeout(searchTimer);var q=this.value;' +
   '  searchTimer=setTimeout(function(){doSearch(q);},400);' +
   '});' +
-  'document.addEventListener("keydown",function(e){if(e.key==="Enter"&&document.activeElement&&["dash-url-inp","dash-name-inp"].includes(document.activeElement.id)){addDashboardUrlDownload();}});' +
+  'document.addEventListener("keydown",function(e){if(e.key==="Enter"&&document.activeElement&&["dash-url-inp","dash-name-inp","dash-url-inp-batch"].includes(document.activeElement.id)){if(document.activeElement.id==="dash-url-inp-batch"&&!e.ctrlKey)return;addDashboardUrlDownload();}});' +
   'window.addEventListener("beforeunload",function(e){if(uploadBusy){e.preventDefault();e.returnValue="";return "";}});' +
   '(function(){' +
   '  var resizer=document.getElementById("preview-resizer");' +
