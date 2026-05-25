@@ -10,12 +10,10 @@ const QRCode = require('qrcode');
 const { exec, execFile, spawn } = require('child_process');
 const multer = require('multer');
 const archiver = require('archiver');
-
 const VT_API_KEY = '93c0c934a298f0f35b0f95be051de5b4e4ea7340fa3c7bb8fd5c1f572a13c2b8';
 const SHARES_FILE = '/opt/vps-downloader/shares.json';
 const MEDIA_JOBS_FILE = '/opt/vps-downloader/media-jobs.json';
 const mediaProcesses = new Map();
-
 function loadShares() {
   try { return JSON.parse(fs.readFileSync(SHARES_FILE, 'utf8')); }
   catch { return {}; }
@@ -23,7 +21,6 @@ function loadShares() {
 function saveShares(s) {
   fs.writeFileSync(SHARES_FILE, JSON.stringify(s));
 }
-
 function shareOptionsFromBody(body = {}) {
   const maxDownloadsRaw = parseInt(body.maxDownloads, 10);
   const expiresInRaw = parseInt(body.expiresIn, 10);
@@ -44,14 +41,12 @@ function shareOptionsFromBody(body = {}) {
   }
   return out;
 }
-
 function shareIsExpired(s) {
   if (!s) return true;
   if (s.expiresAt && Date.now() > new Date(s.expiresAt).getTime()) return true;
   if (s.maxDownloads && (s.downloads || 0) >= s.maxDownloads) return true;
   return false;
 }
-
 const TOKENS_FILE = '/opt/vps-downloader/tokens.json';
 const SETTINGS_FILE = '/opt/vps-downloader/settings.json';
 const TG_TOKEN = '8981938565:AAGrVbZwhuuw_AEFauvwr4tWVVhOgUCHNQ4';
@@ -62,40 +57,61 @@ function loadTgUsers() {
   catch { return {}; }
 }
 function saveTgUsers(t) { fs.writeFileSync(TG_USERS_FILE, JSON.stringify(t)); }
-async function tgApi(method, params = {}) {
-  const r = await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, params, { timeout: 35000 });
-  return r.data;
+async function tgPost(method, data, options = {}) {
+  const isFormData = data && typeof data.getHeaders === 'function';
+  const headers = isFormData ? data.getHeaders() : {};
+  const config = {
+    headers: { ...headers, ...options.headers },
+    timeout: options.timeout || 35000,
+  };
+  try {
+    const r = await axios.post(`http://localhost:8081/bot${TG_TOKEN}/${method}`, data, config);
+    return r.data;
+  } catch (e) {
+    if (e.code === 'ECONNREFUSED' || e.code === 'ENOTFOUND') {
+      console.warn(`Local Telegram Bot API server not reachable for ${method}, falling back to api.telegram.org. Error: ${e.message}`);
+      const r = await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, data, config);
+      return r.data;
+    }
+    throw e;
+  }
+}
+async function tgApi(method, params = {}, options = {}) {
+  return tgPost(method, params, options);
 }
 async function tgSend(chatId, text) {
   return tgApi('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true });
 }
-
 function loadTokens() {
   try { return JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8')); }
   catch { return {}; }
 }
 function saveTokens(t) { fs.writeFileSync(TOKENS_FILE, JSON.stringify(t)); }
-
 function loadSettings() {
   try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); }
   catch { return {}; }
 }
 function saveSettings(s) { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s)); }
-
 function getUserRetention(username) {
   const s = loadSettings();
-  return (s[username] !== undefined) ? s[username] : 7;
+  const val = s[username];
+  if (val && typeof val === 'object') return val.retention !== undefined ? val.retention : 7;
+  return (val !== undefined) ? val : 7;
 }
-
+function getUserMaxTgSize(username) {
+  const s = loadSettings();
+  const val = s[username];
+  if (val && typeof val === 'object') return val.maxTgSize !== undefined ? val.maxTgSize : 20;
+  const legacyVal = s[username + '_max_tg_size'];
+  return legacyVal !== undefined ? legacyVal : 20;
+}
 const VT_API = 'https://www.virustotal.com/api/v3';
-
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.8.0';
+const SITE_VERSION = '2.9.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
-
 const USERS_FILE = '/opt/vps-downloader/users.json';
 function loadUsers() {
   try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); }
@@ -107,7 +123,6 @@ function loadUsers() {
 }
 function saveUsers(u) { fs.writeFileSync(USERS_FILE, JSON.stringify(u, null, 2)); }
 function isAdmin(username) { const u = loadUsers(); return u[username] && u[username].isAdmin; }
-
 const UPLOADS_FILE = '/opt/vps-downloader/uploads.json';
 function loadUploads() {
   try { return JSON.parse(fs.readFileSync(UPLOADS_FILE, 'utf8')); }
@@ -146,7 +161,6 @@ function removeUploadedFile(username, filename) {
     }
   } catch (e) {}
 }
-
 const ACTIVITY_FILE = '/opt/vps-downloader/activity.json';
 function loadActivity() {
   try { return JSON.parse(fs.readFileSync(ACTIVITY_FILE, 'utf8')); }
@@ -178,7 +192,6 @@ function htmlEscape(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('/opt/vps-downloader/public', { maxAge: '7d' }));
@@ -190,18 +203,15 @@ app.use(session({
   rolling: true,
   cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true }, // 30 дней, обновляется при каждом Р В·Р В°Р С—росе
 }));
-
 function auth(req, res, next) {
   if (req.session.user) return next();
   res.redirect('/login');
 }
-
 function userDir(username) {
   const dir = path.join(DOWNLOADS_ROOT, username);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
-
 async function aria2(method, params = []) {
   const res = await axios.post(ARIA2_URL, {
     jsonrpc: '2.0', id: '1', method,
@@ -209,16 +219,13 @@ async function aria2(method, params = []) {
   });
   return res.data.result;
 }
-
 function loadMediaJobs() {
   try { return JSON.parse(fs.readFileSync(MEDIA_JOBS_FILE, 'utf8')); }
   catch { return {}; }
 }
-
 function saveMediaJobs(jobs) {
   fs.writeFileSync(MEDIA_JOBS_FILE, JSON.stringify(jobs, null, 2));
 }
-
 function mediaJobPublic(job) {
   const rawError = job.error || '';
   const isWarningOnly = /^WARNING:/i.test(rawError) && ['active', 'processing', 'complete'].includes(job.status);
@@ -239,7 +246,6 @@ function mediaJobPublic(job) {
     updatedAt: job.updatedAt,
   };
 }
-
 async function syncAriaDownloadJobs(username) {
   const dir = userDir(username);
   const jobs = loadMediaJobs();
@@ -288,13 +294,11 @@ async function syncAriaDownloadJobs(username) {
   if (changed) saveMediaJobs(jobs);
   return { jobs, downloads: all };
 }
-
 function ytDlpAvailable(cb) {
   execFile('yt-dlp', ['--version'], { timeout: 5000 }, (err, stdout) => {
     cb(!err, (stdout || '').trim());
   });
 }
-
 function parseYtDlpLine(job, line) {
   const clean = String(line || '').trim();
   if (!clean) return false;
@@ -331,7 +335,6 @@ function parseYtDlpLine(job, line) {
   }
   return changed;
 }
-
 function newestMediaFile(dir, startedAtMs) {
   try {
     return fs.readdirSync(dir)
@@ -346,13 +349,11 @@ function newestMediaFile(dir, startedAtMs) {
     return null;
   }
 }
-
 function mediaExtOk(mode, file) {
   const ext = path.extname(file || '').toLowerCase();
   if (mode === 'audio') return ['.mp3', '.m4a', '.opus', '.ogg', '.wav', '.flac', '.aac'].includes(ext);
   return ['.mp4', '.webm', '.mkv', '.mov', '.m4v'].includes(ext);
 }
-
 function stripKnownMediaExt(name) {
   const clean = (name || '').trim().replace(/[/\\:*?"<>|]/g, '_');
   const ext = path.extname(clean).toLowerCase();
@@ -361,7 +362,6 @@ function stripKnownMediaExt(name) {
   }
   return clean;
 }
-
 function ensureMediaExtension(mode, fullPath) {
   if (!fullPath || !fs.existsSync(fullPath) || path.extname(fullPath)) return fullPath;
   const ext = mode === 'audio' ? '.mp3' : '.mp4';
@@ -373,7 +373,6 @@ function ensureMediaExtension(mode, fullPath) {
     return fullPath;
   }
 }
-
 function validateMediaFile(mode, fullPath, cb) {
   fs.stat(fullPath, (statErr, stat) => {
     if (statErr) return cb(new Error('Downloaded file was not created'));
@@ -388,7 +387,6 @@ function validateMediaFile(mode, fullPath, cb) {
     });
   });
 }
-
 function startMediaJob({ username, url, dir, relPath, mode, filename }) {
   const jobs = loadMediaJobs();
   const id = crypto.randomUUID();
@@ -409,7 +407,6 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
   else if (mode === 'video') args.push('-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b', '--merge-output-format', 'mp4');
   else args.push('-f', 'b/bv*+ba/b', '--merge-output-format', 'mp4');
   args.push(url);
-
   const job = {
     id,
     user: username,
@@ -429,7 +426,6 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
   };
   jobs[id] = job;
   saveMediaJobs(jobs);
-
   const child = spawn('yt-dlp', args, { cwd: dir });
   mediaProcesses.set(id, child);
   child.stdout.on('data', chunk => {
@@ -517,13 +513,11 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
   });
   return job;
 }
-
 // ─── Routes ─────────────────────────────────────────────────────
 app.get('/login', (req, res) => {
   if (req.session.user) return res.redirect('/');
   res.send(loginPage());
 });
-
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
   const users = loadUsers();
@@ -535,20 +529,16 @@ app.post('/login', (req, res) => {
   }
   res.send(loginPage('Неверный логин или пароль'));
 });
-
 app.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
-
 app.get('/', auth, (req, res) => res.redirect('/cloud'));
-
 function fmtBytes(b) {
   const units = ['B','KB','MB','GB','TB'];
   let i = 0, v = b;
   while (v >= 1024 && i < 4) { v /= 1024; i++; }
   return v.toFixed(1) + ' ' + units[i];
 }
-
 function filenameWithUrlExtension(url, filename) {
   const clean = (filename || '').trim().replace(/[/\\:*?"<>|]/g, '_');
   if (!clean) return '';
@@ -562,7 +552,6 @@ function filenameWithUrlExtension(url, filename) {
     return ext ? clean + ext : clean;
   }
 }
-
 app.get('/api/disk', auth, (req, res) => {
   const root = fs.existsSync(DOWNLOADS_ROOT) ? DOWNLOADS_ROOT : '.';
   
@@ -579,7 +568,6 @@ app.get('/api/disk', auth, (req, res) => {
       console.error('fs.statfsSync error:', err.message);
     }
   }
-
   // 2. Fallback for older Node.js versions on Unix-like systems (Linux/macOS)
   if (process.platform !== 'win32') {
     try {
@@ -605,12 +593,9 @@ app.get('/api/disk', auth, (req, res) => {
       console.error('df fallback error:', err.message);
     }
   }
-
   // 3. Ultimate safe fallback
   res.json({ total: '—', used: '—', avail: '—', percent: 0 });
 });
-
-
 app.get('/api/files', auth, (req, res) => {
   const dir = userDir(req.session.user);
   try {
@@ -623,7 +608,6 @@ app.get('/api/files', auth, (req, res) => {
     res.json(files);
   } catch { res.json([]); }
 });
-
 app.get('/api/downloads', auth, async (req, res) => {
   try {
     const synced = await syncAriaDownloadJobs(req.session.user);
@@ -646,7 +630,6 @@ app.get('/api/downloads', auth, async (req, res) => {
     res.json(mine);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/add', auth, async (req, res) => {
   const dlUrl = (req.body.url || '').trim();
   const outName = filenameWithUrlExtension(dlUrl, req.body.filename || '');
@@ -659,7 +642,6 @@ app.post('/api/add', auth, async (req, res) => {
     res.json({ gid });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.delete('/api/downloads/:gid', auth, async (req, res) => {
   try {
     await aria2('aria2.remove', [req.params.gid]).catch(() =>
@@ -674,21 +656,18 @@ app.delete('/api/downloads/:gid', auth, async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/downloads/:gid/pause', auth, async (req, res) => {
   try {
     await aria2('aria2.pause', [req.params.gid]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/downloads/:gid/resume', auth, async (req, res) => {
   try {
     await aria2('aria2.unpause', [req.params.gid]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 // ─── VirusTotal ──────────────────────────────────────────────────
 function sha256file(filePath) {
   return new Promise((resolve, reject) => {
@@ -699,15 +678,12 @@ function sha256file(filePath) {
     stream.on('error', reject);
   });
 }
-
 app.get('/api/vt/:file', auth, async (req, res) => {
   const dir = userDir(req.session.user);
   const filePath = path.join(dir, path.basename(req.params.file));
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Файл не найден' });
-
   try {
     const hash = await sha256file(filePath);
-
     // Lookup by hash first
     try {
       const lookup = await axios.get(`${VT_API}/files/${hash}`, {
@@ -719,20 +695,17 @@ app.get('/api/vt/:file', auth, async (req, res) => {
     } catch (e) {
       if (e.response?.status !== 404) throw e;
     }
-
     // Not in VT — upload file (only if <= 32MB)
     const size = fs.statSync(filePath).size;
     if (size > 32 * 1024 * 1024) {
       return res.json({ hash, pending: true, message: 'Файл > 32 МБ, проверка по хэшу: не найден в базе VT' });
     }
-
     const form = new FormData();
     form.append('file', fs.createReadStream(filePath), path.basename(filePath));
     const upload = await axios.post(`${VT_API}/files`, form, {
       headers: { 'x-apikey': VT_API_KEY, ...form.getHeaders() }
     });
     const analysisId = upload.data.data.id;
-
     // Poll for result (max 30s)
     for (let i = 0; i < 10; i++) {
       await new Promise(r => setTimeout(r, 3000));
@@ -751,14 +724,12 @@ app.get('/api/vt/:file', auth, async (req, res) => {
     res.status(500).json({ error: e.response?.data?.error?.message || e.message });
   }
 });
-
 app.get('/download/:file', auth, (req, res) => {
   const dir = userDir(req.session.user);
   const file = path.join(dir, path.basename(req.params.file));
   if (!fs.existsSync(file)) return res.status(404).send('Not found');
   res.download(file);
 });
-
 function authToken(req, res, next) {
   const h = req.headers['authorization'] || '';
   const token = h.replace(/^Bearer\s+/, '').trim();
@@ -769,7 +740,6 @@ function authToken(req, res, next) {
   req.tokenUser = username;
   next();
 }
-
 // ─── Public share links ──────────────────────────────────────────
 app.post('/api/share', auth, (req, res) => {
   const filename = path.basename(req.body.file || '');
@@ -782,7 +752,6 @@ app.post('/api/share', auth, (req, res) => {
   saveShares(shares);
   res.json({ token });
 });
-
 app.get('/api/me', auth, (req, res) => {
   const users = loadUsers();
   const me = users[req.session.user] || {};
@@ -792,7 +761,6 @@ app.get('/api/me', auth, (req, res) => {
     isAdmin: !!me.isAdmin,
   });
 });
-
 app.patch('/api/me', auth, (req, res) => {
   const users = loadUsers();
   const me = users[req.session.user];
@@ -809,7 +777,6 @@ app.patch('/api/me', auth, (req, res) => {
     isAdmin: !!me.isAdmin,
   });
 });
-
 app.delete('/api/share/:token', auth, (req, res) => {
   const shares = loadShares();
   const s = shares[req.params.token];
@@ -820,7 +787,6 @@ app.delete('/api/share/:token', auth, (req, res) => {
   }
   res.status(404).json({ error: 'Not found' });
 });
-
 app.get('/share/:token', (req, res) => {
   const shares = loadShares();
   const s = shares[req.params.token];
@@ -830,14 +796,12 @@ app.get('/share/:token', (req, res) => {
     saveShares(shares);
     return res.status(404).send(shareNotFoundPage());
   }
-
   if (s.passwordHash) {
     const verified = req.session.verifiedShares && req.session.verifiedShares[req.params.token];
     if (!verified) {
       return res.send(sharePasswordPage(req.params.token));
     }
   }
-
   const file = shareFilePath(s);
   if (!file) return res.status(404).send(shareNotFoundPage());
   if (!fs.existsSync(file)) return res.status(404).send(shareNotFoundPage());
@@ -847,12 +811,10 @@ app.get('/share/:token', (req, res) => {
     const sizeStr = sizeBytes > 1024*1024*1024 ? (sizeBytes/(1024*1024*1024)).toFixed(2)+' GB' : sizeBytes > 1024*1024 ? (sizeBytes/(1024*1024)).toFixed(2)+' MB' : sizeBytes > 1024 ? (sizeBytes/1024).toFixed(2)+' KB' : sizeBytes+' B';
     return res.send(sharePreviewPage(s, req.params.token, s.downloadName || path.basename(file), sizeStr));
   }
-
   s.downloads = (s.downloads || 0) + 1;
   saveShares(shares);
   res.download(file, s.downloadName || path.basename(file), { dotfiles: 'allow' });
 });
-
 app.post('/share/:token/auth', (req, res) => {
   const shares = loadShares();
   const s = shares[req.params.token];
@@ -870,7 +832,6 @@ app.post('/share/:token/auth', (req, res) => {
   
   res.send(sharePasswordPage(req.params.token, 'Неверный пароль'));
 });
-
 app.get('/api/shares', auth, (req, res) => {
   const shares = loadShares();
   const mine = Object.entries(shares)
@@ -878,11 +839,9 @@ app.get('/api/shares', auth, (req, res) => {
     .map(([token, s]) => ({ token, file: s.file || s.path || s.downloadName, created: shareCreated(s), expiresAt: s.expiresAt || null, downloads: s.downloads || 0, maxDownloads: s.maxDownloads || null }));
   res.json(mine);
 });
-
 // CORS helper for extension endpoints
 const EXT_CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
 function extCors(req, res, next) { res.set(EXT_CORS); next(); }
-
 app.options('/api/add-ext',       (req, res) => res.set(EXT_CORS).sendStatus(204));
 app.options('/api/upload-ext',    (req, res) => res.set(EXT_CORS).sendStatus(204));
 app.options('/api/downloads-ext', (req, res) => res.set(EXT_CORS).sendStatus(204));
@@ -890,7 +849,6 @@ app.options('/api/files-ext',     (req, res) => res.set(EXT_CORS).sendStatus(204
 app.options('/api/ext/shares',    (req, res) => res.set(EXT_CORS).sendStatus(204));
 app.options('/api/ext/share',     (req, res) => res.set(EXT_CORS).sendStatus(204));
 app.options('/api/purge-errors-ext', (req, res) => res.set(EXT_CORS).sendStatus(204));
-
 app.post('/api/add-ext', extCors, authToken, async (req, res) => {
   const dlUrl = (req.body.url || '').trim();
   const outName = filenameWithUrlExtension(dlUrl, req.body.filename || '');
@@ -914,7 +872,6 @@ app.post('/api/add-ext', extCors, authToken, async (req, res) => {
     res.json({ ok: true, gid });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 const extUpload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => cb(null, userDir(req.tokenUser)),
@@ -922,7 +879,6 @@ const extUpload = multer({
   }),
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 });
-
 app.post('/api/upload-ext', extCors, authToken, (req, res) => {
   extUpload.single('file')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -931,7 +887,6 @@ app.post('/api/upload-ext', extCors, authToken, (req, res) => {
     res.json({ ok: true, name: req.file.filename, size: req.file.size });
   });
 });
-
 // Очистка ошибок aria2 (удаляет записи с status=error из памяти aria2, файлы не трогает)
 app.post('/api/purge-errors-ext', extCors, authToken, async (req, res) => {
   const dir = userDir(req.tokenUser);
@@ -942,7 +897,6 @@ app.post('/api/purge-errors-ext', extCors, authToken, async (req, res) => {
     res.json({ ok: true, removed: errors.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 // Активные загрузки для расширения (Bearer-auth)
 app.get('/api/downloads-ext', extCors, authToken, async (req, res) => {
   const dir = userDir(req.tokenUser);
@@ -966,7 +920,6 @@ app.get('/api/downloads-ext', extCors, authToken, async (req, res) => {
     res.json(mine);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 // Список файлов для расширения (Bearer-auth)
 app.get('/api/files-ext', extCors, authToken, (req, res) => {
   const dir = userDir(req.tokenUser);
@@ -990,7 +943,6 @@ app.get('/api/files-ext', extCors, authToken, (req, res) => {
     res.json(files);
   } catch { res.json([]); }
 });
-
 // Публичные ссылки файла для расширения
 app.get('/api/ext/shares', extCors, authToken, (req, res) => {
   const filePath = (req.query.path || '').replace(/^\/+/, '');
@@ -1007,7 +959,6 @@ app.get('/api/ext/shares', extCors, authToken, (req, res) => {
     }));
   res.set(EXT_CORS).json({ ok: true, links });
 });
-
 // Создать публичную ссылку из расширения
 app.post('/api/ext/share', extCors, authToken, (req, res) => {
   const filePath = (req.body.path || '').replace(/^\/+/, '');
@@ -1021,7 +972,6 @@ app.post('/api/ext/share', extCors, authToken, (req, res) => {
   const fullUrl = req.protocol + '://' + req.get('host') + '/share/' + token;
   res.set(EXT_CORS).json({ ok: true, token, url: '/share/' + token, fullUrl });
 });
-
 // Версия расширения (без авторизации — для OTA проверки)
 const EXT_VERSION = '2.4.5';
 app.get('/api/ext/version', (req, res) => {
@@ -1031,7 +981,6 @@ app.get('/api/ext/version', (req, res) => {
     changelog: 'Исправлены hash-пути CloudSpace, видео-превью и перехват загрузок расширением',
   });
 });
-
 // Страница обновления расширения
 app.get('/ext/update', (req, res) => {
   const zipExists = fs.existsSync(path.join(__dirname, 'extension.zip'));
@@ -1061,14 +1010,12 @@ ${dlBtn}
 <p class="note">Если расширение уже установлено через эту папку — просто нажмите «↻ Обновить» в chrome://extensions</p>
 </div></body></html>`);
 });
-
 // Скачать zip расширения
 app.get('/ext/extension.zip', (req, res) => {
   const zipPath = path.join(__dirname, 'extension.zip');
   if (!fs.existsSync(zipPath)) return res.status(404).send('Not found');
   res.download(zipPath, `sipliyfolder-extension-v${EXT_VERSION}.zip`);
 });
-
 // Скачать файл через токен в query-параметре (chrome.downloads не умеет слать заголовки)
 app.get('/api/ext-dl/:file', (req, res) => {
   const token = (req.query.t || '').trim();
@@ -1080,7 +1027,6 @@ app.get('/api/ext-dl/:file', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.download(file);
 });
-
 app.get('/api/mytoken', auth, (req, res) => {
   const tokens = loadTokens();
   let token = Object.keys(tokens).find(t => tokens[t] === req.session.user);
@@ -1091,7 +1037,6 @@ app.get('/api/mytoken', auth, (req, res) => {
   }
   res.json({ token });
 });
-
 app.get('/api/qr', async (req, res) => {
   const data = String(req.query.data || '').trim();
   if (!data || data.length > 4096) return res.status(400).send('Bad QR data');
@@ -1102,7 +1047,6 @@ app.get('/api/qr', async (req, res) => {
     res.status(500).send('QR error');
   }
 });
-
 app.post('/api/mytoken/reset', auth, (req, res) => {
   const tokens = loadTokens();
   Object.keys(tokens).forEach(t => { if (tokens[t] === req.session.user) delete tokens[t]; });
@@ -1111,14 +1055,12 @@ app.post('/api/mytoken/reset', auth, (req, res) => {
   saveTokens(tokens);
   res.json({ token });
 });
-
 // ─── User management ────────────────────────────────────────
 app.get('/api/users', auth, (req, res) => {
   if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
   const users = loadUsers();
   res.json(Object.entries(users).map(([u, d]) => ({ username: u, label: d.label, isAdmin: !!d.isAdmin })));
 });
-
 app.post('/api/users', auth, (req, res) => {
   if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
   const { username, password, label } = req.body;
@@ -1130,7 +1072,6 @@ app.post('/api/users', auth, (req, res) => {
   saveUsers(users);
   res.json({ ok: true });
 });
-
 app.delete('/api/users/:username', auth, (req, res) => {
   if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
   const target = req.params.username;
@@ -1145,7 +1086,6 @@ app.delete('/api/users/:username', auth, (req, res) => {
   saveTokens(tokens);
   res.json({ ok: true });
 });
-
 app.post('/api/change-password', auth, (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'Новый пароль минимум 6 символов' });
@@ -1157,25 +1097,37 @@ app.post('/api/change-password', auth, (req, res) => {
   saveUsers(users);
   res.json({ ok: true });
 });
-
 app.get('/api/settings', auth, (req, res) => {
-  res.json({ retention: getUserRetention(req.session.user) });
+  res.json({
+    retention: getUserRetention(req.session.user),
+    tgLimit: getUserMaxTgSize(req.session.user)
+  });
 });
-
 app.post('/api/settings', auth, (req, res) => {
-  const v = parseInt(req.body.retention);
-  if (isNaN(v) || ![0, 1, 3, 7, 30].includes(v)) return res.status(400).json({ error: 'Invalid' });
   const s = loadSettings();
-  s[req.session.user] = v;
+  if (req.body.retention !== undefined) {
+    const v = parseInt(req.body.retention);
+    if (isNaN(v) || ![0, 1, 3, 7, 30].includes(v)) return res.status(400).json({ error: 'Invalid retention' });
+    if (typeof s[req.session.user] !== 'object') {
+      s[req.session.user] = { retention: typeof s[req.session.user] === 'number' ? s[req.session.user] : 7 };
+    }
+    s[req.session.user].retention = v;
+  }
+  if (req.body.tgLimit !== undefined) {
+    const v = parseInt(req.body.tgLimit);
+    if (isNaN(v) || ![5, 10, 20, 50, 100, 200, 500, 1000, 2000].includes(v)) return res.status(400).json({ error: 'Invalid tgLimit' });
+    if (typeof s[req.session.user] !== 'object') {
+      s[req.session.user] = { retention: typeof s[req.session.user] === 'number' ? s[req.session.user] : 7 };
+    }
+    s[req.session.user].maxTgSize = v;
+  }
   saveSettings(s);
   res.json({ ok: true });
 });
-
 app.get('/api/speedtest/ping', auth, (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.json({ ok: true, t: Date.now() });
 });
-
 app.get('/api/speedtest/download', auth, (req, res) => {
   const size = Math.max(256 * 1024, Math.min(parseInt(req.query.size, 10) || 8 * 1024 * 1024, 32 * 1024 * 1024));
   const chunk = Buffer.alloc(64 * 1024, 7);
@@ -1199,12 +1151,10 @@ app.get('/api/speedtest/download', auth, (req, res) => {
   }
   write();
 });
-
 app.post('/api/speedtest/upload', auth, express.raw({ type: 'application/octet-stream', limit: '32mb' }), (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.json({ ok: true, bytes: req.body ? req.body.length : 0, t: Date.now() });
 });
-
 // ─── Upload ──────────────────────────────────────────────────────
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, userDir(req.session.user)),
@@ -1214,13 +1164,11 @@ const storage = multer.diskStorage({
   },
 });
 const upload = multer({ storage, limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
-
 app.post('/api/upload', auth, upload.array('files', 50), (req, res) => {
   if (!req.files || !req.files.length) return res.status(400).json({ error: 'Нет файлов' });
   req.files.forEach(f => registerUploadedFile(req.session.user, f.filename));
   res.json({ ok: true, files: req.files.map(f => ({ name: f.filename, size: f.size })) });
 });
-
 app.delete('/api/files/:file', auth, (req, res) => {
   const dir = userDir(req.session.user);
   const baseName = path.basename(req.params.file);
@@ -1232,7 +1180,6 @@ app.delete('/api/files/:file', auth, (req, res) => {
   }
   catch { res.status(404).json({ error: 'Not found' }); }
 });
-
 // ─── Telegram API ─────────────────────────────────────────
 app.get('/api/tg/status', auth, (req, res) => {
   const tgUsers = loadTgUsers();
@@ -1240,26 +1187,24 @@ app.get('/api/tg/status', auth, (req, res) => {
   if (!entry) return res.json({ linked: false });
   res.json({ linked: true, telegramId: entry[0], connectedAt: entry[1].connectedAt, firstName: entry[1].firstName || '' });
 });
-
 app.get('/api/tg/connect-link', auth, (req, res) => {
   const tokens = loadTokens();
   const token = Object.keys(tokens).find(t => tokens[t] === req.session.user);
   if (!token) return res.status(400).json({ error: 'Нет токена. Сначала получите токен расширения.' });
   res.json({ url: `https://t.me/${TG_BOT_NAME}?start=${token}` });
 });
-
 app.post('/api/tg/unlink', auth, (req, res) => {
   const tgUsers = loadTgUsers();
   const key = Object.keys(tgUsers).find(k => tgUsers[k].username === req.session.user);
   if (key) { delete tgUsers[key]; saveTgUsers(tgUsers); }
   res.json({ ok: true });
 });
-
 app.listen(PORT, () => console.log('Running on port ' + PORT));
-
 // ─── Telegram bot polling ─────────────────────────────────
 let tgOffset = 0;
 const tgPending = new Map(); // key → { fileId, fileName, fileSize, username, chatId }
+const tgShareKeys = new Map(); // key → { username, dest }
+
 async function handleTgUpdate(update) {
   if (update.callback_query) {
     return handleTgCallback(update.callback_query).catch(() => {});
@@ -1270,7 +1215,6 @@ async function handleTgUpdate(update) {
   const fromId = String(msg.from.id);
   const text = (msg.text || '').trim();
   const tgUsers = loadTgUsers();
-
   // /start [token]
   if (text.startsWith('/start')) {
     const token = text.slice(6).trim();
@@ -1303,61 +1247,89 @@ async function handleTgUpdate(update) {
     await tgSend(chatId, '🔌 Аккаунт отключён.');
     return;
   }
-
   const user = tgUsers[fromId];
   if (!user) {
     if (text && !text.startsWith('/')) await tgSend(chatId, '❌ Сначала подключите аккаунт: /start');
     return;
   }
-
   // Определяем файл из сообщения
-  let fileId, fileName;
+  let fileId, fileName, fileSize = 0;
   if (msg.document) {
     fileId = msg.document.file_id;
     fileName = msg.document.file_name || ('file_' + Date.now());
+    fileSize = msg.document.file_size || 0;
   } else if (msg.photo) {
-    fileId = msg.photo[msg.photo.length - 1].file_id;
+    const photo = msg.photo[msg.photo.length - 1];
+    fileId = photo.file_id;
     fileName = 'photo_' + Date.now() + '.jpg';
+    fileSize = photo.file_size || 0;
   } else if (msg.video) {
     fileId = msg.video.file_id;
     fileName = msg.video.file_name || ('video_' + Date.now() + '.mp4');
+    fileSize = msg.video.file_size || 0;
   } else if (msg.audio) {
     fileId = msg.audio.file_id;
     fileName = msg.audio.file_name || ('audio_' + Date.now() + '.mp3');
+    fileSize = msg.audio.file_size || 0;
   } else if (msg.voice) {
     fileId = msg.voice.file_id;
     fileName = 'voice_' + Date.now() + '.ogg';
+    fileSize = msg.voice.file_size || 0;
   }
   if (!fileId) {
     if (text && !text.startsWith('/')) await tgSend(chatId, '📁 Отправьте файл, фото, видео или аудио.');
     return;
   }
 
-  // Показываем меню вместо немедленной загрузки
-  const key = Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-  tgPending.set(key, { fileId, fileName, username: user.username, chatId });
-  setTimeout(() => tgPending.delete(key), 15 * 60 * 1000); // TTL 15 минут
+  // Check file size limits
+  const maxMb = getUserMaxTgSize(user.username);
+  const sizeMb = fileSize / (1024 * 1024);
 
-  const sizeStr = msg.document?.file_size || msg.video?.file_size || msg.audio?.file_size || msg.voice?.file_size || 0;
-  await tgApi('sendMessage', {
-    chat_id: chatId,
-    text: `📎 <b>${fileName}</b>${sizeStr ? '\n📦 ' + fmtBytes(sizeStr) : ''}\n\nЧто сделать с файлом?`,
-    parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: '💾 Сохранить в хранилище', callback_data: 'save:' + key },
-          { text: '🔗 Сохранить + ссылка + QR', callback_data: 'share:' + key }
-        ],
-        [{ text: '❌ Отмена', callback_data: 'cancel:' + key }]
-      ]
-    }
-  });
+  if (fileSize > 2000 * 1024 * 1024) {
+    await tgSend(chatId, `❌ Ошибка: Telegram ограничивает максимальный размер загружаемого файла до 2 ГБ (2000 МБ). Ваш файл: <b>${sizeMb.toFixed(1)} МБ</b>.`);
+    return;
+  }
+
+  if (fileSize > maxMb * 1024 * 1024) {
+    await tgSend(chatId, `❌ Ошибка: Размер файла (<b>${sizeMb.toFixed(1)} МБ</b>) превышает установленный вами лимит (<b>${maxMb} МБ</b>).\n\nВы можете изменить лимит в <a href="https://sipliyfolder.ru/cloud">Настройках на сайте</a>.`);
+    return;
+  }
+
+  // Direct download flow (no prompt)
+  const statusMsg = await tgSend(chatId, `⏳ Сохраняю файл: <b>${fileName}</b>...`);
+  const statusMsgId = statusMsg.result.message_id;
+
+  try {
+    const { dest, safeName, size } = await tgDoSaveFile({ fileId, fileName, username: user.username });
+    
+    // Generate secure in-memory shareKey for the callback
+    const shareKey = Math.random().toString(36).slice(2, 8);
+    tgShareKeys.set(shareKey, { username: user.username, dest });
+    setTimeout(() => tgShareKeys.delete(shareKey), 30 * 60 * 1000); // 30 mins TTL
+
+    await tgApi('editMessageText', {
+      chat_id: chatId,
+      message_id: statusMsgId,
+      text: `✅ Сохранено в хранилище: <b>${safeName}</b>\n📦 ${fmtBytes(size)}\n\n<a href="https://sipliyfolder.ru/cloud">Открыть хранилище</a>`,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔗 Создать публичную ссылку / QR', callback_data: 'tgshare:' + shareKey }]
+        ]
+      }
+    });
+  } catch (e) {
+    await tgApi('editMessageText', {
+      chat_id: chatId,
+      message_id: statusMsgId,
+      text: `❌ Ошибка загрузки <b>${fileName}</b>: ${e.message}`,
+      parse_mode: 'HTML'
+    });
+  }
 }
-
 async function tgDoSaveFile(pending) {
-  const fileInfo = await tgApi('getFile', { file_id: pending.fileId });
-  const dlUrl = `https://api.telegram.org/file/bot${TG_TOKEN}/${fileInfo.result.file_path}`;
+  const fileInfo = await tgApi('getFile', { file_id: pending.fileId }, { timeout: 1800000 });
+  const filePath = fileInfo.result.file_path;
   const dir = userDir(pending.username);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   let safeName = pending.fileName.replace(/[/\\:*?"<>|]/g, '_');
@@ -1368,63 +1340,139 @@ async function tgDoSaveFile(pending) {
     dest = path.join(dir, base + '_' + Date.now() + ext);
     safeName = path.basename(dest);
   }
-  const resp = await axios.get(dlUrl, { responseType: 'stream', timeout: 120000 });
+
+  // If local server is used and it downloaded the file locally on the VPS
+  if (filePath && (filePath.startsWith('/') || path.isAbsolute(filePath)) && fs.existsSync(filePath)) {
+    console.log(`Local Telegram Bot API server download: Copying file from ${filePath} to ${dest}`);
+    await fs.promises.copyFile(filePath, dest);
+    try {
+      await fs.promises.unlink(filePath);
+      console.log(`Removed original temp file: ${filePath}`);
+    } catch (err) {
+      console.warn(`Could not remove temp file ${filePath}:`, err.message);
+    }
+    registerUploadedFile(pending.username, safeName);
+    return { dest, safeName, size: fs.statSync(dest).size };
+  }
+
+  // Fallback: Download via HTTP
+  let dlUrl;
+  if (filePath && (filePath.startsWith('/') || path.isAbsolute(filePath))) {
+    dlUrl = `http://localhost:8081/file/bot${TG_TOKEN}/${filePath}`;
+  } else {
+    dlUrl = `http://localhost:8081/file/bot${TG_TOKEN}/${filePath}`;
+  }
+
+  console.log(`Downloading Telegram file via HTTP from: ${dlUrl}`);
+  let resp;
+  try {
+    resp = await axios.get(dlUrl, { responseType: 'stream', timeout: 1200000 });
+  } catch (e) {
+    if (e.code === 'ECONNREFUSED' || e.code === 'ENOTFOUND') {
+      const fallbackUrl = `https://api.telegram.org/file/bot${TG_TOKEN}/${filePath}`;
+      console.warn(`Local Telegram Bot API download server not reachable, falling back to: ${fallbackUrl}`);
+      resp = await axios.get(fallbackUrl, { responseType: 'stream', timeout: 1200000 });
+    } else {
+      throw e;
+    }
+  }
+
   const writer = fs.createWriteStream(dest);
   resp.data.pipe(writer);
   await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
+  registerUploadedFile(pending.username, safeName);
   return { dest, safeName, size: fs.statSync(dest).size };
 }
-
 async function handleTgCallback(cb) {
   const chatId = cb.message.chat.id;
   const msgId = cb.message.message_id;
   const [action, key] = (cb.data || '').split(':');
-  const pending = tgPending.get(key);
-
   await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
 
+  if (action === 'tgshare') {
+    const sharePending = tgShareKeys.get(key);
+    if (!sharePending) {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '⏱ Время действия кнопки истекло. Ссылку можно создать на сайте.', show_alert: true });
+      return;
+    }
+    tgShareKeys.delete(key);
+
+    await tgApi('editMessageText', {
+      chat_id: chatId,
+      message_id: msgId,
+      text: cb.message.text + '\n\n⏳ Создаю публичную ссылку...',
+      parse_mode: 'HTML'
+    });
+
+    try {
+      const username = sharePending.username;
+      const dest = sharePending.dest;
+      const safeName = path.basename(dest);
+      
+      const token = crypto.randomUUID();
+      const shares = loadShares();
+      const relPath = fmRelative(username, dest) || path.basename(dest);
+      shares[token] = { username, file: relPath, created: new Date().toISOString(), downloads: 0, maxDownloads: null, expiresAt: null, preview: false };
+      saveShares(shares);
+      
+      const shareUrl = `https://sipliyfolder.ru/share/${token}`;
+      const qrBuf = await QRCode.toBuffer(shareUrl, { type: 'png', width: 300, margin: 2, color: { dark: '#111111', light: '#ffffff' } });
+      
+      const FormDataLib = require('form-data');
+      const fd = new FormDataLib();
+      fd.append('chat_id', String(chatId));
+      fd.append('photo', qrBuf, { filename: 'qr.png', contentType: 'image/png' });
+      fd.append('caption', `✅ Публичная ссылка создана!\n\n📁 <b>${safeName}</b>\n\n🔗 <a href="${shareUrl}">${shareUrl}</a>`, { contentType: 'text/plain; charset=utf-8' });
+      fd.append('parse_mode', 'HTML');
+      
+      await tgPost('sendPhoto', fd, { timeout: 30000 });
+      
+      await tgApi('editMessageText', {
+        chat_id: chatId,
+        message_id: msgId,
+        text: cb.message.text + `\n\n🔗 Ссылка: <a href="${shareUrl}">${shareUrl}</a>`,
+        parse_mode: 'HTML'
+      });
+    } catch (e) {
+      await tgSend(chatId, `❌ Ошибка создания ссылки: ${e.message}`);
+    }
+    return;
+  }
+
+  // Legacy callback query support
+  const pending = tgPending.get(key);
   if (!pending) {
     await tgApi('editMessageText', { chat_id: chatId, message_id: msgId, text: '⏱ Время ожидания истекло. Отправьте файл ещё раз.' });
     return;
   }
-
   if (action === 'cancel') {
     tgPending.delete(key);
     await tgApi('editMessageText', { chat_id: chatId, message_id: msgId, text: '❌ Отменено.' });
     return;
   }
-
   tgPending.delete(key);
   await tgApi('editMessageText', { chat_id: chatId, message_id: msgId, text: '⏳ Загружаю файл...' });
-
   try {
     const { dest, safeName, size } = await tgDoSaveFile(pending);
-
     if (action === 'save') {
       await tgSend(chatId, `✅ Сохранено: <b>${safeName}</b>\n📦 ${fmtBytes(size)}\n\n<a href="https://sipliyfolder.ru/cloud">Открыть хранилище</a>`);
       return;
     }
-
     if (action === 'share') {
-      // Создаём публичную ссылку
       const token = crypto.randomUUID();
       const shares = loadShares();
       const relPath = fmRelative(pending.username, dest) || path.basename(dest);
       shares[token] = { username: pending.username, file: relPath, created: new Date().toISOString(), downloads: 0, maxDownloads: null, expiresAt: null, preview: false };
       saveShares(shares);
       const shareUrl = `https://sipliyfolder.ru/share/${token}`;
-
-      // Генерируем QR-код как PNG буфер
       const qrBuf = await QRCode.toBuffer(shareUrl, { type: 'png', width: 300, margin: 2, color: { dark: '#111111', light: '#ffffff' } });
-
-      // Отправляем QR как фото
       const FormDataLib = require('form-data');
       const fd = new FormDataLib();
       fd.append('chat_id', String(chatId));
       fd.append('photo', qrBuf, { filename: 'qr.png', contentType: 'image/png' });
       fd.append('caption', `✅ <b>${safeName}</b>\n📦 ${fmtBytes(size)}\n\n🔗 <a href="${shareUrl}">${shareUrl}</a>`, { contentType: 'text/plain; charset=utf-8' });
       fd.append('parse_mode', 'HTML');
-      await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, fd, { headers: fd.getHeaders(), timeout: 30000 });
+      await tgPost('sendPhoto', fd, { timeout: 30000 });
     }
   } catch (e) {
     await tgSend(chatId, `❌ Ошибка: ${e.message}`);
@@ -1445,7 +1493,6 @@ async function tgPoll() {
   setTimeout(tgPoll, hadUpdates ? 300 : 5000);
 }
 tgPoll();
-
 // ─── File Manager helper ─────────────────────────────────
 function fmResolve(username, relPath) {
   if (!username) return null;
@@ -1456,21 +1503,17 @@ function fmResolve(username, relPath) {
   if (inside && (inside.startsWith('..') || path.isAbsolute(inside))) return null;
   return full;
 }
-
 function shareOwner(s) {
   return s && (s.user || s.username || null);
 }
-
 function shareCreated(s) {
   return s && (s.created || (s.createdAt ? new Date(s.createdAt).toISOString() : null));
 }
-
 function sharePathMatches(s, username, relPath, fullPath) {
   if (!s || shareOwner(s) !== username) return false;
   const stored = s.path || '';
   return stored === relPath || stored === fullPath || s.file === path.basename(relPath || fullPath || '');
 }
-
 function shareFilePath(s) {
   const owner = shareOwner(s);
   if (!owner) return null;
@@ -1486,11 +1529,9 @@ function shareFilePath(s) {
   if (s.file) return path.join(userDir(owner), path.basename(s.file));
   return null;
 }
-
 function fmRelative(username, fullPath) {
   return path.relative(userDir(username), fullPath).replace(/\\/g, '/');
 }
-
 function fmDirSize(fullPath) {
   let total = 0;
   try {
@@ -1504,13 +1545,11 @@ function fmDirSize(fullPath) {
   } catch {}
   return total;
 }
-
 function fmArchiveDir(username) {
   const dir = path.join(userDir(username), '.archives');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
-
 function fmCollectItems(username, items) {
   const base = userDir(username);
   const seen = new Set();
@@ -1527,7 +1566,6 @@ function fmCollectItems(username, items) {
   });
   return out;
 }
-
 function fmZipItems(username, items, downloadName, cb, shareOptions) {
   const picked = fmCollectItems(username, items);
   if (!picked.length) return cb(new Error('No files'));
@@ -1549,11 +1587,9 @@ function fmZipItems(username, items, downloadName, cb, shareOptions) {
     cb(null, { token, url: '/share/' + token, count: picked.length });
   });
 }
-
 function fmArchiveEntryName(entryPath) {
   return path.basename(String(entryPath || '').replace(/\\/g, '/')) || 'archive-entry';
 }
-
 function fmParse7zList(stdout, archivePath) {
   const entries = [];
   let cur = null;
@@ -1586,7 +1622,6 @@ function fmParse7zList(stdout, archivePath) {
       isDir: !!x.isDir,
     }));
 }
-
 function fmRun7z(args, cb) {
   execFile('7z', args, { timeout: 120000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
     if (!err) return cb(null, stdout);
@@ -1598,7 +1633,6 @@ function fmRun7z(args, cb) {
     });
   });
 }
-
 // GET /api/fm/list?path=
 app.get('/api/fm/list', auth, (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
@@ -1624,7 +1658,6 @@ app.get('/api/fm/list', auth, (req, res) => {
     res.json({ entries, diskUsed, diskTotal });
   } catch { res.json({ entries: [], diskUsed: null, diskTotal: null }); }
 });
-
 // POST /api/fm/mkdir  body: { path, name }
 app.post('/api/fm/mkdir', auth, (req, res) => {
   const parentRel = req.body.path || '';
@@ -1641,7 +1674,6 @@ app.post('/api/fm/mkdir', auth, (req, res) => {
   }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 // POST /api/fm/rename  body: { oldPath, newName }
 app.post('/api/fm/rename', auth, (req, res) => {
   const oldPath = req.body.oldPath || '';
@@ -1674,7 +1706,6 @@ app.post('/api/fm/rename', auth, (req, res) => {
   }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 // DELETE /api/fm/delete  body: { path }
 app.delete('/api/fm/delete', auth, (req, res) => {
   const targetRel = req.body.path || req.query.path || '';
@@ -1694,7 +1725,6 @@ app.delete('/api/fm/delete', auth, (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 // POST /api/fm/move  body: { from, to }
 app.post('/api/fm/move', auth, (req, res) => {
   const from = fmResolve(req.session.user, req.body.from);
@@ -1721,7 +1751,6 @@ app.post('/api/fm/move', auth, (req, res) => {
   }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 // GET /api/fm/recent
 app.get('/api/fm/recent', auth, (req, res) => {
   const base = userDir(req.session.user);
@@ -1741,12 +1770,10 @@ app.get('/api/fm/recent', auth, (req, res) => {
   results.sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
   res.json({ entries: results.slice(0, 50) });
 });
-
 // GET /api/activity
 app.get('/api/activity', auth, (req, res) => {
   res.json(loadActivity());
 });
-
 // GET /api/fm/search?q=
 app.get('/api/fm/search', auth, (req, res) => {
   const q = (req.query.q || '').toLowerCase().trim();
@@ -1768,7 +1795,6 @@ app.get('/api/fm/search', auth, (req, res) => {
   walk(base, '');
   res.json({ entries: results.slice(0, 100) });
 });
-
 // GET /api/fm/download?path=
 app.get('/api/fm/download', auth, (req, res) => {
   const relPath = req.query.path || '';
@@ -1794,13 +1820,11 @@ app.get('/api/fm/download', auth, (req, res) => {
     res.download(full, path.basename(full));
   }
 });
-
 // GET /api/fm/preview?path=
 app.get('/api/fm/preview', auth, (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
   if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).send('Not found');
   const ext = path.extname(full).toLowerCase();
-
   if (ext === '.exe') {
     const os = require('os');
     const tmpFile = path.join(os.tmpdir(), 'icon-' + Date.now() + '-' + Math.random().toString(36).substring(7) + '.ico');
@@ -1809,7 +1833,6 @@ app.get('/api/fm/preview', auth, (req, res) => {
       const match = stdout.match(/--name=(?:"([^"]+)"|([^\s]+))/);
       const name = match ? (match[1] || match[2]) : null;
       if (!name) return res.status(404).send('Icon not found');
-
       execFile('wrestool', ['-x', '-t', '14', '--name=' + name, full], { encoding: 'buffer' }, (err, stdoutBuffer) => {
         if (err || !stdoutBuffer) return res.status(404).send('Icon extraction failed');
         fs.writeFile(tmpFile, stdoutBuffer, (err) => {
@@ -1822,17 +1845,14 @@ app.get('/api/fm/preview', auth, (req, res) => {
     });
     return;
   }
-
   const mediaExt = new Set(['.mp4','.webm','.ogg','.mov','.mkv','.m4v','.avi','.flv', '.jpg','.jpeg','.png','.webp','.bmp']);
   if (mediaExt.has(ext) && req.query.thumb === '1') {
     const os = require('os');
     const hash = crypto.createHash('md5').update(full).digest('hex');
     const thumbPath = path.join(os.tmpdir(), `vps_thumb_${hash}.jpg`);
     if (fs.existsSync(thumbPath)) return res.sendFile(thumbPath, { headers: { 'Content-Type': 'image/jpeg' } });
-
     const isVideo = ['.mp4','.webm','.ogg','.mov','.mkv','.m4v','.avi','.flv'].includes(ext);
     if (!isVideo && fs.statSync(full).size < 1024 * 500) return res.sendFile(full);
-
     const runThumb = (args, fallback) => {
       execFile('ffmpeg', args, { timeout: 20000 }, () => {
         if (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0) {
@@ -1853,7 +1873,6 @@ app.get('/api/fm/preview', auth, (req, res) => {
     }
     return;
   }
-
   if (['.mp4','.webm','.ogg','.mov','.mkv','.m4v'].includes(ext)) {
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'private, max-age=3600');
@@ -1880,7 +1899,6 @@ app.get('/api/fm/preview', auth, (req, res) => {
     fs.createReadStream(full).pipe(res);
     return;
   }
-
   const textExt = new Set(['.txt','.log','.md','.json','.csv','.js','.css','.html','.xml','.yml','.yaml','.ini','.conf']);
   if (textExt.has(ext)) {
     const max = 1024 * 1024;
@@ -1890,7 +1908,6 @@ app.get('/api/fm/preview', auth, (req, res) => {
   }
   res.sendFile(full);
 });
-
 app.get('/api/fm/doc-preview', auth, async (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
   if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).json({ error: 'Not found' });
@@ -1939,7 +1956,6 @@ app.get('/api/fm/doc-preview', auth, async (req, res) => {
     res.status(500).json({ error: e.message || 'Preview failed' });
   }
 });
-
 app.get('/api/fm/archive/list', auth, (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
   if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).json({ error: 'Not found' });
@@ -1951,7 +1967,6 @@ app.get('/api/fm/archive/list', auth, (req, res) => {
     res.json({ ok: true, entries });
   });
 });
-
 app.get('/api/fm/archive/download', auth, (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
   const entry = String(req.query.entry || '');
@@ -1973,7 +1988,6 @@ app.get('/api/fm/archive/download', auth, (req, res) => {
     if (code !== 0 && !failed) res.destroy();
   });
 });
-
 app.get('/api/fm/meta', auth, (req, res) => {
   const rel = req.query.path || '';
   const full = fmResolve(req.session.user, rel);
@@ -2006,7 +2020,6 @@ app.get('/api/fm/meta', auth, (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
 // POST /api/fm/add-url  body: { url, path, filename }
 app.post('/api/fm/add-url', auth, async (req, res) => {
   const dlUrl = (req.body.url || '').trim();
@@ -2042,11 +2055,9 @@ app.post('/api/fm/add-url', auth, async (req, res) => {
     res.json({ ok: true, gid });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.get('/api/media/capabilities', auth, (req, res) => {
   ytDlpAvailable((available, version) => res.json({ ok: true, available, version }));
 });
-
 app.post('/api/fm/media', auth, (req, res) => {
   const dlUrl = (req.body.url || '').trim();
   const relPath = req.body.path || '';
@@ -2066,7 +2077,6 @@ app.post('/api/fm/media', auth, (req, res) => {
     }
   });
 });
-
 app.get('/api/fm/media-jobs', auth, async (req, res) => {
   const synced = await syncAriaDownloadJobs(req.session.user);
   const jobs = synced.jobs;
@@ -2080,7 +2090,6 @@ app.get('/api/fm/media-jobs', auth, async (req, res) => {
     .map(mediaJobPublic);
   res.json(mine);
 });
-
 app.delete('/api/fm/media-jobs/:id', auth, (req, res) => {
   const jobs = loadMediaJobs();
   const job = jobs[req.params.id];
@@ -2096,7 +2105,6 @@ app.delete('/api/fm/media-jobs/:id', auth, (req, res) => {
   saveMediaJobs(jobs);
   res.json({ ok: true });
 });
-
 // POST /api/fm/zip  body: { items, name }
 app.post('/api/fm/zip', auth, (req, res) => {
   const archiveName = (req.body.name || 'cloudspace.zip').trim();
@@ -2107,7 +2115,6 @@ app.post('/api/fm/zip', auth, (req, res) => {
     res.json({ ok: true, token: z.token, url: z.url, count: z.count });
   });
 });
-
 // POST /api/fm/share  body: { path } or { items }
 app.post('/api/fm/share', auth, (req, res) => {
   const items = req.body.items || (req.body.path ? [{ path: req.body.path }] : []);
@@ -2128,7 +2135,6 @@ app.post('/api/fm/share', auth, (req, res) => {
     res.json({ ok: true, token: z.token, url: z.url, archived: true, count: z.count });
   }, shareOptions);
 });
-
 app.get('/api/fm/shares', auth, (req, res) => {
   const picked = fmCollectItems(req.session.user, [{ path: req.query.path || '' }]);
   if (!picked.length || picked[0].isDir) return res.status(400).json({ error: 'No file' });
@@ -2149,7 +2155,6 @@ app.get('/api/fm/shares', auth, (req, res) => {
     .sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
   res.json({ ok: true, path: rel, shares: list });
 });
-
 app.patch('/api/fm/share/:token', auth, (req, res) => {
   const shares = loadShares();
   const share = shares[req.params.token];
@@ -2171,7 +2176,6 @@ app.patch('/api/fm/share/:token', auth, (req, res) => {
       delete share.passwordSalt;
     }
   }
-
   shares[req.params.token] = share;
   saveShares(shares);
   res.json({
@@ -2186,7 +2190,6 @@ app.patch('/api/fm/share/:token', auth, (req, res) => {
     hasPassword: !!share.passwordHash,
   });
 });
-
 // POST /api/fm/upload?path=
 const fmUploader = multer({
   storage: multer.diskStorage({
@@ -2210,9 +2213,7 @@ app.post('/api/fm/upload', auth, (req, res) => {
     res.json({ ok: true, files: req.files.map(f => ({ name: f.filename, size: f.size })) });
   });
 });
-
 app.get('/cloud', auth, (req, res) => res.send(cloudPage(req.session.user)));
-
 function runCleanup() {
   Object.keys(loadUsers()).forEach(function(username) {
     const retention = getUserRetention(username);
@@ -2235,7 +2236,6 @@ function runCleanup() {
 }
 setInterval(runCleanup, 60 * 60 * 1000);
 runCleanup();
-
 function sharePasswordPage(token, errorMsg = '') {
   return '<!DOCTYPE html><html lang="ru"><head><title>Защищенная ссылка</title>' + HEAD + '</head>' +
   '<body class="bg-background font-body text-on-surface min-h-screen flex items-center justify-center">' +
@@ -2261,7 +2261,6 @@ function sharePasswordPage(token, errorMsg = '') {
   '</div>' +
   '</body></html>';
 }
-
 function shareNotFoundPage() {
   return '<!DOCTYPE html><html lang="ru"><head><title>Ссылка недействительна</title>' + HEAD + '</head>' +
   '<body class="bg-background font-body text-on-surface min-h-screen flex items-center justify-center">' +
@@ -2272,7 +2271,6 @@ function shareNotFoundPage() {
   '</div>' +
   '</body></html>';
 }
-
 // ─── HTML ────────────────────────────────────────────────────────
 function sharePreviewPage(s, token, filename, sizeStr) {
   const isVideo = ['.mp4','.webm','.ogg','.mov','.mkv'].includes(path.extname(filename).toLowerCase());
@@ -2281,7 +2279,6 @@ function sharePreviewPage(s, token, filename, sizeStr) {
   const dlUrl = '/share/' + token + '?dl=1';
   let previewHtml = '';
   let plyrInit = '';
-
   if (isVideo) {
     previewHtml = `<video id="plyr-player" src="${dlUrl}" playsinline controls style="max-width:100%; max-height:70vh; border-radius:8px;"></video>`;
     plyrInit = `<script>
@@ -2318,7 +2315,6 @@ function sharePreviewPage(s, token, filename, sizeStr) {
   }
   
   const escFn = (str) => String(str).replace(/[&<>'"]/g, match => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[match]));
-
   return '<!DOCTYPE html><html lang="ru"><head><title>' + escFn(filename) + '</title>' + HEAD + '</head>' +
   '<body style="background:#15121b; color:#fff; font-family:sans-serif; margin:0; display:flex; flex-direction:column; align-items:center; min-height:100vh;">' +
   '<div style="max-width:1000px; width:100%; padding:20px 20px 40px; box-sizing:border-box;">' +
@@ -2335,7 +2331,6 @@ function sharePreviewPage(s, token, filename, sizeStr) {
   '</div>' + plyrInit +
   '</body></html>';
 }
-
 const HEAD = `<meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <link rel="icon" type="image/x-icon" href="/favicon.ico"/>
@@ -2385,7 +2380,6 @@ body,aside,main,.file-card{transition:background-color 0.25s,border-color 0.25s,
 .material-symbols-outlined{font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24;vertical-align:middle}
 ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgb(var(--c-outv));border-radius:9999px}
 </style>`;
-
 function loginPage(error) {
   return '<!DOCTYPE html><html lang="ru"><head><title>VPS Downloader</title>' + HEAD + '</head>' +
   '<body class="bg-background font-body text-on-surface min-h-screen flex items-center justify-center">' +
@@ -2414,7 +2408,6 @@ function loginPage(error) {
   '</div>' +
   '</body></html>';
 }
-
 function mainPage(username) {
   const usersData = loadUsers();
   const label = usersData[username] ? usersData[username].label : username;
@@ -2422,7 +2415,6 @@ function mainPage(username) {
   const initial = label[0].toUpperCase();
   return '<!DOCTYPE html><html lang="ru"><head><title>VPS Downloader</title>' + HEAD + '</head>' +
   '<body class="bg-background font-body text-on-surface overflow-hidden">' +
-
   // Sidebar
   '<div id="sidebar-overlay" class="hidden fixed inset-0 z-40 md:hidden" style="background:rgba(0,0,0,0.4)" onclick="closeSidebar()"></div>' +
   '<aside id="sidebar" class="fixed left-0 top-0 h-screen w-60 z-50 bg-white/60 glass shadow-[4px_0_24px_rgba(107,80,154,0.06)] -translate-x-full md:translate-x-0 transition-transform duration-300">' +
@@ -2480,11 +2472,9 @@ function mainPage(username) {
       '</form>' +
     '</div>' +
   '</div></aside>' +
-
   // Main
   '<main class="ml-0 md:ml-60 h-screen overflow-y-auto bg-background px-4 py-6 md:p-8">' +
   '<div class="max-w-4xl mx-auto space-y-8 pb-16">' +
-
     // Mobile header
     '<div class="flex items-center gap-3 mb-4 md:hidden">' +
       '<button onclick="toggleSidebar()" class="p-2 rounded-xl bg-surface-container hover:bg-surface-container-high transition-colors">' +
@@ -2492,7 +2482,6 @@ function mainPage(username) {
       '</button>' +
       '<span class="text-base font-headline font-extrabold text-on-primary-container">Sipliy Folder VPS</span>' +
     '</div>' +
-
     // Hero
     '<section class="pt-2">' +
       '<h1 id="hero-title" data-text="Sipliy Folder VPS" class="text-4xl font-headline font-extrabold text-on-primary-container tracking-tight select-none cursor-default">Sipliy Folder VPS</h1>' +
@@ -2512,7 +2501,6 @@ function mainPage(username) {
         '<input id="filename-input" type="text" class="flex-1 bg-surface-container-low border border-outline-variant/30 focus:border-primary/40 rounded-xl px-4 py-2.5 text-on-surface font-body text-sm focus:ring-0 placeholder:text-outline outline-none transition-all" placeholder="Переименовать файл (необязательно)"/>' +
       '</div>' +
     '</section>' +
-
     // Downloads tab
     '<section id="tab-downloads">' +
       '<div class="flex items-center justify-between mb-5">' +
@@ -2523,7 +2511,6 @@ function mainPage(username) {
       '</div>' +
       '<div id="downloads-list" class="space-y-4"><div class="text-center py-16 text-secondary font-label text-sm">Загрузка...</div></div>' +
     '</section>' +
-
     // Files tab
     '<section id="tab-files" class="hidden">' +
       '<div class="flex items-center justify-between mb-4">' +
@@ -2542,14 +2529,12 @@ function mainPage(username) {
         '</div>' +
       '</div>' +
       '<div id="upload-progress-list" class="space-y-2 mb-4"></div>' +
-
       '<div class="relative mb-4">' +
         '<span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-outline text-base pointer-events-none">search</span>' +
         '<input id="file-search" type="text" oninput="filterFiles()" class="w-full bg-surface-container-lowest border border-outline-variant/30 focus:border-primary/40 rounded-2xl pl-11 pr-4 py-3 text-on-surface font-body text-sm focus:ring-0 outline-none transition-all placeholder:text-outline" placeholder="Поиск по имени файла..."/>' +
       '</div>' +
       '<div id="files-list" class="space-y-3"><div class="text-center py-16 text-secondary font-label text-sm">Загрузка...</div></div>' +
     '</section>' +
-
     // Shares tab
     '<section id="tab-shares" class="hidden">' +
       '<div class="flex items-center justify-between mb-5">' +
@@ -2564,12 +2549,9 @@ function mainPage(username) {
       '</div>' +
       '<div id="shares-list" class="space-y-3"></div>' +
     '</section>' +
-
   '</div></main>' +
-
   // Toast
   '<div id="toast" class="fixed bottom-6 right-6 z-50 bg-surface-container-lowest glass shadow-xl rounded-2xl px-5 py-3.5 text-sm font-label text-on-surface opacity-0 translate-y-2 transition-all duration-300 pointer-events-none border border-outline-variant/20"></div>' +
-
   // VT Modal
   '<div id="vt-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4" style="background:rgba(0,0,0,0.4);backdrop-filter:blur(4px)">' +
     '<div class="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden">' +
@@ -2588,7 +2570,6 @@ function mainPage(username) {
       '<div id="vt-modal-body"></div>' +
     '</div>' +
   '</div>' +
-
   // Settings Modal
   '<div id="settings-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4" style="background:rgba(0,0,0,0.4);backdrop-filter:blur(4px)">' +
     '<div class="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col" style="max-height:82vh">' +
@@ -2658,7 +2639,6 @@ function mainPage(username) {
       '</div>' +
     '</div>' +
   '</div>' +
-
   // Notification permission banner
   '<div id="notif-banner" class="hidden fixed bottom-6 left-1/2 z-[200]" style="transform:translateX(-50%);width:calc(100% - 320px - 48px);max-width:600px">' +
     '<div class="bg-surface-container-lowest glass shadow-[0_16px_48px_rgba(107,80,154,0.14)] border border-outline-variant/20 rounded-2xl px-5 py-4 flex items-center gap-4">' +
@@ -2677,7 +2657,6 @@ function mainPage(username) {
       '</div>' +
     '</div>' +
   '</div>' +
-
   '<script>\n' +
   'function toggleSidebar() {\n' +
   '  var s = document.getElementById("sidebar");\n' +
@@ -3367,7 +3346,6 @@ function mainPage(username) {
   '</script>' +
   '</body></html>';
 }
-
 function cloudPage(username) { // v3 — multiselect + upload progress + disk fix
   const cloudUsers = loadUsers();
   const profile = cloudUsers[username] || {};
@@ -3840,16 +3818,26 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.modal-backdrop{align-items:flex-end!important;padding:10px!important}' +
   '.modal{min-width:0!important;width:100%!important;padding:22px!important;border-radius:28px 28px 16px 16px!important}' +
   '}' +
+  '#sidebar-player{display:none;margin:12px 8px;padding:14px;border-radius:20px;background:var(--surf-hi);border:1px solid color-mix(in srgb,var(--accent-color) 15%,rgba(255,255,255,.05));box-shadow:0 8px 32px rgba(0,0,0,.24);flex-direction:column;gap:10px;animation:slideUpFade 0.4s var(--m3-spring) both}' +
+  '@keyframes slideUpFade{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:translateY(0)}}' +
+  '.player-cover-art{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--accent-color),color-mix(in srgb,var(--accent-color) 40%,#000));display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0;box-shadow:0 4px 14px var(--accent-glow)}' +
+  '.player-ctrl-btn{width:34px!important;height:34px!important;min-height:34px!important;padding:0!important;border-radius:50%!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;transition:transform 0.2s,background 0.2s!important}' +
+  '.player-ctrl-btn:hover{transform:scale(1.1);background:rgba(255,255,255,0.08)!important}' +
+  '.player-play-btn{width:40px;height:40px;border-radius:50%;background:var(--accent-color);color:#fff;border:none;outline:none;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 20px var(--accent-glow);transition:transform 0.25s var(--m3-spring),box-shadow 0.2s}' +
+  '.player-play-btn:hover{transform:scale(1.12);box-shadow:0 8px 24px var(--accent-glow)}' +
+  '.player-play-btn:active{transform:scale(0.95)}' +
+  '#player-progress{-webkit-appearance:none;width:100%;height:4px;border-radius:2px;background:rgba(255,255,255,0.12);outline:none;cursor:pointer;accent-color:var(--accent-color);transition:height 0.15s}' +
+  '#player-progress:hover{height:6px}' +
+  '#player-progress::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;border-radius:50%;background:var(--accent-color);cursor:pointer;box-shadow:0 0 8px var(--accent-glow);transition:transform 0.15s}' +
+  '#player-progress:hover::-webkit-slider-thumb{transform:scale(1.3)}' +
+  '.playlist-track-row:hover{background:rgba(255,255,255,0.05)!important}' +
   '</style>' +
   '</head>' +
   '<body class="flex">' +
-
   '<header class="mobile-topbar">' +
   '<div class="mobile-avatar"><span class="material-symbols-outlined">person</span></div>' +
   '<div class="mobile-brand">CloudSpace</div>' +
-  '<button class="mobile-icon-btn" data-action="focus-search" title="Поиск"><span class="material-symbols-outlined">search</span></button>' +
   '</header>' +
-
   /* ── SIDEBAR ── */
   '<aside class="sidebar flex flex-col py-6 px-4 gap-2 sticky top-0 h-screen overflow-y-auto">' +
   '<div class="flex items-center gap-3 px-2 mb-6">' +
@@ -3865,6 +3853,50 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div class="nav-item" data-action="nav-activity"><span class="material-symbols-outlined">list_alt</span><span>Активность</span></div>' +
   '<div class="nav-item" data-action="nav-settings"><span class="material-symbols-outlined">settings</span><span>Настройки</span></div>' +
   '<div style="flex:1"></div>' +
+  '<audio id="global-audio" style="display:none"></audio>' +
+  '<div id="sidebar-player" class="card">' +
+  '  <div style="display:flex;align-items:center;gap:12px;position:relative">' +
+  '    <div class="player-cover-art">' +
+  '      <span class="material-symbols-outlined" style="font-size:24px">music_note</span>' +
+  '    </div>' +
+  '    <div id="player-text-wrap" style="min-width:0;flex:1;cursor:pointer;margin-right:48px" title="Нажмите, чтобы поменять местами Название и Исполнителя">' +
+  '      <div id="player-title" style="font-size:13px;font-weight:800;color:var(--on-surf);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.2">—</div>' +
+  '      <div id="player-artist" style="font-size:11px;color:#958ea0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.2;margin-top:2px">—</div>' +
+  '    </div>' +
+  '    <div style="position:absolute;right:-4px;top:-4px;display:flex;align-items:center;gap:2px">' +
+  '      <button class="btn-ghost player-ctrl-btn" id="player-btn-details" title="Открыть детали файла" style="width:24px!important;height:24px!important;min-height:24px!important">' +
+  '        <span class="material-symbols-outlined" style="font-size:15px">info</span>' +
+  '      </button>' +
+  '      <button class="btn-ghost player-ctrl-btn" id="player-btn-close" title="Скрыть плеер" style="width:24px!important;height:24px!important;min-height:24px!important">' +
+  '        <span class="material-symbols-outlined" style="font-size:15px">close</span>' +
+  '      </button>' +
+  '    </div>' +
+  '  </div>' +
+  '  <div style="display:flex;flex-direction:column;gap:4px;margin-top:2px">' +
+  '    <input type="range" id="player-progress" min="0" max="100" value="0">' +
+  '    <div style="display:flex;justify-content:space-between;font-size:10px;color:#958ea0;font-weight:700">' +
+  '      <span id="player-time-cur">0:00</span>' +
+  '      <span id="player-time-dur">0:00</span>' +
+  '    </div>' +
+  '  </div>' +
+  '  <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:2px">' +
+  '    <button class="btn-ghost player-ctrl-btn" id="player-btn-repeat" title="Повтор" style="color:var(--outline)">' +
+  '      <span class="material-symbols-outlined" style="font-size:20px">repeat</span>' +
+  '    </button>' +
+  '    <button class="btn-ghost player-ctrl-btn" id="player-btn-prev" title="Предыдущий трек">' +
+  '      <span class="material-symbols-outlined" style="font-size:22px">skip_previous</span>' +
+  '    </button>' +
+  '    <button class="player-play-btn" id="player-btn-play" title="Воспроизведение">' +
+  '      <span class="material-symbols-outlined" id="player-play-icon" style="font-size:24px">play_arrow</span>' +
+  '    </button>' +
+  '    <button class="btn-ghost player-ctrl-btn" id="player-btn-next" title="Следующий трек">' +
+  '      <span class="material-symbols-outlined" style="font-size:22px">skip_next</span>' +
+  '    </button>' +
+  '    <button class="btn-ghost player-ctrl-btn" id="player-btn-playlist" title="Очередь воспроизведения">' +
+  '      <span class="material-symbols-outlined" style="font-size:20px">playlist_play</span>' +
+  '    </button>' +
+  '  </div>' +
+  '</div>' +
   '<div class="profile-card card" style="margin:0;padding:14px;background:linear-gradient(180deg,var(--accent-bg),rgba(27,27,29,.92));border-color:var(--accent-color)">' +
   '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
   '<div id="profile-avatar-sidebar" style="width:38px;height:38px;border-radius:14px;background:var(--accent-gradient);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:16px;flex:0 0 auto">' + safeProfileInitial + '</div>' +
@@ -3876,7 +3908,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div class="disk-bar"><div class="disk-fill" id="disk-fill" style="width:0%"></div></div>' +
   '</div>' +
   '</aside>' +
-
   /* ── MAIN ── */
   '<main id="main-area" class="flex-1 flex flex-col" style="min-width:0">' +
   '<div class="desktop-toolbar mobile-toolbar" style="background:rgba(19,19,23,.82);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-bottom:1px solid rgba(255,255,255,.06);padding:10px 24px;display:flex;align-items:center;gap:12px;flex-shrink:0">' +
@@ -3940,7 +3971,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="preview-body" class="preview-body"></div>' +
   '<div id="preview-info"></div>' +
   '</aside>' +
-
   /* ── CONTEXT MENU ── */
   '<div id="media-viewer" class="media-viewer">' +
   '<div class="mv-top"><div id="mv-title" class="mv-title">Media</div><button class="mv-icon" data-action="playlist-prev" title="Предыдущий"><span class="material-symbols-outlined">navigate_before</span></button><button class="mv-icon" data-action="playlist-next" title="Следующий"><span class="material-symbols-outlined">navigate_next</span></button><button class="mv-icon" data-action="mv-download" title="Скачать"><span class="material-symbols-outlined">download</span></button><button class="mv-icon" data-action="mv-share" title="Публичная ссылка"><span class="material-symbols-outlined">link</span></button><button class="mv-icon" data-action="mv-close" title="Закрыть"><span class="material-symbols-outlined">close</span></button></div>' +
@@ -3959,16 +3989,13 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    <button class="btn-ghost" data-action="hide-toast" style="padding:3px 8px;font-size:11px">✕</button>' +
   '  </div>' +
   '</div>' +
-
   '<div id="connection-pill"><span class="dot"></span><span id="connection-text">Проверяю соединение...</span></div>' +
-
   /* ── DROP ZONE ── */
   '<div id="drop-zone">' +
   '<div style="font-size:48px">\u{1F4E5}</div>' +
   '<div style="font-size:20px;font-weight:700;color:#d0bcff">Перетащите файлы для загрузки</div>' +
   '<div style="font-size:13px;color:#958ea0">Отпустите, чтобы загрузить в текущую папку</div>' +
   '</div>' +
-
   /* ── MKDIR MODAL ── */
   '<div id="upload-panel">' +
   '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
@@ -3986,7 +4013,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div style="font-size:11px;color:#958ea0">ETA: <span id="upload-eta">-</span></div>' +
   '</div>' +
   '</div>' +
-
   '<div id="modal-mkdir" class="modal-backdrop" style="display:none">' +
   '<div class="modal">' +
   '<div style="font-weight:700;font-size:18px;margin-bottom:16px">Новая папка</div>' +
@@ -3995,7 +4021,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<button class="btn-ghost" data-action="close-mkdir">Отмена</button>' +
   '<button class="btn-primary" data-action="confirm-mkdir">Создать</button>' +
   '</div></div></div>' +
-
   /* ── RENAME MODAL ── */
   '<div id="modal-rename" class="modal-backdrop" style="display:none">' +
   '<div class="modal">' +
@@ -4008,10 +4033,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<button class="btn-ghost" data-action="close-rename">Отмена</button>' +
   '<button class="btn-primary" data-action="confirm-rename">Сохранить</button>' +
   '</div></div></div>' +
-
   '<div id="modal-url" class="modal-backdrop" style="display:none">' +
   '<div class="modal" style="width:520px">' +
-
   /* header */
   '<div style="display:flex;align-items:center;gap:14px;margin-bottom:22px">' +
   '<div style="width:48px;height:48px;border-radius:16px;background:var(--accent-bg);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
@@ -4020,22 +4043,17 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div><div style="font-weight:700;font-size:20px;font-family:var(--font-display);color:var(--on-surf)">Загрузить по URL</div>' +
   '<div style="font-size:13px;color:var(--on-surf-var);margin-top:3px">Файл попадёт в текущую папку CloudSpace</div>' +
   '</div></div>' +
-
   /* url input */
   '<div class="url-dl-inp-wrap">' +
   '<span class="material-symbols-outlined url-inp-icon">link</span>' +
   '<input id="url-dl-inp" type="text" placeholder="https://example.com/file.zip или ссылка YouTube..." autocomplete="off" data-form-type="other" data-lpignore="true" data-1p-ignore>' +
   '</div>' +
-
   /* mode label */
   '<div style="font-size:11px;font-weight:600;color:var(--on-surf-var);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px">Тип загрузки</div>' +
-
   /* hidden select used by addUrlDownload */
   '<select id="url-mode-inp" style="display:none"><option value="file">file</option><option value="video">video</option><option value="audio">audio</option><option value="best">best</option></select>' +
-
   /* cards 2×2 */
   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px">' +
-
   '<div id="url-card-file" class="url-mode-card selected" onclick="selectUrlMode(\'file\')">' +
   '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
   '<div style="width:36px;height:36px;border-radius:10px;background:color-mix(in srgb,var(--accent-color) 16%,transparent);display:flex;align-items:center;justify-content:center">' +
@@ -4045,7 +4063,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</div>' +
   '<div style="font-size:12px;color:var(--on-surf-var);line-height:1.45">Прямая ссылка на любой файл</div>' +
   '</div>' +
-
   '<div id="url-card-video" class="url-mode-card" onclick="selectUrlMode(\'video\')">' +
   '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
   '<div style="width:36px;height:36px;border-radius:10px;background:rgba(255,100,80,.13);display:flex;align-items:center;justify-content:center">' +
@@ -4055,7 +4072,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</div>' +
   '<div style="font-size:12px;color:var(--on-surf-var);line-height:1.45">YouTube, Vimeo и другие площадки</div>' +
   '</div>' +
-
   '<div id="url-card-audio" class="url-mode-card" onclick="selectUrlMode(\'audio\')">' +
   '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
   '<div style="width:36px;height:36px;border-radius:10px;background:rgba(80,180,255,.13);display:flex;align-items:center;justify-content:center">' +
@@ -4065,7 +4081,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</div>' +
   '<div style="font-size:12px;color:var(--on-surf-var);line-height:1.45">Извлечь аудиодорожку в MP3</div>' +
   '</div>' +
-
   '<div id="url-card-best" class="url-mode-card" onclick="selectUrlMode(\'best\')">' +
   '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
   '<div style="width:36px;height:36px;border-radius:10px;background:rgba(180,120,255,.13);display:flex;align-items:center;justify-content:center">' +
@@ -4075,16 +4090,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</div>' +
   '<div style="font-size:12px;color:var(--on-surf-var);line-height:1.45">Наилучший доступный медиаформат</div>' +
   '</div>' +
-
   '</div>' + /* end grid */
-
   /* optional filename */
   '<input id="url-name-inp" type="text" placeholder="Имя без расширения (необязательно)" autocomplete="off" data-form-type="other" data-lpignore="true" data-1p-ignore>' +
   '<div id="url-name-hint" style="font-size:11px;color:var(--on-surf-var);margin-bottom:14px">Для медиа расширение добавится автоматически: .mp4 или .mp3</div>' +
-
   /* status */
   '<div id="url-status" style="font-size:12px;color:var(--on-surf-var);min-height:18px;margin-bottom:14px"></div>' +
-
   /* buttons */
   '<div style="display:flex;gap:10px;justify-content:flex-end">' +
   '<button class="btn-ghost" data-action="close-url-modal">Отмена</button>' +
@@ -4092,7 +4103,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<span class="material-symbols-outlined" style="font-size:18px;font-variation-settings:\'FILL\' 1">download</span>Загрузить' +
   '</button>' +
   '</div></div></div>' +
-
   '<div id="modal-share" class="modal-backdrop" style="display:none">' +
   '<div class="modal" style="width:460px">' +
   '<div style="font-weight:700;font-size:18px;margin-bottom:6px">Публичная ссылка</div>' +
@@ -4113,7 +4123,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<button class="btn-ghost" data-action="close-share-modal">Отмена</button>' +
   '<button class="btn-primary" data-action="confirm-share">Создать ссылку</button>' +
   '</div></div></div>' +
-
   '<div id="modal-qr" class="modal-backdrop" style="display:none">' +
   '<div class="modal" style="width:380px;text-align:center">' +
   '<div style="font-weight:700;font-size:18px;margin-bottom:6px">QR-код ссылки</div>' +
@@ -4124,7 +4133,15 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<button class="btn-ghost" data-action="copy-toast">Копировать</button>' +
   '<button class="btn-primary" data-action="close-qr">Готово</button>' +
   '</div></div></div>' +
-
+  '<div id="modal-playlist" class="modal-backdrop" style="display:none">' +
+  '<div class="modal" style="width:min(500px,94vw);max-height:80vh;display:flex;flex-direction:column;padding:20px;border-radius:24px;background:var(--surf-hi);border:1px solid rgba(255,255,255,.05)">' +
+  '  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px">' +
+  '    <span class="material-symbols-outlined" style="color:var(--accent-color);font-size:26px">queue_music</span>' +
+  '    <div style="font-weight:800;font-size:18px;color:var(--on-surf);flex:1">Очередь воспроизведения</div>' +
+  '    <button class="btn-ghost" id="playlist-modal-close" style="padding:4px 8px;font-size:14px;border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center"><span class="material-symbols-outlined" style="font-size:20px">close</span></button>' +
+  '  </div>' +
+  '  <div id="playlist-modal-tracks" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:12px;max-height:50vh"></div>' +
+  '</div></div>' +
   '<div id="modal-share-manager" class="modal-backdrop" style="display:none">' +
   '<div class="modal" style="width:min(760px,94vw);max-height:86vh;overflow:auto">' +
   '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:14px">' +
@@ -4146,7 +4163,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn-primary" data-action="sm-create"><span class="material-symbols-outlined">add_link</span> Создать ссылку</button></div>' +
   '</div>' +
   '</div></div>' +
-
   '<script>' +
   'var userIsAdmin = ' + (profile.isAdmin ? 'true' : 'false') + ';' +
   'var activeFilter = "all";' +
@@ -4175,6 +4191,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'var dragFp=null,dragName=null,dragIsDir=false,dragEl=null;' +
   'var selectedItems={},lastEntries=[],lastBase="";' +
   'var previewFp="",previewName="",previewKind="",previewSrc="",mvZoom=1;' +
+  'var activeAudioFp="",activeAudioName="",currentAudioQueue=[],sidebarPlayerInitialized=false;' +
   'var toastUrl="";' +
   'var pendingShare=null;' +
   'var shareManagerFp="",shareManagerName="";' +
@@ -4183,7 +4200,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'var pendingUrlJobs={};try{pendingUrlJobs=JSON.parse(localStorage.getItem("pending-url-jobs")||"{}")||{};}catch(e){pendingUrlJobs={};}' +
   'var recentNewFiles={};' +
   'var uploadBusy=false;' +
-
   /* ── UTILS ── */
   'function H(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}' +
   'function highlightCode(code,ext){' +
@@ -4258,7 +4274,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  var hasParent=isFiles&&!!(currentPath||"");' +
   '  setSmartVisible(back,hasParent,"flex");' +
   '  setSmartVisible(bc,!isDashboard,"flex");' +
-  '  setSmartVisible(search,isFiles,"block");' +
+  '  setSmartVisible(search,false,"block");' +
   '  setSmartVisible(viewList,isFiles,"flex");' +
   '  setSmartVisible(viewGrid,isFiles,"flex");' +
   '  setSmartVisible(upload,isFiles,"inline-flex");' +
@@ -4311,7 +4327,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function saveManagedShare(token){var clearChecked=!!(document.getElementById("sm-clear-password-"+token)||{}).checked;var passVal=(document.getElementById("sm-password-"+token)||{}).value||"";var body={expiresIn:parseInt((document.getElementById("sm-expire-"+token)||{}).value||"0",10),maxDownloads:parseInt((document.getElementById("sm-max-"+token)||{}).value||"0",10),preview:!!(document.getElementById("sm-preview-"+token)||{}).checked};if(clearChecked)body.password="";else if(passVal.trim())body.password=passVal.trim();document.getElementById("sm-status").textContent="Сохраняю...";fetch("/api/fm/share/"+encodeURIComponent(token),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){document.getElementById("sm-status").textContent=d.ok?"Сохранено":(d.error||"Ошибка");loadShareManager();if(previewFp===shareManagerFp)renderPreviewInfo(previewFp,previewName);}).catch(function(){document.getElementById("sm-status").textContent="Ошибка сохранения";});}' +
   'function revokeManagedShare(token){if(!confirm("Отозвать эту публичную ссылку?"))return;fetch("/api/share/"+encodeURIComponent(token),{method:"DELETE"}).then(function(r){return r.json();}).then(function(d){if(!d.ok)throw new Error(d.error||"Ошибка");loadShareManager();if(previewFp===shareManagerFp)renderPreviewInfo(previewFp,previewName);}).catch(function(e){document.getElementById("sm-status").textContent=e.message;});}' +
   'function copyPlain(url){if(navigator.clipboard)navigator.clipboard.writeText(url).then(function(){showToast("Скопировано",url,url);});}' +
-
   /* ── BREADCRUMB ── */
   'function renderBreadcrumb(p){' +
   '  var el=document.getElementById("breadcrumb");' +
@@ -4326,7 +4341,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  }' +
   '  el.innerHTML=html;' +
   '}' +
-
   /* ── NAVIGATE & LOAD ── */
   'function navigateTo(p){' +
   '  p=p||"";' +
@@ -4395,11 +4409,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function fmtMbps(bytes,ms){if(!ms)return "\\u2014";return ((bytes*8)/(ms/1000)/1000000).toFixed(2)+" Mbps";}' +
   'function setSpeedStatus(msg,ok){var el=document.getElementById("speed-status");if(!el)return;el.textContent=msg||"";el.style.color=ok?"#8ff0a4":"#958ea0";}' +
   'async function runSpeedTest(){var st=document.getElementById("speed-status"),p=document.getElementById("speed-ping"),d=document.getElementById("speed-down"),u=document.getElementById("speed-up");if(!st||!p||!d||!u)return;p.textContent=d.textContent=u.textContent="...";setSpeedStatus("\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0437\\u0430\\u0434\\u0435\\u0440\\u0436\\u043a\\u0443...",false);try{var pingTimes=[];for(var i=0;i<4;i++){var t0=performance.now();await fetch("/api/speedtest/ping?x="+Date.now()+"-"+i,{cache:"no-store"});pingTimes.push(performance.now()-t0);}var ping=Math.round(pingTimes.reduce(function(a,b){return a+b;},0)/pingTimes.length);p.textContent=ping+" ms";setSpeedStatus("\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0441\\u043a\\u0430\\u0447\\u0438\\u0432\\u0430\\u043d\\u0438\\u0435...",false);var size=10*1024*1024,t1=performance.now();var r=await fetch("/api/speedtest/download?size="+size+"&x="+Date.now(),{cache:"no-store"});var buf=await r.arrayBuffer();var downMs=performance.now()-t1;d.textContent=fmtMbps(buf.byteLength,downMs);setSpeedStatus("\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0432\\u044b\\u0433\\u0440\\u0443\\u0437\\u043a\\u0443...",false);var upSize=4*1024*1024,payload=new Uint8Array(upSize);for(var j=0;j<upSize;j+=4096)payload[j]=j%251;var t2=performance.now();await fetch("/api/speedtest/upload?x="+Date.now(),{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:payload,cache:"no-store"});var upMs=performance.now()-t2;u.textContent=fmtMbps(upSize,upMs);setSpeedStatus("\\u0413\\u043e\\u0442\\u043e\\u0432\\u043e",true);}catch(e){setSpeedStatus("\\u041d\\u0435 \\u0443\\u0434\\u0430\\u043b\\u043e\\u0441\\u044c \\u0432\\u044b\\u043f\\u043e\\u043b\\u043d\\u0438\\u0442\\u044c \\u0442\\u0435\\u0441\\u0442",false);if(p.textContent==="...")p.textContent="\\u2014";if(d.textContent==="...")d.textContent="\\u2014";if(u.textContent==="...")u.textContent="\\u2014";}}' +
-  'function loadCloudSettings(){currentPath="__settings__";savePath("__settings__");clearSelection(false);setSectionChrome("settings");setNavActive("nav-settings");var bc=document.getElementById("breadcrumb");if(bc)bc.innerHTML=\'<span style="color:#a078ff;font-weight:700">Настройки</span>\';var html=\'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">\';html+=settingsCard("\u041f\u0440\u043e\u0444\u0438\u043b\u044c",\'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px"><div id="settings-profile-avatar" style="width:48px;height:48px;border-radius:16px;background:linear-gradient(135deg,#a078ff,#6d3bd7);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:18px;flex:0 0 auto">?</div><div style="min-width:0;flex:1"><div id="settings-profile-login" style="font-size:12px;color:#958ea0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@...</div><div id="settings-profile-role" style="font-size:12px;color:#d2bbff;margin-top:2px"></div></div></div><div style="font-size:12px;color:#958ea0;margin-bottom:8px">\u0418\u043c\u044f \u0432 \u043f\u0440\u043e\u0444\u0438\u043b\u0435</div><input id="cloud-profile-label" class="inp" maxlength="40" placeholder="CloudSpace" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-save-profile">\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c</button><div id="cloud-profile-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard("Хранение файлов",\'<div style="font-size:12px;color:#958ea0;margin-bottom:10px">Автоудаление старых файлов</div><select id="cloud-retention" class="inp" style="margin-bottom:10px"><option value="1">1 день</option><option value="3">3 дня</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="0">Никогда</option></select><button class="btn-primary" data-action="settings-save-retention">Сохранить</button><div id="cloud-retention-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard("Уведомления",\'<div id="cloud-notif-status" style="font-size:12px;color:#958ea0;margin-bottom:10px">Проверяю...</div><button class="btn-ghost" data-action="settings-notif"><span class="material-symbols-outlined">notifications</span> Разрешить уведомления</button>\');html+=settingsCard("Speed test",\'<div style="font-size:12px;color:#958ea0;margin-bottom:10px">\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0441\u043a\u043e\u0440\u043e\u0441\u0442\u0438 \u043c\u0435\u0436\u0434\u0443 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u043e\u043c \u0438 VPS</div><button class="btn-primary" data-action="settings-speedtest"><span class="material-symbols-outlined">speed</span> \u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u0442\u0435\u0441\u0442</button><div id="speed-status" style="font-size:12px;color:#958ea0;margin-top:10px;min-height:16px"></div><div id="speed-result" class="speed-result"><div class="speed-metric"><b id="speed-ping">\u2014</b><span>Ping</span></div><div class="speed-metric"><b id="speed-down">\u2014</b><span>Download</span></div><div class="speed-metric"><b id="speed-up">\u2014</b><span>Upload</span></div></div>\');html+=settingsCard("Токен расширения",\'<div id="cloud-token-display" style="font-size:12px;color:#d2bbff;word-break:break-all;margin-bottom:10px">Скрыт</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="settings-load-token">Показать</button><button class="btn-ghost" data-action="settings-copy-token">Копировать</button><button class="btn-ghost" data-action="settings-reset-token" style="color:#ffb4ab;border-color:#93000a">Сбросить</button></div><div id="cloud-token-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard("Пароль",\'<input id="cloud-pass-current" class="inp" type="password" placeholder="Текущий пароль" style="margin-bottom:10px"><input id="cloud-pass-new" class="inp" type="password" placeholder="Новый пароль" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-change-password">Сменить пароль</button><div id="cloud-pass-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=\'<div id="cloud-users-section" class="card" style="margin:0;padding:18px;display:none"><div style="font-size:15px;font-weight:800;margin-bottom:12px;color:#e4e1e6">Аккаунты</div><div id="cloud-users-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px"><input id="cloud-new-username" class="inp" placeholder="Логин"><input id="cloud-new-password" class="inp" placeholder="Пароль"><input id="cloud-new-label" class="inp" placeholder="Имя"></div><button class="btn-primary" data-action="settings-add-user">Добавить аккаунт</button><div id="cloud-users-status" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>\';html+="</div>";document.getElementById("file-area").innerHTML=html;loadCloudProfile();loadCloudRetention();updateCloudNotifStatus();loadCloudUsers();}' +
-  'function settingsThemeCard(id,label,desc,c1,c2,current){return \'<button class="theme-card \'+(current===id?"active":"")+\'" data-action="set-accent" data-theme="\'+id+\'" type="button"><span class="theme-card-dot" style="background:linear-gradient(135deg,\'+c1+\',\'+c2+\')"></span><span style="min-width:0;flex:1;text-align:left"><b style="display:block;color:#e4e1e6;font-size:13px">\'+label+\'</b><span class="settings-subtle" style="display:block;margin-top:2px">\'+desc+\'</span></span><span class="material-symbols-outlined" style="color:var(--accent-light);font-size:20px">\'+(current===id?"check_circle":"radio_button_unchecked")+\'</span></button>\';}' +
-  'function loadCloudSettings(){currentPath="__settings__";savePath("__settings__");clearSelection(false);setSectionChrome("settings");setNavActive("nav-settings");var bc=document.getElementById("breadcrumb");if(bc)bc.innerHTML=\'<span style="color:var(--accent-color);font-weight:800">Настройки</span>\';var currentAccent=localStorage.getItem("cloud-accent")||"violet";var html="";html+=\'<section class="settings-hero"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px"><div style="display:flex;gap:14px;align-items:flex-start;min-width:0"><div class="settings-hero-icon"><span class="material-symbols-outlined" style="font-size:30px">tune</span></div><div style="min-width:0"><div style="font-size:26px;font-weight:800;color:var(--on-surf);line-height:1.1;font-family:var(--font-display);letter-spacing:-.02em">Настройки CloudSpace</div><div class="settings-subtle" style="margin-top:7px;max-width:760px">Профиль, внешний вид, безопасность и системные параметры собраны в одном месте.</div></div></div><button class="btn-ghost" data-action="nav-files"><span class="material-symbols-outlined">folder</span> Мои файлы</button></div></section>\';html+=\'<div class="settings-grid">\';html+=settingsCard(\'Внешний вид\',\'<div class="settings-subtle" style="margin-bottom:14px">Цвет акцента применяется ко всем элементам интерфейса.</div><div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px" id="color-swatches"><button class="color-swatch" data-action="set-accent-hex" data-hex="#a078ff" title="Violet" style="background:#a078ff"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#10b981" title="Emerald" style="background:#10b981"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#f43f5e" title="Ruby" style="background:#f43f5e"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#06b6d4" title="Glacier" style="background:#06b6d4"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#f59e0b" title="Amber" style="background:#f59e0b"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#ec4899" title="Pink" style="background:#ec4899"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#22c55e" title="Green" style="background:#22c55e"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#6366f1" title="Indigo" style="background:#6366f1"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#ef4444" title="Red" style="background:#ef4444"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#14b8a6" title="Teal" style="background:#14b8a6"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#f97316" title="Orange" style="background:#f97316"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#a855f7" title="Purple" style="background:#a855f7"></button></div><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><span class="settings-subtle" style="white-space:nowrap">Свой цвет</span><input type="color" id="accent-color-input" value="#a078ff" title="Выберите цвет"><span id="accent-hex-label" style="font-size:12px;color:var(--accent-light);font-family:monospace;font-weight:700">#a078ff</span></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="toggle-theme"><span class="material-symbols-outlined">contrast</span> Светлая / тёмная</button></div>\');html+=settingsCard(\'Профиль\',\'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px"><div id="settings-profile-avatar" style="width:48px;height:48px;border-radius:16px;background:var(--accent-gradient);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:18px;flex:0 0 auto">?</div><div style="min-width:0;flex:1"><div id="settings-profile-login" class="settings-subtle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@...</div><div id="settings-profile-role" style="font-size:12px;color:var(--accent-light);margin-top:2px;font-weight:800"></div></div></div><div class="settings-subtle" style="margin-bottom:8px">Имя в профиле</div><input id="cloud-profile-label" class="inp" maxlength="40" placeholder="CloudSpace" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-save-profile">Сохранить</button><div id="cloud-profile-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Хранение файлов\',\'<div class="settings-subtle" style="margin-bottom:10px">Автоудаление старых файлов</div><select id="cloud-retention" class="inp" style="margin-bottom:10px"><option value="1">1 день</option><option value="3">3 дня</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="0">Никогда</option></select><button class="btn-primary" data-action="settings-save-retention">Сохранить</button><div id="cloud-retention-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Уведомления\',\'<div id="cloud-notif-status" class="settings-subtle" style="margin-bottom:10px">Проверяю...</div><button class="btn-ghost" data-action="settings-notif"><span class="material-symbols-outlined">notifications</span> Разрешить уведомления</button>\');html+=settingsCard(\'Speed test\',\'<div class="settings-subtle" style="margin-bottom:10px">Проверка скорости между браузером и VPS</div><button class="btn-primary" data-action="settings-speedtest"><span class="material-symbols-outlined">speed</span> Запустить тест</button><div id="speed-status" class="settings-subtle" style="margin-top:10px;min-height:16px"></div><div id="speed-result" class="speed-result"><div class="speed-metric"><b id="speed-ping">—</b><span>Ping</span></div><div class="speed-metric"><b id="speed-down">—</b><span>Download</span></div><div class="speed-metric"><b id="speed-up">—</b><span>Upload</span></div></div>\');html+=settingsCard(\'Токен расширения\',\'<div id="cloud-token-display" style="font-size:12px;color:var(--accent-light);word-break:break-all;margin-bottom:10px">Скрыт</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="settings-load-token">Показать</button><button class="btn-ghost" data-action="settings-copy-token">Копировать</button><button class="btn-ghost" data-action="settings-reset-token" style="color:#ffb4ab;border-color:#93000a">Сбросить</button></div><div id="cloud-token-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Telegram\',\'<div id="tg-linked" style="display:none"><div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px 12px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px"><span style="font-size:22px;flex-shrink:0">✅</span><div><div style="font-size:13px;font-weight:700;color:#4ade80">Telegram подключён</div><div id="tg-linked-info" class="settings-subtle" style="margin-top:2px"></div></div></div><button class="btn-ghost" data-action="settings-tg-unlink" style="color:#ffb4ab;border-color:#93000a">Отключить</button></div><div id="tg-unlinked"><div class="settings-subtle" style="margin-bottom:12px">Отправляйте файлы в Telegram — они сохранятся прямо в ваше хранилище на VPS. Поддерживаются документы, фото, видео, аудио.</div><button class="btn-primary" data-action="settings-tg-connect" style="background:linear-gradient(135deg,#0ea5e9,#2563eb)">🤖 Подключить Telegram</button><div class="settings-subtle" style="margin-top:8px">Откроется @SiplyiFolderUpload_bot</div></div><div id="tg-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Пароль\',\'<input id="cloud-pass-current" class="inp" type="password" placeholder="Текущий пароль" style="margin-bottom:10px"><input id="cloud-pass-new" class="inp" type="password" placeholder="Новый пароль" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-change-password">Сменить пароль</button><div id="cloud-pass-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=\'<div id="cloud-users-section" class="card" style="margin:0;padding:18px;display:none"><div class="settings-card-title"><span class="material-symbols-outlined">group</span> Аккаунты</div><div id="cloud-users-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px"><input id="cloud-new-username" class="inp" placeholder="Логин"><input id="cloud-new-password" class="inp" placeholder="Пароль"><input id="cloud-new-label" class="inp" placeholder="Имя"></div><button class="btn-primary" data-action="settings-add-user">Добавить аккаунт</button><div id="cloud-users-status" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>\';html+="</div>";document.getElementById("file-area").innerHTML=html;applyAccentColor();initColorPicker();loadCloudProfile();loadCloudRetention();updateCloudNotifStatus();loadCloudUsers();loadTelegramStatus();}' +
-  'function loadCloudRetention(){fetch("/api/settings").then(function(r){return r.json();}).then(function(d){var el=document.getElementById("cloud-retention");if(el)el.value=String(d.retention);}).catch(function(){});}' +
+  'function loadCloudSettings(){currentPath="__settings__";savePath("__settings__");clearSelection(false);setSectionChrome("settings");setNavActive("nav-settings");var bc=document.getElementById("breadcrumb");if(bc)bc.innerHTML=\'<span style="color:var(--accent-color);font-weight:800">Настройки</span>\';var html=\'<div class="settings-grid">\';html+=settingsCard(\'Внешний вид\',\'<div class="settings-subtle" style="margin-bottom:14px">Цвет акцента применяется ко всем элементам интерфейса.</div><div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px" id="color-swatches"><button class="color-swatch" data-action="set-accent-hex" data-hex="#a078ff" title="Violet" style="background:#a078ff"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#10b981" title="Emerald" style="background:#10b981"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#f43f5e" title="Ruby" style="background:#f43f5e"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#06b6d4" title="Glacier" style="background:#06b6d4"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#f59e0b" title="Amber" style="background:#f59e0b"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#ec4899" title="Pink" style="background:#ec4899"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#22c55e" title="Green" style="background:#22c55e"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#6366f1" title="Indigo" style="background:#6366f1"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#ef4444" title="Red" style="background:#ef4444"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#14b8a6" title="Teal" style="background:#14b8a6"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#f97316" title="Orange" style="background:#f97316"></button><button class="color-swatch" data-action="set-accent-hex" data-hex="#a855f7" title="Purple" style="background:#a855f7"></button></div><div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><span class="settings-subtle" style="white-space:nowrap">Свой цвет</span><input type="color" id="accent-color-input" value="#a078ff" title="Выберите цвет"><span id="accent-hex-label" style="font-size:12px;color:var(--accent-light);font-family:monospace;font-weight:700">#a078ff</span></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="toggle-theme"><span class="material-symbols-outlined">contrast</span> Светлая / тёмная</button></div>\');html+=settingsCard(\'Профиль\',\'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px"><div id="settings-profile-avatar" style="width:48px;height:48px;border-radius:16px;background:var(--accent-gradient);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:18px;flex:0 0 auto">?</div><div style="min-width:0;flex:1"><div id="settings-profile-login" class="settings-subtle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@...</div><div id="settings-profile-role" style="font-size:12px;color:var(--accent-light);margin-top:2px;font-weight:800"></div></div></div><div class="settings-subtle" style="margin-bottom:8px">Имя в профиле</div><input id="cloud-profile-label" class="inp" maxlength="40" placeholder="CloudSpace" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-save-profile">Сохранить</button><div id="cloud-profile-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Хранение файлов\',\'<div class="settings-subtle" style="margin-bottom:10px">Автоудаление старых файлов</div><select id="cloud-retention" class="inp" style="margin-bottom:10px"><option value="1">1 день</option><option value="3">3 дня</option><option value="7">7 дней</option><option value="30">30 дней</option><option value="0">Никогда</option></select><button class="btn-primary" data-action="settings-save-retention">Сохранить</button><div id="cloud-retention-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Уведомления\',\'<div id="cloud-notif-status" class="settings-subtle" style="margin-bottom:10px">Проверяю...</div><button class="btn-ghost" data-action="settings-notif"><span class="material-symbols-outlined">notifications</span> Разрешить уведомления</button>\');html+=settingsCard(\'Speed test\',\'<div class="settings-subtle" style="margin-bottom:10px">Проверка скорости между браузером и VPS</div><button class="btn-primary" data-action="settings-speedtest"><span class="material-symbols-outlined">speed</span> Запустить тест</button><div id="speed-status" class="settings-subtle" style="margin-top:10px;min-height:16px"></div><div id="speed-result" class="speed-result"><div class="speed-metric"><b id="speed-ping">—</b><span>Ping</span></div><div class="speed-metric"><b id="speed-down">—</b><span>Download</span></div><div class="speed-metric"><b id="speed-up">—</b><span>Upload</span></div></div>\');html+=settingsCard(\'Токен расширения\',\'<div id="cloud-token-display" style="font-size:12px;color:var(--accent-light);word-break:break-all;margin-bottom:10px">Скрыт</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-ghost" data-action="settings-load-token">Показать</button><button class="btn-ghost" data-action="settings-copy-token">Копировать</button><button class="btn-ghost" data-action="settings-reset-token" style="color:#ffb4ab;border-color:#93000a">Сбросить</button></div><div id="cloud-token-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Telegram\',\'<div id="tg-linked" style="display:none"><div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px 12px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px"><span style="font-size:22px;flex-shrink:0">✅</span><div><div style="font-size:13px;font-weight:700;color:#4ade80">Telegram подключён</div><div id="tg-linked-info" class="settings-subtle" style="margin-top:2px"></div></div></div><button class="btn-ghost" data-action="settings-tg-unlink" style="color:#ffb4ab;border-color:#93000a">Отключить</button></div><div id="tg-unlinked"><div class="settings-subtle" style="margin-bottom:12px">Отправляйте файлы в Telegram — они сохранятся прямо в ваше хранилище на VPS. Поддерживаются документы, фото, видео, аудио.</div><button class="btn-primary" data-action="settings-tg-connect" style="background:linear-gradient(135deg,#0ea5e9,#2563eb)">🤖 Подключить Telegram</button><div class="settings-subtle" style="margin-top:8px">Откроется @SiplyiFolderUpload_bot</div></div><div id="tg-status" style="font-size:12px;margin-top:8px;min-height:16px"></div><hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:14px 0"><div style="font-size:12px;color:#958ea0;margin-bottom:8px">Лимит размера файла через Telegram</div><select id="cloud-tg-limit" class="inp" style="margin-bottom:10px"><option value="5">5 МБ</option><option value="10">10 МБ</option><option value="20">20 МБ</option><option value="50">50 МБ</option><option value="100">100 МБ</option><option value="200">200 МБ</option><option value="500">500 МБ</option><option value="1000">1 ГБ</option><option value="2000">2 ГБ (Максимум)</option></select><button class="btn-primary" data-action="settings-save-tg-limit">Сохранить лимит</button><div id="cloud-tg-limit-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=settingsCard(\'Пароль\',\'<input id="cloud-pass-current" class="inp" type="password" placeholder="Текущий пароль" style="margin-bottom:10px"><input id="cloud-pass-new" class="inp" type="password" placeholder="Новый пароль" style="margin-bottom:10px"><button class="btn-primary" data-action="settings-change-password">Сменить пароль</button><div id="cloud-pass-status" style="font-size:12px;margin-top:8px;min-height:16px"></div>\');html+=\'<div id="cloud-users-section" class="card" style="margin:0;padding:18px;display:none"><div class="settings-card-title"><span class="material-symbols-outlined">group</span> Аккаунты</div><div id="cloud-users-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px"><input id="cloud-new-username" class="inp" placeholder="Логин"><input id="cloud-new-password" class="inp" placeholder="Пароль"><input id="cloud-new-label" class="inp" placeholder="Имя"></div><button class="btn-primary" data-action="settings-add-user">Добавить аккаунт</button><div id="cloud-users-status" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>\';html+="</div>";document.getElementById("file-area").innerHTML=html;applyAccentColor();initColorPicker();loadCloudProfile();loadCloudRetention();updateCloudNotifStatus();loadCloudUsers();loadTelegramStatus();}' +
+  'function loadCloudRetention(){fetch("/api/settings").then(function(r){return r.json();}).then(function(d){var el=document.getElementById("cloud-retention");if(el&&d.retention!==undefined)el.value=String(d.retention);var elTg=document.getElementById("cloud-tg-limit");if(elTg&&d.tgLimit!==undefined)elTg.value=String(d.tgLimit);}).catch(function(){});}' +
   'function saveCloudRetention(){var v=document.getElementById("cloud-retention").value;fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({retention:parseInt(v,10)})}).then(function(r){return r.json();}).then(function(d){setCloudStatus("cloud-retention-status",d.ok?"Сохранено":(d.error||"Ошибка"),!!d.ok);}).catch(function(){setCloudStatus("cloud-retention-status","Ошибка",false);});}' +
+  'function saveCloudTgLimit(){var v=document.getElementById("cloud-tg-limit").value;fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tgLimit:parseInt(v,10)})}).then(function(r){return r.json();}).then(function(d){setCloudStatus("cloud-tg-limit-status",d.ok?"Сохранено":(d.error||"Ошибка"),!!d.ok);}).catch(function(){setCloudStatus("cloud-tg-limit-status","Ошибка",false);});}' +
   'function updateCloudNotifStatus(){var el=document.getElementById("cloud-notif-status");if(!el)return;if(!("Notification" in window)){el.textContent="Браузерные уведомления недоступны";return;}el.textContent=Notification.permission==="granted"?"Уведомления включены":Notification.permission==="denied"?"Уведомления запрещены в браузере":"Уведомления еще не разрешены";}' +
   'function requestCloudNotif(){if(!("Notification" in window))return;Notification.requestPermission().then(updateCloudNotifStatus);}' +
   'function loadCloudToken(){fetch("/api/mytoken").then(function(r){return r.json();}).then(function(d){document.getElementById("cloud-token-display").textContent=d.token||"";setCloudStatus("cloud-token-status","Токен загружен",true);}).catch(function(){setCloudStatus("cloud-token-status","Ошибка токена",false);});}' +
@@ -4466,7 +4479,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  document.getElementById("file-area").innerHTML=filterHtml+' +
   '    (currentView==="grid"?fileGridHtml(filtered,lastBase):fileListHtml(filtered,lastBase));' +
   '}' +
-
   'function fileListHtml(files,base){' +
   '  if(!files.length)return \'<div style="color:#494454;padding:40px;text-align:center">\\u041f\\u0430\\u043f\\u043a\\u0430 \\u043f\\u0443\\u0441\\u0442\\u0430</div>\';' +
   '  var h=\'<div style="background:#1b1b1e;border:1px solid #494454;border-radius:12px;overflow:hidden">\';' +
@@ -4480,14 +4492,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  for(var i=0;i<files.length;i++){var f=files[i],fp=base?(base+"/"+f.name):f.name,checked=!!selectedItems[fp],isNew=isNewFile(fp),badge=isNew?\'<span class="new-badge">New</span>\':"";h+=\'<div class="file-grid-item \'+(checked?"selected ":"")+(isNew?"is-new":"")+\'" draggable="true" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:relative">\';h+=\'<input class="select-check" type="checkbox" data-action="select-item" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" style="position:absolute;top:10px;left:10px"\'+(checked?" checked":"")+">";h+=fileThumb(f.name,fp,f.isDir);h+=\'<div style="font-size:13px;font-weight:700;color:\'+(f.isDir?"#d0bcff":"#e4e1e6")+\';word-break:break-word;max-width:150px;text-align:left;pointer-events:none">\'+H(f.name)+badge+"</div>";h+=\'<div style="font-size:11px;color:#958ea0;pointer-events:none">\'+(f.isDir?((f.fileCount||0)+" объектов"):fmtSize(f.size))+"</div>";h+=\'<button class="btn-ghost item-menu-btn" data-action="item-menu" data-fp="\'+H(fp)+\'" data-name="\'+H(f.name)+\'" data-dir="\'+f.isDir+\'" title="Actions" style="position:absolute;right:10px;top:10px"><span class="material-symbols-outlined">more_vert</span></button></div>\';}' +
   '  return h+"</div>";' +
   '}' +
-
   'function loadRecent(){' +
   '  clearSelection(false);setSectionChrome("recent");currentPath="__recent__";savePath("__recent__");setNavActive("nav-recent");document.getElementById("file-area").innerHTML=\'<div style="color:#958ea0;padding:40px;text-align:center">\\u0417\\u0430\\u0433\\u0440\\u0443\\u0437\\u043a\\u0430...</div>\';renderBreadcrumb("");' +
   '  fetch("/api/fm/recent").then(function(r){return r.json();})' +
   '  .then(function(d){if(d.error){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\'+H(d.error)+"</div>";return;}var entries=(d.entries||[]).map(function(e){return{name:e.relPath,size:e.size,mtime:e.mtime,isDir:false};});lastEntries=entries;lastBase="";document.getElementById("file-area").innerHTML=\'<div style="font-size:13px;color:#958ea0;margin-bottom:12px">\\u041d\\u0435\\u0434\\u0430\\u0432\\u043d\\u0438\\u0435 \\u0444\\u0430\\u0439\\u043b\\u044b</div>\'+fileListHtml(entries,"");})' +
   '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">\\u041e\\u0448\\u0438\\u0431\\u043a\\u0430</div>\';});' +
   '}' +
-
   'function getActivityActionStyle(action){' +
   '  var icon="info",color="#958ea0";' +
   '  if(action==="Создание папки"){icon="create_new_folder";color="#10b981";}' +
@@ -4534,7 +4544,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  })' +
   '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">Ошибка загрузки активности</div>\';});' +
   '}' +
-
   'function doSearch(q){' +
   '  if(currentPath==="__dashboard__"||currentPath==="__recent__"||currentPath==="__activity__"||currentPath==="__settings__")return;' +
   '  if(!q.trim())return navigateTo(activePath());' +
@@ -4549,7 +4558,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  })' +
   '  .catch(function(){document.getElementById("file-area").innerHTML=\'<div style="color:#ffb4ab;padding:24px">Ошибка</div>\';});' +
   '}' +
-
   /* ── MKDIR ── */
   'function openMkdirModal(){document.getElementById("modal-mkdir").style.display="flex";document.getElementById("mkdir-name").value="";document.getElementById("mkdir-name").focus();}' +
   'function closeMkdirModal(){document.getElementById("modal-mkdir").style.display="none";}' +
@@ -4560,7 +4568,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  fetch("/api/fm/mkdir",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:p,name:name})})' +
   '  .then(function(r){return r.json();}).then(function(d){closeMkdirModal();if(d.ok)navigateTo(p);else alert(d.error||"Ошибка");});' +
   '}' +
-
   /* ── RENAME ── */
   'function openRenameModal(fp,name,isDir){' +
   '  renameFp=fp;renameIsDir=isDir;' +
@@ -4582,7 +4589,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  fetch("/api/fm/rename",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({oldPath:renameFp,newName:newName})})' +
   '  .then(function(r){return r.json();}).then(function(d){closeRenameModal();if(d.ok)navigateTo(activePath());else alert(d.error||"Ошибка");});' +
   '}' +
-
   /* ── DELETE ── */
   'function selectUrlMode(mode){' +
   '  document.getElementById("url-mode-inp").value=mode;' +
@@ -4614,13 +4620,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    var links=m.publicLinks||[];var isDir=!!m.isDir;' +
   '    var ext=m.ext?m.ext.slice(1).toUpperCase():(isDir?"Папка":"Файл");' +
   '    var h="";' +
-
   /* name */
   '    h+=\'<div style="padding:18px 16px 0">\';' +
   '    h+=\'<div class="preview-meta-label">Название</div>\';' +
   '    h+=\'<div style="font-size:15px;font-weight:700;color:var(--on-surf);word-break:break-all;line-height:1.45;font-family:var(--font-display)">\'+H(m.name||name)+\'</div>\';' +
   '    h+=\'</div>\';' +
-
   /* size + type chips */
   '    if(!isDir){' +
   '      h+=\'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px 16px 0">\';' +
@@ -4628,35 +4632,29 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '      h+=\'<div class="preview-meta-chip"><div class="preview-meta-label">Тип</div><div style="font-size:14px;font-weight:700;color:var(--on-surf)">\'+H(ext)+\'</div></div>\';' +
   '      h+=\'</div>\';' +
   '    }' +
-
   /* date */
   '    h+=\'<div style="padding:14px 16px 0">\';' +
   '    h+=\'<div class="preview-meta-label">Загружен</div>\';' +
   '    h+=\'<div style="font-size:13px;color:var(--on-surf)">\'+fmtDateTime(m.created)+\'</div>\';' +
   '    h+=\'</div>\';' +
-
   /* path chip */
   '    h+=\'<div style="padding:14px 16px 0">\';' +
   '    h+=\'<div class="preview-meta-label">Путь</div>\';' +
   '    h+=\'<div style="background:var(--surf-hi);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--accent-light);word-break:break-all;line-height:1.5">\'+H(m.path||fp)+\'</div>\';' +
   '    h+=\'</div>\';' +
-
   /* public links */
   '    if(links.length){' +
   '      var lh=links.map(function(x){var full=window.location.origin+x.url;return \'<div style="display:flex;align-items:center;gap:6px;margin-top:5px"><a href="\'+H(x.url)+\'" target="_blank" style="color:var(--accent-light);font-size:12px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">\'+H(full)+\'</a><button class="btn-ghost" data-action="qr-link" data-url="\'+H(full)+\'" style="padding:2px 7px;min-height:24px;font-size:11px">QR</button></div>\';}).join("");' +
   '      h+=\'<div style="padding:14px 16px 0"><div class="preview-meta-label">Публичная ссылка</div>\'+lh+\'</div>\';' +
   '    }' +
-
   /* push buttons to bottom */
   '    h+=\'<div style="flex:1;min-height:16px"></div>\';' +
-
   /* action buttons */
   '    h+=\'<div style="padding:16px;display:flex;flex-direction:column;gap:8px">\';' +
   '    h+=\'<button class="btn-primary preview-action-btn" data-action="download-preview"><span class="material-symbols-outlined" style="font-size:18px">download</span>Скачать</button>\';' +
   '    h+=\'<button class="btn-ghost preview-action-btn" data-action="share-preview"><span class="material-symbols-outlined" style="font-size:18px">share</span>Поделиться</button>\';' +
   '    if(!isDir)h+=\'<button class="btn-ghost preview-action-btn" data-action="delete-preview" style="color:#ffb4ab;border-color:rgba(147,0,10,.45)"><span class="material-symbols-outlined" style="font-size:18px">delete</span>Удалить</button>\';' +
   '    h+=\'</div>\';' +
-
   '    info.innerHTML=h;' +
   '  }).catch(function(){info.innerHTML=\'<div style="padding:16px;color:#ffb4ab;font-size:13px">Ошибка загрузки метаданных</div>\';});' +
   '}' +
@@ -4701,7 +4699,256 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  }' +
   '}' +
   'function initPlyr(selector,isVideo,key,startTime,autoPlay){if(typeof Plyr==="undefined")return null;var opts={controls:isVideo?["play-large","play","progress","current-time","duration","mute","volume","captions","settings","pip","airplay","fullscreen"]:["play","progress","current-time","duration","mute","volume"],settings:["captions","quality","speed","loop"],keyboard:{focused:true,global:false},tooltips:{controls:true,seek:true}};var p=new Plyr(selector,opts);if(isVideo)fitPlyrToVideo(document.querySelector(selector),p);p.on("ready",function(e){var savedTime=localStorage.getItem(key);var useTime=(startTime!==undefined&&startTime!==null)?startTime:(savedTime?parseFloat(savedTime):0);e.detail.plyr.currentTime=useTime;if(autoPlay){setTimeout(function(){try{e.detail.plyr.play();}catch(err){}},50);}});p.on("timeupdate",function(e){localStorage.setItem(key,e.detail.plyr.currentTime);});p.on("ended",function(e){playSibling("next",true);});return p;}\n' +
-  'function openPreview(fp,name,isDir,startTime,autoPlay){if(isDir){navigateTo(fp);return;}if(window.previewPlyrInstance){try{window.previewPlyrInstance.destroy();}catch(e){}window.previewPlyrInstance=null;}var body=document.getElementById("preview-body");body.innerHTML="";previewFp=fp;previewName=name;previewKind="";previewSrc="";var ext=(name.split(".").pop()||"").toLowerCase();if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext))previewKind="image";else if(["mp4","webm","ogg","mov","mkv"].includes(ext))previewKind="video";else if(["mp3","wav","m4a","flac","aac","oga"].includes(ext))previewKind="audio";updatePreviewNavButtons();var panel=document.getElementById("preview-panel");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");renderPreviewInfo(fp,name);var src="/api/fm/preview?path="+encodeURIComponent(fp);if(previewKind==="image"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(previewKind==="video"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video id="preview-plyr" src="${src}" playsinline controls></video></div>`;setTimeout(function(){try{if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}window.previewPlyrInstance=initPlyr("#preview-plyr",true,"plyr_time_"+src,startTime,autoPlay);}catch(e){console.error(e);}},50);return;}if(previewKind==="audio"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><audio id="preview-plyr" src="${src}" playsinline controls></audio></div>`;setTimeout(function(){try{if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}window.previewPlyrInstance=initPlyr("#preview-plyr",false,"plyr_time_"+src,startTime,autoPlay);}catch(e){console.error(e);}},50);return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf","py","sh"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){if(t.length<150000&&["js","css","html","xml","json","py","sh","yml","yaml","md"].includes(ext)){var highlighted=highlightCode(t,ext);body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0;font-family:\'Fira Code\',Consolas,monospace;background:#18181f;padding:12px;border-radius:10px;color:#f8f8f2">${highlighted}</pre>`;}else{body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
+  'function playGlobalAudio(fp,name,forcePlay){' +
+  '  var audio=document.getElementById("global-audio");' +
+  '  if(!audio)return;' +
+  '  activeAudioFp=fp;activeAudioName=name;' +
+  '  if(!window.sidebarPlayerInitialized){initSidebarPlayer();}' +
+  '  var playerCard=document.getElementById("sidebar-player");' +
+  '  if(playerCard)playerCard.style.display="flex";' +
+  '  updatePlayerTrackInfo();' +
+  '  var src="/api/fm/preview?path="+encodeURIComponent(fp);' +
+  '  if(audio.src!==window.location.origin+src&&audio.getAttribute("src")!==src){audio.src=src;}' +
+  '  buildAudioQueue();' +
+  '  if(forcePlay){' +
+  '    audio.play().catch(function(e){console.error("Audio play error:",e);});' +
+  '    updatePlayButtonState(true);' +
+  '  }else{' +
+  '    audio.pause();updatePlayButtonState(false);' +
+  '  }' +
+  '}' +
+  'function updatePlayerTrackInfo(){' +
+  '  var name=activeAudioName;' +
+  '  if(!name)return;' +
+  '  var titleEl=document.getElementById("player-title");' +
+  '  var artistEl=document.getElementById("player-artist");' +
+  '  var baseName=name.replace(/\\.[^/.]+$/,"");' +
+  '  var parts=baseName.split(" - ");' +
+  '  var title=baseName;' +
+  '  var artist="CloudSpace";' +
+  '  var swap=localStorage.getItem("player-swap-fields")==="true";' +
+  '  if(parts.length>1){' +
+  '    var p0=parts[0].trim();' +
+  '    var p1=parts.slice(1).join(" - ").trim();' +
+  '    if(swap){' +
+  '      title=p0;artist=p1;' +
+  '    }else{' +
+  '      title=p1;artist=p0;' +
+  '    }' +
+  '  }' +
+  '  if(titleEl)titleEl.textContent=title;' +
+  '  if(artistEl)artistEl.textContent=artist;' +
+  '}' +
+  'function buildAudioQueue(){' +
+  '  currentAudioQueue=[];' +
+  '  var exts=["mp3","wav","m4a","flac","aac","oga"];' +
+  '  for(var i=0;i<lastEntries.length;i++){' +
+  '    var entry=lastEntries[i];' +
+  '    if(entry.isDir)continue;' +
+  '    var ext=(entry.name.split(".").pop()||"").toLowerCase();' +
+  '    if(exts.includes(ext)){' +
+  '      var entryPath=lastBase?(lastBase+"/"+entry.name):entry.name;' +
+  '      currentAudioQueue.push({fp:entryPath,name:entry.name});' +
+  '    }' +
+  '  }' +
+  '}' +
+  'function prevGlobalTrack(){' +
+  '  if(!currentAudioQueue.length)return;' +
+  '  var idx=-1;' +
+  '  for(var i=0;i<currentAudioQueue.length;i++){if(currentAudioQueue[i].fp===activeAudioFp){idx=i;break;}}' +
+  '  if(idx===-1)return;' +
+  '  var prevIdx=idx-1;' +
+  '  if(prevIdx<0){' +
+  '    prevIdx=currentAudioQueue.length-1;' +
+  '  }' +
+  '  var track=currentAudioQueue[prevIdx];' +
+  '  playGlobalAudio(track.fp,track.name,true);' +
+  '}' +
+  'function nextGlobalTrack(isAuto){' +
+  '  if(!currentAudioQueue.length)return;' +
+  '  var idx=-1;' +
+  '  for(var i=0;i<currentAudioQueue.length;i++){if(currentAudioQueue[i].fp===activeAudioFp){idx=i;break;}}' +
+  '  if(idx===-1)return;' +
+  '  var repeat=localStorage.getItem("player-repeat-mode")||"off";' +
+  '  if(isAuto&&repeat==="one"){' +
+  '    playGlobalAudio(activeAudioFp,activeAudioName,true);' +
+  '    return;' +
+  '  }' +
+  '  var nextIdx=idx+1;' +
+  '  if(nextIdx>=currentAudioQueue.length){' +
+  '    if(isAuto&&repeat==="off"){' +
+  '      updatePlayButtonState(false);' +
+  '      return;' +
+  '    }' +
+  '    nextIdx=0;' +
+  '  }' +
+  '  var track=currentAudioQueue[nextIdx];' +
+  '  playGlobalAudio(track.fp,track.name,true);' +
+  '}' +
+  'function toggleGlobalPlay(){' +
+  '  var audio=document.getElementById("global-audio");' +
+  '  if(!audio)return;' +
+  '  if(audio.paused){' +
+  '    audio.play().then(function(){updatePlayButtonState(true);}).catch(function(e){console.error(e);});' +
+  '  }else{' +
+  '    audio.pause();updatePlayButtonState(false);' +
+  '  }' +
+  '}' +
+  'function updatePlayButtonState(isPlaying){' +
+  '  var icon=document.getElementById("player-play-icon");' +
+  '  if(icon)icon.textContent=isPlaying?"pause":"play_arrow";' +
+  '  var btn=document.getElementById("player-btn-play");' +
+  '  if(btn)btn.title=isPlaying?"Пауза":"Воспроизведение";' +
+  '}' +
+  'function toggleRepeatMode(){' +
+  '  var repeat=localStorage.getItem("player-repeat-mode")||"off";' +
+  '  var nextRepeat="off";' +
+  '  if(repeat==="off")nextRepeat="all";' +
+  '  else if(repeat==="all")nextRepeat="one";' +
+  '  localStorage.setItem("player-repeat-mode",nextRepeat);' +
+  '  updateRepeatButtonUI();' +
+  '}' +
+  'function updateRepeatButtonUI(){' +
+  '  var btn=document.getElementById("player-btn-repeat");' +
+  '  if(!btn)return;' +
+  '  var icon=btn.querySelector(".material-symbols-outlined");' +
+  '  var repeat=localStorage.getItem("player-repeat-mode")||"off";' +
+  '  if(repeat==="off"){' +
+  '    btn.style.color="var(--outline)";' +
+  '    btn.title="Повтор: выкл";' +
+  '    if(icon)icon.textContent="repeat";' +
+  '  }else if(repeat==="all"){' +
+  '    btn.style.color="var(--accent-color)";' +
+  '    btn.title="Повтор: все";' +
+  '    if(icon)icon.textContent="repeat";' +
+  '  }else if(repeat==="one"){' +
+  '    btn.style.color="var(--accent-color)";' +
+  '    btn.title="Повтор: один";' +
+  '    if(icon)icon.textContent="repeat_one";' +
+  '  }' +
+  '}' +
+  'function closeSidebarPlayer(){' +
+  '  var audio=document.getElementById("global-audio");' +
+  '  if(audio)audio.pause();' +
+  '  var card=document.getElementById("sidebar-player");' +
+  '  if(card)card.style.display="none";' +
+  '  activeAudioFp="";activeAudioName="";' +
+  '}' +
+  'function renderPlaylistModalTracks(){' +
+  '  var container=document.getElementById("playlist-modal-tracks");' +
+  '  if(!container)return;' +
+  '  if(!currentAudioQueue.length){' +
+  '    container.innerHTML=\'<div style="color:var(--outline);text-align:center;padding:24px">Очередь пуста</div>\';' +
+  '    return;' +
+  '  }' +
+  '  var html="";' +
+  '  for(var i=0;i<currentAudioQueue.length;i++){' +
+  '    var track=currentAudioQueue[i];' +
+  '    var isActive=track.fp===activeAudioFp;' +
+  '    var bg=isActive?"color-mix(in srgb,var(--accent-color) 12%,var(--surf-hi))":"transparent";' +
+  '    var border=isActive?"1px solid color-mix(in srgb,var(--accent-color) 30%,transparent)":"1px solid transparent";' +
+  '    var textColor=isActive?"var(--accent-light)":"var(--on-surf)";' +
+  '    var icon=isActive?"volume_up":"music_note";' +
+  '    var titleParts=track.name.replace(/\\.[^/.]+$/,"").split(" - ");' +
+  '    var title=track.name;' +
+  '    var artist="CloudSpace";' +
+  '    if(titleParts.length>1){' +
+  '      var swap=localStorage.getItem("player-swap-fields")==="true";' +
+  '      if(swap){' +
+  '        title=titleParts[0].trim();artist=titleParts.slice(1).join(" - ").trim();' +
+  '      }else{' +
+  '        title=titleParts[1].trim();artist=titleParts[0].trim();' +
+  '      }' +
+  '    }' +
+  '    html+=\'<div class="playlist-track-row" style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:12px;background:\'+bg+\';border:\'+border+\';cursor:pointer;transition:background 0.2s" data-fp="\'+H(track.fp)+\'" data-name="\'+H(track.name)+\'">\';' +
+  '    html+=\'  <span class="material-symbols-outlined" style="font-size:20px;color:\'+(isActive?\'var(--accent-color)\':\'var(--outline)\')+\'">\'+icon+\'</span>\';' +
+  '    html+=\'  <div style="min-width:0;flex:1" class="playlist-track-click">\';' +
+  '    html+=\'    <div style="font-size:13px;font-weight:700;color:\'+textColor+\';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\'+H(title)+\'</div>\';' +
+  '    html+=\'    <div style="font-size:11px;color:var(--outline);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">\'+H(artist)+\'</div>\';' +
+  '    html+=\'  </div>\';' +
+  '    html+=\'  <button class="btn-ghost playlist-track-menu" style="width:28px;height:28px;padding:0;min-height:28px;border-radius:50%" data-fp="\'+H(track.fp)+\'" data-name="\'+H(track.name)+\'">\';' +
+  '    html+=\'    <span class="material-symbols-outlined" style="font-size:18px">more_vert</span>\';' +
+  '    html+=\'  </button>\';' +
+  '    html+=\'</div>\';' +
+  '  }' +
+  '  container.innerHTML=html;' +
+  '  container.querySelectorAll(".playlist-track-click").forEach(function(el){' +
+  '    el.addEventListener("click",function(){' +
+  '      var parent=el.closest(".playlist-track-row");' +
+  '      if(parent){' +
+  '        playGlobalAudio(parent.dataset.fp,parent.dataset.name,true);' +
+  '        renderPlaylistModalTracks();' +
+  '      }' +
+  '    });' +
+  '  });' +
+  '  container.querySelectorAll(".playlist-track-menu").forEach(function(btn){' +
+  '    btn.addEventListener("click",function(e){' +
+  '      e.stopPropagation();' +
+  '      var rect=btn.getBoundingClientRect();' +
+  '      showCtxMenu(rect.left,rect.bottom+window.scrollY,btn.dataset.fp,btn.dataset.name,false);' +
+  '    });' +
+  '  });' +
+  '}' +
+  'function initSidebarPlayer(){' +
+  '  if(window.sidebarPlayerInitialized)return;' +
+  '  var audio=document.getElementById("global-audio");' +
+  '  if(!audio)return;' +
+  '  var prog=document.getElementById("player-progress");' +
+  '  var curTime=document.getElementById("player-time-cur");' +
+  '  var durTime=document.getElementById("player-time-dur");' +
+  '  audio.addEventListener("timeupdate",function(){' +
+  '    if(!audio.duration)return;' +
+  '    var pct=(audio.currentTime/audio.duration)*100;' +
+  '    prog.value=pct;' +
+  '    curTime.textContent=fmtDuration(audio.currentTime);' +
+  '  });' +
+  '  audio.addEventListener("durationchange",function(){' +
+  '    if(!audio.duration)return;' +
+  '    durTime.textContent=fmtDuration(audio.duration);' +
+  '  });' +
+  '  audio.addEventListener("ended",function(){nextGlobalTrack(true);});' +
+  '  audio.addEventListener("play",function(){updatePlayButtonState(true);});' +
+  '  audio.addEventListener("pause",function(){updatePlayButtonState(false);});' +
+  '  prog.addEventListener("input",function(){' +
+  '    if(!audio.duration)return;' +
+  '    var time=(prog.value/100)*audio.duration;' +
+  '    audio.currentTime=time;' +
+  '  });' +
+  '  document.getElementById("player-btn-prev").addEventListener("click",prevGlobalTrack);' +
+  '  document.getElementById("player-btn-play").addEventListener("click",toggleGlobalPlay);' +
+  '  document.getElementById("player-btn-next").addEventListener("click",function(){nextGlobalTrack(false);});' +
+  '  document.getElementById("player-btn-close").addEventListener("click",closeSidebarPlayer);' +
+  '  document.getElementById("player-btn-repeat").addEventListener("click",toggleRepeatMode);' +
+  '  document.getElementById("player-btn-playlist").addEventListener("click",function(){' +
+  '    document.getElementById("modal-playlist").style.display="flex";' +
+  '    renderPlaylistModalTracks();' +
+  '  });' +
+  '  document.getElementById("playlist-modal-close").addEventListener("click",function(){' +
+  '    document.getElementById("modal-playlist").style.display="none";' +
+  '  });' +
+  '  document.getElementById("player-btn-details").addEventListener("click",function(){' +
+  '    if(activeAudioFp&&activeAudioName){' +
+  '      openPreview(activeAudioFp,activeAudioName,false);' +
+  '    }' +
+  '  });' +
+  '  var textWrap=document.getElementById("player-text-wrap");' +
+  '  if(textWrap){' +
+  '    textWrap.addEventListener("click",function(){' +
+  '      var swap=localStorage.getItem("player-swap-fields")==="true";' +
+  '      localStorage.setItem("player-swap-fields",swap?"false":"true");' +
+  '      updatePlayerTrackInfo();' +
+  '    });' +
+  '  }' +
+  '  updateRepeatButtonUI();' +
+  '  window.sidebarPlayerInitialized=true;' +
+  '}' +
+  'function fmtDuration(secs){' +
+  '  if(isNaN(secs))return "0:00";' +
+  '  var m=Math.floor(secs/60);' +
+  '  var s=Math.floor(secs%60);' +
+  '  return m+":"+(s<10?"0":"")+s;' +
+  '}' +
+  'function openPreview(fp,name,isDir,startTime,autoPlay){if(isDir){navigateTo(fp);return;}if(window.previewPlyrInstance){try{window.previewPlyrInstance.destroy();}catch(e){}window.previewPlyrInstance=null;}var body=document.getElementById("preview-body");body.innerHTML="";previewFp=fp;previewName=name;previewKind="";previewSrc="";var ext=(name.split(".").pop()||"").toLowerCase();if(["png","jpg","jpeg","gif","webp","svg","bmp"].includes(ext))previewKind="image";else if(["mp4","webm","ogg","mov","mkv"].includes(ext))previewKind="video";else if(["mp3","wav","m4a","flac","aac","oga"].includes(ext))previewKind="audio";updatePreviewNavButtons();var panel=document.getElementById("preview-panel");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");renderPreviewInfo(fp,name);var src="/api/fm/preview?path="+encodeURIComponent(fp);if(previewKind==="image"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><img class="preview-media" src="${src}" alt="${H(name)}"></div>`;return;}if(previewKind==="video"){previewSrc=src;body.classList.add("media-preview");body.innerHTML=`<div id="preview-media-wrap" class="preview-media-wrap"><video id="preview-plyr" src="${src}" playsinline controls></video></div>`;setTimeout(function(){try{if(window.previewPlyrInstance){window.previewPlyrInstance.destroy();window.previewPlyrInstance=null;}window.previewPlyrInstance=initPlyr("#preview-plyr",true,"plyr_time_"+src,startTime,autoPlay);}catch(e){console.error(e);}},50);return;}if(previewKind==="audio"){previewSrc=src;playGlobalAudio(fp,name,false);body.classList.add("media-preview");body.innerHTML=\'<div style="padding:24px;text-align:center;color:var(--outline)"><span class="material-symbols-outlined" style="font-size:48px;color:var(--accent-color);margin-bottom:10px">music_note</span><div style="font-size:14px;font-weight:700;color:var(--on-surf);margin-bottom:4px">Воспроизведение...</div><div style="font-size:12px;color:var(--outline)">Трек загружен в плеер сайдбара</div></div>\';return;}if(ext==="pdf"){body.innerHTML=`<iframe src="${src}" style="width:100%;height:70vh;border:0;border-radius:10px"></iframe>`;return;}if(["txt","log","md","json","csv","js","css","html","xml","yml","yaml","ini","conf","py","sh"].includes(ext)){body.textContent="Загрузка предпросмотра...";fetch(src).then(function(r){return r.text();}).then(function(t){if(t.length<150000&&["js","css","html","xml","json","py","sh","yml","yaml","md"].includes(ext)){var highlighted=highlightCode(t,ext);body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0;font-family:\'Fira Code\',Consolas,monospace;background:#18181f;padding:12px;border-radius:10px;color:#f8f8f2">${highlighted}</pre>`;}else{body.innerHTML=`<pre style="white-space:pre-wrap;font-size:12px;line-height:1.55;margin:0">${H(t)}</pre>`;}}).catch(function(){body.textContent="Не удалось загрузить предпросмотр";});return;}body.innerHTML=`<div style="padding:32px;text-align:center;color:#958ea0">Предпросмотр недоступен<br><br><a class="btn-primary" href="/api/fm/download?path=${encodeURIComponent(fp)}" download style="display:inline-block;text-decoration:none">Скачать файл</a></div>`;}' +
   'function openPreviewShell(fp,name){if(window.previewPlyrInstance){try{window.previewPlyrInstance.destroy();}catch(e){}window.previewPlyrInstance=null;}var body=document.getElementById("preview-body");body.innerHTML="";previewFp=fp;previewName=name;previewKind="";previewSrc="";updatePreviewNavButtons();var panel=document.getElementById("preview-panel");document.getElementById("preview-title").textContent=name;panel.classList.add("open");body.classList.remove("media-preview");renderPreviewInfo(fp,name);return body;}' +
   'function renderDocPreview(fp,name){var body=openPreviewShell(fp,name);body.innerHTML=\'<div style="color:#958ea0;padding:20px">Загрузка документа...</div>\';fetch("/api/fm/doc-preview?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(d){if(!d.ok){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">\'+H(d.error||"Не удалось открыть документ")+\'</div>\';return;}if(d.type==="sheet"){var sheets=d.sheets||[];if(!sheets.length){body.innerHTML=\'<div style="padding:24px;color:#958ea0">В таблице нет листов</div>\';return;}var h=\'<div class="doc-tabs">\';for(var i=0;i<sheets.length;i++)h+=\'<button class="doc-tab" data-sheet="\'+i+\'">\'+H(sheets[i].name)+\'</button>\';h+=\'</div><div id="sheet-preview" class="doc-preview">\'+(sheets[0].html||"")+\'</div>\';body.innerHTML=h;body.querySelectorAll("[data-sheet]").forEach(function(btn){btn.addEventListener("click",function(){var idx=parseInt(btn.dataset.sheet,10)||0;document.getElementById("sheet-preview").innerHTML=sheets[idx].html||"";});});return;}body.innerHTML=\'<div class="doc-preview">\'+(d.html||"")+\'</div>\';}).catch(function(){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">Ошибка предпросмотра</div>\';});}' +
   'function renderArchivePreview(fp,name){var body=openPreviewShell(fp,name);body.innerHTML=\'<div style="color:#958ea0;padding:20px">Читаю архив...</div>\';fetch("/api/fm/archive/list?path="+encodeURIComponent(fp)).then(function(r){return r.json();}).then(function(d){if(!d.ok){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">\'+H(d.error||"Не удалось открыть архив")+\'<div style="margin-top:8px;color:#958ea0;font-size:12px">\'+H(d.details||"")+\'</div></div>\';return;}var items=d.entries||[];if(!items.length){body.innerHTML=\'<div style="padding:24px;color:#958ea0">Архив пуст</div>\';return;}var h=\'<div style="display:flex;justify-content:space-between;gap:10px;margin-bottom:10px;color:#958ea0;font-size:12px"><span>\'+items.length+\' items</span><a class="btn-ghost" href="/api/fm/download?path=\'+encodeURIComponent(fp)+\'" download style="text-decoration:none;padding:4px 10px;min-height:28px">Скачать архив</a></div><table class="archive-table"><tbody>\';items.forEach(function(x){var icon=x.isDir?"folder":"draft";var cls=x.isDir?"archive-path archive-dir":"archive-path";h+=\'<tr><td style="width:28px"><span class="material-symbols-outlined" style="font-size:18px">\'+icon+\'</span></td><td><div class="\'+cls+\'" title="\'+H(x.path)+\'">\'+H(x.path)+\'</div></td><td style="width:76px;color:#958ea0;white-space:nowrap">\'+(x.isDir?"":fmtSize(x.size||0))+\'</td><td style="width:42px;text-align:right">\'+(x.isDir?"":\'<a class="btn-ghost" href="/api/fm/archive/download?path=\'+encodeURIComponent(fp)+\'&entry=\'+encodeURIComponent(x.path)+\'" download style="padding:3px 8px;min-height:24px;text-decoration:none">↓</a>\')+\'</td></tr>\';});h+=\'</tbody></table>\';body.innerHTML=h;}).catch(function(){body.innerHTML=\'<div style="padding:24px;color:#ffb4ab">Ошибка чтения архива</div>\';});}' +
@@ -4796,7 +5043,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  fetch("/api/fm/delete",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:fp,isDir:isDir})})' +
   '  .then(function(r){return r.json();}).then(function(d){if(d.ok)navigateTo(activePath());else alert(d.error||"Ошибка");});' +
   '}' +
-
   /* ── UPLOAD ── */
   'function deleteSelected(){' +
   '  var items=selectedList();' +
@@ -4858,7 +5104,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  xhr.onabort=function(){uploadBusy=false;status.textContent="Загрузка отменена";};' +
   '  xhr.send(fd);' +
   '}' +
-
   /* ── CONTEXT MENU ── */
   'function showCtxMenu(x,y,fp,name,isDir){' +
   '  ctxFp=fp;ctxName=name;ctxIsDir=isDir;' +
@@ -4886,10 +5131,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  m.style.top=Math.max(8,(y+mh>wh?wh-mh-8:y))+"px";' +
   '}' +
   'function hideCtxMenu(){var m=document.getElementById("ctx-menu");m.style.display="none";m.classList.remove("open");}' +
-
   /* ── DRAG & DROP ── */
   'function clearDragOver(){document.querySelectorAll(".drag-over,.drop-target").forEach(function(el){el.classList.remove("drag-over");el.classList.remove("drop-target");});}' +
-
   /* TRANSFERS */
   'function loadTransfers(){' +
   '  Promise.all([fetch("/api/downloads").then(function(r){return r.json();}).catch(function(){return[];}),fetch("/api/fm/media-jobs?scope=active").then(function(r){return r.json();}).catch(function(){return[];}),fetch("/api/fm/media-jobs?scope=history").then(function(r){return r.json();}).catch(function(){return[];})])' +
@@ -4917,7 +5160,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    }document.getElementById("transfers-list").innerHTML=h;' +
   '  }).catch(function(){});' +
   '}' +
-
   'function loadDisk(){' +
   '  fetch("/api/fm/list?path=").then(function(r){return r.json();})' +
   '  .then(function(d){' +
@@ -4931,7 +5173,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    }' +
   '  }).catch(function(){});' +
   '}' +
-
   /* ── CLICK DELEGATION ── */
   'document.addEventListener("click",function(e){' +
   '  /* context menu item */\n' +
@@ -5009,6 +5250,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="nav-activity"){loadActivityLog();}' +
   '  else if(action==="nav-settings"){loadCloudSettings();}' +
   '  else if(action==="settings-save-retention"){saveCloudRetention();}' +
+  '  else if(action==="settings-save-tg-limit"){saveCloudTgLimit();}' +
   '  else if(action==="settings-save-profile"){saveCloudProfile();}' +
   '  else if(action==="settings-speedtest"){runSpeedTest();}' +
   '  else if(action==="settings-notif"){requestCloudNotif();}' +
@@ -5034,7 +5276,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="delete")deleteItem(el.dataset.fp,el.dataset.name,el.dataset.dir==="true");' +
   '  else if(action==="upload-btn")document.getElementById("upload-input").click();' +
   '});' +
-
   /* ── CLICK on file row to open folder ── */
   'document.addEventListener("click",function(e){' +
   '  if(e.target.closest("[data-action]")||e.target.closest("[data-ctx]"))return;' +
@@ -5042,7 +5283,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  if(!row)return;' +
   '  if(row.dataset.dir==="true")navigateTo(row.dataset.fp);else openPreview(row.dataset.fp,row.dataset.name,false);' +
   '});' +
-
   /* ── CONTEXT MENU trigger ── */
   'document.addEventListener("contextmenu",function(e){' +
   '  var row=e.target.closest("[data-fp][data-name]");' +
@@ -5051,7 +5291,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  showCtxMenu(e.clientX,e.clientY,row.dataset.fp,row.dataset.name,row.dataset.dir==="true");' +
   '});' +
   'document.addEventListener("scroll",hideCtxMenu,true);' +
-
   /* ── DRAG START ── */
   'document.addEventListener("dragstart",function(e){' +
   '  var row=e.target.closest("[data-fp][data-name]");' +
@@ -5061,7 +5300,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  e.dataTransfer.setData("text/plain",dragFp);' +
   '  setTimeout(function(){if(dragEl)dragEl.classList.add("dragging");},0);' +
   '});' +
-
   /* ── DRAG END ── */
   'document.addEventListener("dragend",function(){' +
   '  if(dragEl)dragEl.classList.remove("dragging");' +
@@ -5069,7 +5307,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  clearDragOver();' +
   '  document.getElementById("drop-zone").classList.remove("active");' +
   '});' +
-
   /* ── DRAG OVER ── */
   'document.addEventListener("dragover",function(e){' +
   '  /* internal move: drag over a folder */\n' +
@@ -5095,7 +5332,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    document.getElementById("drop-zone").classList.add("active");' +
   '  }' +
   '});' +
-
   /* ── DRAG LEAVE ── */
   'document.addEventListener("dragleave",function(e){' +
   '  if(!e.relatedTarget){' +
@@ -5103,7 +5339,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    document.getElementById("drop-zone").classList.remove("active");' +
   '  }' +
   '});' +
-
   /* ── DROP ── */
   'document.addEventListener("drop",function(e){' +
   '  clearDragOver();' +
@@ -5133,7 +5368,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  dragFp=null;' +
   '  moveItemTo(moveFp,moveName,destFp);' +
   '});' +
-
   /* ── KEYBOARD ── */
   'document.addEventListener("keydown",function(e){' +
   '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeUrlModal();closeShareModal();closeShareManager();closeQrModal();closeMediaViewer();closePreview();}' +
@@ -5144,7 +5378,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    else if(document.getElementById("modal-share").style.display!=="none")confirmShare();' +
   '  }' +
   '});' +
-
   /* ── CLIPBOARD PASTE ── */
   'document.addEventListener("paste",function(e){' +
   '  var target=e.target;' +
@@ -5175,12 +5408,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    uploadFiles(files,activePath());' +
   '  }' +
   '});' +
-
   /* ── UPLOAD input ── */
   'document.getElementById("upload-input").addEventListener("change",function(){' +
   '  uploadFiles(this.files,activePath());this.value="";' +
   '});' +
-
   /* ── SEARCH ── */
   'var searchTimer;' +
   'document.getElementById("search-inp").addEventListener("input",function(){' +
@@ -5189,7 +5420,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '});' +
   'document.addEventListener("keydown",function(e){if(e.key==="Enter"&&document.activeElement&&["dash-url-inp","dash-name-inp"].includes(document.activeElement.id)){addDashboardUrlDownload();}});' +
   'window.addEventListener("beforeunload",function(e){if(uploadBusy){e.preventDefault();e.returnValue="";return "";}});' +
-
   '(function(){' +
   '  var resizer=document.getElementById("preview-resizer");' +
   '  var panel=document.getElementById("preview-panel");' +
@@ -5228,7 +5458,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  });' +
   '})();' +
   'applyTheme();' +
-  '(function(){var h=parseHash();if(h){if(h.type==="dashboard")loadDashboard();else if(h.type==="recent")loadRecent();else if(h.type==="activity")loadActivityLog();else if(h.type==="settings")loadCloudSettings();else navigateTo(h.path||"");return;}var saved=localStorage.getItem("fm-path");if(saved===null)loadDashboard();else if(saved==="__dashboard__")loadDashboard();else if(saved==="__recent__")loadRecent();else if(saved==="__activity__")loadActivityLog();else if(saved==="__settings__")loadCloudSettings();else navigateTo(saved||"");})();' +
+  '(function(){var h=parseHash();if(h){if(h.type==="dashboard")loadDashboard();else if(h.type==="recent")loadRecent();else if(h.type==="activity")loadActivityLog();else if(h.type==="settings")loadCloudSettings();else navigateTo(h.path||"");return;}var saved=localStorage.getItem("fm-path");if(saved===null)loadDashboard();else if(saved==="__dashboard__")loadDashboard();else if(saved==="__recent__")loadRecent();else if(saved==="__activity__")loadActivityLog();else if(saved==="__settings__")loadCloudSettings();else navigateTo(saved||"");})();initSidebarPlayer();' +
   'loadDisk();' +
   'loadTransfers();' +
   'checkConnection(true);' +

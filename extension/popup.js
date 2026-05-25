@@ -1,4 +1,4 @@
-// Sipliy Folder VPS — popup script v2.4 (multi-account)
+// Sipliy Folder VPS — popup script v2.9 (multi-account)
 
 const $ = id => document.getElementById(id);
 
