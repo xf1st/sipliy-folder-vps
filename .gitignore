@@ -5,19 +5,32 @@ node_modules/
 info_about_vps.txt
 deploy.config.js
 
-# Сгенерированные артефакты
+# Сгенерированные артефакты / публичные файлы
 sipliyfolder-extension-*.zip
+sipliyfolder-extension-v2.zip
+sipliy-folder-vps-*.zip
 app/public/
 
 # Сессии пользователей (хранятся на сервере)
 sessions/
+mock_opt/
+
+# Бэкапы и старые версии
+app/server.js.bak
+head_server.js
+dashboard_original.txt
+tmp-cloud.html
+filebrowser.html
+
+# Патчи / одноразовые скрипты (уже применены)
+patch_player.js
+patch_plyr.js
+diff.patch
+diff_output.txt
+diff_server_js.txt
+test_output.txt
 
 # Системное
 .DS_Store
 Thumbs.db
 *.log
-
-# Временные тестовые файлы локальной разработки
-test_output.txt
-diff_server_js.txt
-mock_opt/

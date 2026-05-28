@@ -7,8 +7,19 @@ const CURRENT_EXT_VERSION = chrome.runtime.getManifest().version;
 
 function normalizeUrl(u) {
   u = (u || '').trim().replace(/\/+$/, '');
-  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
-  return u;
+  if (!u) return u;
+  const noScheme = u.replace(/^https?:\/\//i, '');
+  // http:// разрешён только для localhost (dev). Всё остальное → https.
+  if (/^http:\/\//i.test(u) && /^(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(noScheme)) return u;
+  return 'https://' + noScheme;
+}
+
+function safeFilename(name) {
+  let n = String(name || '').split(/[\\/]/).pop() || '';
+  n = n.replace(/^[.\s]+/, '');
+  n = n.replace(/[<>:"|?*\x00-\x1f]/g, '_');
+  if (n.length > 200) n = n.slice(0, 200);
+  return n || 'download.bin';
 }
 
 // ─── Инициализация ────────────────────────────────────────
@@ -19,13 +30,13 @@ chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') {
     chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
   }
-  setTimeout(checkForUpdate, 3000);
+  checkForUpdate();
 });
 chrome.runtime.onStartup.addListener(() => {
   setupContextMenus();
   setupAlarms();
   refreshBadge();
-  setTimeout(checkForUpdate, 3000);
+  checkForUpdate();
 });
 
 function setupAlarms() {
@@ -34,9 +45,13 @@ function setupAlarms() {
 }
 
 // ─── Alarm: опрос загрузок + синхронизация файлов ─────────
-chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === POLL_ALARM)   { pollPendingDownloads(); syncVpsFiles(); }
-  if (alarm.name === UPDATE_ALARM) { checkForUpdate(); }
+chrome.alarms.onAlarm.addListener(async alarm => {
+  if (alarm.name === POLL_ALARM) {
+    // Последовательно: сначала pendingGids (через onComplete) — иначе syncVpsFiles увидит готовый файл первым и скачает дубль.
+    await pollPendingDownloads().catch(() => {});
+    await syncVpsFiles().catch(() => {});
+  }
+  if (alarm.name === UPDATE_ALARM) await checkForUpdate().catch(() => {});
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -164,10 +179,7 @@ async function relayUploadToVps(url, opts = {}) {
     opts.headers.forEach(h => { headers[h.name] = h.value; });
   }
 
-  const res = await fetch(url, { 
-    headers,
-    credentials: 'include' 
-  });
+  const res = await fetch(url, { headers });
   if (!res.ok) throw new Error('Browser fetch HTTP ' + res.status);
   const blob = await res.blob();
   let name = opts.filename || '';
@@ -245,6 +257,25 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   if (items && items[0]) await handleCapturedDownloadItem(items[0]);
 });
 
+// ─── Backoff при недоступном VPS ──────────────────────────
+async function getBackoff(accId) {
+  const { vpsBackoff = {} } = await localGet('vpsBackoff');
+  return vpsBackoff[accId] || { failures: 0, skipUntil: 0 };
+}
+async function recordBackoff(accId, ok) {
+  const { vpsBackoff = {} } = await localGet('vpsBackoff');
+  if (ok) {
+    if (!vpsBackoff[accId] || vpsBackoff[accId].failures === 0) return;
+    vpsBackoff[accId] = { failures: 0, skipUntil: 0 };
+  } else {
+    const failures = (vpsBackoff[accId]?.failures || 0) + 1;
+    // 2^N × 15с, потолок 8 минут
+    const skipMs = Math.min(Math.pow(2, Math.min(failures, 5)) * 15000, 480000);
+    vpsBackoff[accId] = { failures, skipUntil: Date.now() + skipMs };
+  }
+  await localSet({ vpsBackoff });
+}
+
 async function syncVpsFiles() {
   const accounts = await getAllAccounts();
   for (const acc of accounts) {
@@ -254,10 +285,15 @@ async function syncVpsFiles() {
 
 async function syncVpsFilesForAccount(acc) {
   if (!acc.url || !acc.token) return;
+  const bo = await getBackoff(acc.id);
+  if (Date.now() < bo.skipUntil) return;
   const cfg = { serverUrl: acc.url, token: acc.token };
 
-  const res = await fetchExt(cfg, '/api/files-ext');
-  if (!res.ok) return;
+  let res;
+  try { res = await fetchExt(cfg, '/api/files-ext'); }
+  catch (_) { await recordBackoff(acc.id, false); return; }
+  if (!res.ok) { await recordBackoff(acc.id, false); return; }
+  await recordBackoff(acc.id, true);
   const files = await res.json().catch(() => []);
   const fileNames = files.map(f => f.name);
 
@@ -272,7 +308,14 @@ async function syncVpsFilesForAccount(acc) {
   }
 
   const knownSet = new Set(lastVpsFileNames);
-  const newFiles = files.filter(f => !knownSet.has(f.name) && f.source !== 'upload');
+  // Дедуп с pendingGids: эти файлы обработает onComplete — не дублируем download.
+  const { pendingGids = {} } = await localGet('pendingGids');
+  const pendingNames = new Set(
+    Object.values(pendingGids)
+      .filter(p => p.accountId === acc.id)
+      .map(p => p.name)
+  );
+  const newFiles = files.filter(f => !knownSet.has(f.name) && f.source !== 'upload' && !pendingNames.has(f.name));
 
   if (newFiles.length > 0) {
     const { readyFiles = [] } = await localGet('readyFiles');
@@ -282,14 +325,14 @@ async function syncVpsFilesForAccount(acc) {
     for (const f of newFiles) {
       const key = f.name + '|' + acc.id;
       if (readyKeys.has(key)) continue; // уже есть
-      const dlUrl = acc.url + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(acc.token);
-      readyFiles.unshift({ name: f.name, size: f.size, dlUrl, readyAt: Date.now(), fromSite: true, accountId: acc.id });
+      readyFiles.unshift({ name: f.name, size: f.size, readyAt: Date.now(), fromSite: true, accountId: acc.id });
       if (readyFiles.length > 50) readyFiles.pop();
 
       let autoDlOk = false;
       if (autoDownload) {
         try {
-          await chrome.downloads.download({ url: dlUrl, filename: f.name, saveAs: false });
+          const dlUrl = await getTicketUrl(cfg, f.name);
+          await chrome.downloads.download({ url: dlUrl, filename: safeFilename(f.name), saveAs: false });
           autoDlOk = true;
         } catch (_) {}
       }
@@ -304,7 +347,7 @@ async function syncVpsFilesForAccount(acc) {
         requireInteraction: !autoDlOk,
       });
       const { notifMap = {} } = await localGet('notifMap');
-      notifMap[notifId] = { dlUrl, name: f.name, serverUrl: acc.url };
+      notifMap[notifId] = { name: f.name, serverUrl: acc.url, accountId: acc.id };
       await localSet({ notifMap });
     }
     await localSet({ readyFiles });
@@ -352,11 +395,14 @@ async function pollPendingDownloads() {
       changed = true;
       continue;
     }
+    const bo = await getBackoff(acc.id);
+    if (Date.now() < bo.skipUntil) continue;
     const cfg = { serverUrl: acc.url, token: acc.token, accountId: acc.id };
 
     try {
       const res = await fetchExt(cfg, '/api/downloads-ext');
-      if (!res.ok) continue;
+      if (!res.ok) { await recordBackoff(acc.id, false); continue; }
+      await recordBackoff(acc.id, true);
       const list = await res.json();
       const byGid  = {};
       const byName = {};
@@ -400,7 +446,7 @@ async function pollPendingDownloads() {
           notify(`✕ Ошибка загрузки: ${trunc(d.name || info.name, 40)}`);
         }
       }
-    } catch (_) {}
+    } catch (_) { await recordBackoff(acc.id, false); }
   }
 
   if (changed) {
@@ -415,12 +461,11 @@ async function pollPendingDownloads() {
 async function onComplete(cfg, name, size, gid, info = {}) {
   const { autoDownload = true } = await localGet('autoDownload');
   const shouldAutoDownload = info.forceAutoDownload || autoDownload;
-  const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(name) + '?t=' + encodeURIComponent(cfg.token);
 
   const { readyFiles = [] } = await localGet('readyFiles');
   const exists = readyFiles.find(f => f.name === name && (!f.accountId || f.accountId === cfg.accountId));
   if (!exists) {
-    readyFiles.unshift({ name, size, dlUrl, readyAt: Date.now(), accountId: cfg.accountId });
+    readyFiles.unshift({ name, size, readyAt: Date.now(), accountId: cfg.accountId });
     if (readyFiles.length > 50) readyFiles.pop();
     await localSet({ readyFiles });
   }
@@ -428,7 +473,8 @@ async function onComplete(cfg, name, size, gid, info = {}) {
   let autoDlOk = false;
   if (shouldAutoDownload) {
     try {
-      await chrome.downloads.download({ url: dlUrl, filename: name, saveAs: false });
+      const dlUrl = await getTicketUrl(cfg, name);
+      await chrome.downloads.download({ url: dlUrl, filename: safeFilename(name), saveAs: false });
       autoDlOk = true;
     } catch (e) { autoDlOk = false; }
   }
@@ -444,7 +490,7 @@ async function onComplete(cfg, name, size, gid, info = {}) {
   });
 
   const { notifMap = {} } = await localGet('notifMap');
-  notifMap[notifId] = { dlUrl, name, serverUrl: cfg.serverUrl };
+  notifMap[notifId] = { name, serverUrl: cfg.serverUrl, accountId: cfg.accountId };
   await localSet({ notifMap });
 }
 
@@ -456,9 +502,14 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   chrome.notifications.clear(notifId);
   if (btnIdx === 0) {
     try {
-      await chrome.downloads.download({ url: info.dlUrl, filename: info.name, saveAs: false });
+      const accounts = await getAllAccounts();
+      const acc = accounts.find(a => a.id === info.accountId) || accounts[0];
+      if (!acc) throw new Error('No account');
+      const cfg = { serverUrl: acc.url, token: acc.token };
+      const dlUrl = await getTicketUrl(cfg, info.name);
+      await chrome.downloads.download({ url: dlUrl, filename: safeFilename(info.name), saveAs: false });
     } catch (e) {
-      chrome.tabs.create({ url: info.dlUrl });
+      if (info.serverUrl) chrome.tabs.create({ url: info.serverUrl });
     }
   } else {
     chrome.tabs.create({ url: info.serverUrl });
@@ -472,7 +523,16 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
 
 chrome.notifications.onClicked.addListener(async (notifId) => {
   if (!notifId.startsWith('ready-') && !notifId.startsWith('site-')) return;
-  chrome.action.openPopup?.().catch(() => {});
+  // Chrome ≥127: открыть попап. На Edge/старых Chrome — открыть сайт как fallback.
+  try {
+    if (typeof chrome.action.openPopup === 'function') {
+      await chrome.action.openPopup();
+      return;
+    }
+  } catch (_) {}
+  const { notifMap = {} } = await localGet('notifMap');
+  const info = notifMap[notifId];
+  if (info && info.serverUrl) chrome.tabs.create({ url: info.serverUrl });
 });
 
 // ─── Контекстные меню ─────────────────────────────────────
@@ -531,14 +591,13 @@ async function sendDownload(url, opts = {}) {
     pendingGids[data.gid] = { gid: data.gid, name: origName, origName, status: 'active', addedAt: Date.now(), progress: 0, accountId: cfg.accountId, forceAutoDownload: !!opts.forceAutoDownload };
     await localSet({ pendingGids });
     setupAlarms();
-    setTimeout(pollPendingDownloads, 1000);
 
     const { autoDownload = true } = await localGet('autoDownload');
     notify(autoDownload
       ? `↑ Скачивается на VPS...\nКогда готово — начнётся загрузка на ПК`
       : `↑ Добавлено на VPS\nОткройте расширение для скачивания на ПК`
     );
-    setTimeout(refreshBadge, 3000);
+    refreshBadge();
     return { gid: data.gid, name: origName };
   } catch (e) {
     flashBadge('!', '#dc2626');
@@ -552,6 +611,18 @@ function localGet(keys) { return new Promise(r => chrome.storage.local.get(keys,
 function localSet(obj)  { return new Promise(r => chrome.storage.local.set(obj, r)); }
 function fetchExt(cfg, path, opts = {}) {
   return fetch(cfg.serverUrl + path, { ...opts, headers: { 'Authorization': 'Bearer ' + cfg.token, ...(opts.headers || {}) } });
+}
+// Одноразовый ticket-URL для chrome.downloads (вместо постоянного ?t=bearer в query).
+async function getTicketUrl(cfg, fileName) {
+  const res = await fetchExt(cfg, '/api/ext-ticket', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'file=' + encodeURIComponent(fileName),
+  });
+  if (!res.ok) throw new Error('ticket HTTP ' + res.status);
+  const d = await res.json().catch(() => ({}));
+  if (!d.url) throw new Error('ticket missing url');
+  return cfg.serverUrl + d.url;
 }
 function notify(message) {
   chrome.notifications.create({ type: 'basic', iconUrl: chrome.runtime.getURL(ICON), title: 'Sipliy Folder VPS', message: String(message), priority: 1 });
