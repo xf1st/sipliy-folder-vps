@@ -1116,7 +1116,7 @@ app.get('/api/ext/theme', extCors, authToken, (req, res) => {
   res.json({ accentHex: accentHex || '#a078ff' });
 });
 // Версия расширения (без авторизации — для OTA проверки)
-const EXT_VERSION = '2.11.0';
+const EXT_VERSION = '2.12.0';
 app.get('/api/ext/version', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').json({
     version: EXT_VERSION,
