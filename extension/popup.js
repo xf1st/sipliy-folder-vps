@@ -183,7 +183,7 @@ async function initSettings() {
   if (acc && siteUrl && acc.token) {
     fetch(siteUrl + '/api/ext/theme', { headers: { 'Authorization': 'Bearer ' + acc.token } })
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d && d.accentHex && typeof applyExtAccent === 'function') applyExtAccent(d.accentHex); })
+      .then(d => { if (d && d.accentHex && typeof applyExtAccent === 'function') { applyExtAccent(d.accentHex); updateThemeDot(d.accentHex); } })
       .catch(() => {});
   }
   return { accounts, activeAccountId, siteUrl };
@@ -485,6 +485,35 @@ if (extCookiesInp) extCookiesInp.addEventListener('change', e => {
 });
 const extCookiesDel = $('ext-cookies-del');
 if (extCookiesDel) extCookiesDel.addEventListener('click', deleteExtCookies);
+
+// ─── Theme sync button ────────────────────────────────────
+function updateThemeDot(hex) {
+  const dot = $('theme-dot');
+  if (dot && hex) dot.style.background = hex;
+}
+
+const syncThemeBtn = $('sync-theme-btn');
+if (syncThemeBtn) syncThemeBtn.addEventListener('click', async () => {
+  const cfg = await getConfig();
+  if (!cfg.serverUrl || !cfg.token) return;
+  syncThemeBtn.textContent = '...';
+  syncThemeBtn.disabled = true;
+  try {
+    const r = await fetch(cfg.serverUrl + '/api/ext/theme', {
+      headers: { 'Authorization': 'Bearer ' + cfg.token }
+    });
+    const d = await r.json();
+    if (d.accentHex && typeof applyExtAccent === 'function') {
+      applyExtAccent(d.accentHex);
+      updateThemeDot(d.accentHex);
+      syncThemeBtn.textContent = '✓';
+      setTimeout(() => { syncThemeBtn.textContent = '↻ Синк'; syncThemeBtn.disabled = false; }, 1200);
+    }
+  } catch {
+    syncThemeBtn.textContent = '↻ Синк';
+    syncThemeBtn.disabled = false;
+  }
+});
 
 // ─── Initialization ───────────────────────────────────────
 (async () => {
