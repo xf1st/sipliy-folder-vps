@@ -8,8 +8,17 @@ function escHtml(s) {
 }
 function normalizeUrl(u) {
   u = (u || '').trim().replace(/\/+$/, '');
-  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
-  return u;
+  if (!u) return u;
+  const noScheme = u.replace(/^https?:\/\//i, '');
+  if (/^http:\/\//i.test(u) && /^(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(noScheme)) return u;
+  return 'https://' + noScheme;
+}
+function safeFilename(name) {
+  let n = String(name || '').split(/[\\/]/).pop() || '';
+  n = n.replace(/^[.\s]+/, '');
+  n = n.replace(/[<>:"|?*\x00-\x1f]/g, '_');
+  if (n.length > 200) n = n.slice(0, 200);
+  return n || 'download.bin';
 }
 function fmt(b) {
   if (!b || b < 0) return '—';
@@ -467,7 +476,7 @@ async function renderDownloads() {
           <div class="ready-meta">${fmt(f.size)} · готово ${fmtDate(f.readyAt)}</div>
         </div>
         <button class="btn-sm btn-share" style="flex-shrink:0;margin-right:4px" data-share-file="${escHtml(f.name)}" data-share-path="${escHtml(filePath)}" title="Публичная ссылка / QR">🔗</button>
-        <button class="btn-pc" data-url="${escHtml(encodeURIComponent(f.dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}" data-account-id="${escHtml(f.accountId || activeAcc?.id || '')}">⬇ На ПК</button>
+        <button class="btn-pc" data-name="${escHtml(encodeURIComponent(f.name))}" data-account-id="${escHtml(f.accountId || activeAcc?.id || '')}">⬇ На ПК</button>
       </div>`;
     }).join('');
   } else {
@@ -524,7 +533,6 @@ async function renderDownloads() {
 
   const renderSingleList = (files) => {
     return files.map(f => {
-      const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(cfg.token);
       const filePath = f.path || ('/' + f.name);
       return `<div class="file-item">
         <div class="file-ico">${fileEmoji(f.name)}</div>
@@ -533,7 +541,7 @@ async function renderDownloads() {
           <div class="file-meta">${fmt(f.size)} · ${fmtDate(new Date(f.mtime).getTime())}</div>
         </div>
         <button class="btn-sm btn-share" data-share-file="${escHtml(f.name)}" data-share-path="${escHtml(filePath)}" title="Публичная ссылка / QR">🔗</button>
-        <button class="btn-sm btn-dl" data-url="${escHtml(encodeURIComponent(dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}">⬇</button>
+        <button class="btn-sm btn-dl" data-name="${escHtml(encodeURIComponent(f.name))}">⬇</button>
       </div>`;
     }).join('');
   };
@@ -709,27 +717,43 @@ async function cancelCaptureNextDownload() {
   refreshCaptureStatus();
 }
 
+// ─── Ticket helper (одноразовый URL для chrome.downloads) ─
+async function fetchTicketUrl(cfg, fileName) {
+  const res = await fetch(cfg.serverUrl + '/api/ext-ticket', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + cfg.token, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'file=' + encodeURIComponent(fileName),
+  });
+  if (!res.ok) throw new Error('ticket HTTP ' + res.status);
+  const d = await res.json();
+  if (!d.url) throw new Error('ticket missing url');
+  return cfg.serverUrl + d.url;
+}
+
 // ─── Download button handler (event delegation, CSP-safe) ─
 document.addEventListener('click', async e => {
-  const btn = e.target.closest('button[data-url][data-name]');
+  const btn = e.target.closest('button.btn-dl[data-name], button.btn-pc[data-name]');
   if (!btn) return;
-  const url  = decodeURIComponent(btn.dataset.url);
   const name = decodeURIComponent(btn.dataset.name);
   const accountId = btn.dataset.accountId || '';
   const orig = btn.textContent;
   btn.disabled = true; btn.textContent = '…';
+  let openedUrl = '';
   try {
-    await chrome.downloads.download({ url, filename: name, saveAs: false });
+    const cfg = await getConfig();
+    if (!cfg.serverUrl || !cfg.token) throw new Error('Аккаунт не настроен');
+    const url = await fetchTicketUrl(cfg, name);
+    openedUrl = url;
+    await chrome.downloads.download({ url, filename: safeFilename(name), saveAs: false });
     btn.textContent = '✓ Начато';
-    // Remove from readyFiles
     const { readyFiles = [] } = await new Promise(r => chrome.storage.local.get('readyFiles', r));
     await new Promise(r => chrome.storage.local.set({ readyFiles: readyFiles.filter(f => !(f.name === name && (!accountId || !f.accountId || f.accountId === accountId))) }, r));
     const card = document.getElementById('ri-' + encodeURIComponent(name));
     if (card) card.remove();
     if ($('ready-list') && !$('ready-list').children.length) $('ready-section').style.display = 'none';
   } catch (e) {
-    chrome.tabs.create({ url });
-    btn.textContent = '↗ Открыто';
+    if (openedUrl) chrome.tabs.create({ url: openedUrl });
+    btn.textContent = '✕ Ошибка';
   }
   setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
 });
@@ -866,6 +890,10 @@ document.addEventListener('click', e => {
 
 // ─── OTA version check ────────────────────────────────────
 const CURRENT_VERSION = chrome.runtime.getManifest().version;
+{
+  const vEl = $('ext-version');
+  if (vEl) vEl.textContent = CURRENT_VERSION;
+}
 
 function versionNewer(a, b) {
   const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
