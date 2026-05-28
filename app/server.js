@@ -108,7 +108,7 @@ function getUserMaxTgSize(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.10.0';
+const SITE_VERSION = '2.12.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -1066,8 +1066,45 @@ app.post('/api/ext/share', extCors, authToken, (req, res) => {
   const fullUrl = req.protocol + '://' + req.get('host') + '/share/' + token;
   res.set(EXT_CORS).json({ ok: true, token, url: '/share/' + token, fullUrl });
 });
+// Медиа-загрузка из расширения через yt-dlp (Bearer-auth)
+app.options('/api/ext/media',  (req, res) => res.set(EXT_CORS).sendStatus(204));
+app.post('/api/ext/media', extCors, authToken, (req, res) => {
+  const dlUrl = (req.body.url || '').trim();
+  const mode = ['video', 'audio', 'best'].includes(req.body.mode) ? req.body.mode : 'video';
+  const filename = (req.body.filename || '').trim();
+  if (!dlUrl) return res.status(400).json({ error: 'URL empty' });
+  if (!isUriSafe(dlUrl)) return res.status(400).json({ error: 'URL заблокирован (приватный/локальный адрес или неподдерживаемая схема)' });
+  const dir = userDir(req.tokenUser);
+  ytDlpAvailable((available) => {
+    if (!available) return res.status(500).json({ error: 'yt-dlp не установлен на сервере' });
+    try {
+      const job = startMediaJob({ username: req.tokenUser, url: dlUrl, dir, relPath: '', mode, filename });
+      res.json({ ok: true, job: mediaJobPublic(job) });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+});
+// Файловый браузер для расширения (Bearer-auth)
+app.options('/api/ext/browse', (req, res) => res.set(EXT_CORS).sendStatus(204));
+app.get('/api/ext/browse', extCors, authToken, (req, res) => {
+  const relPath = (req.query.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const full = fmResolve(req.tokenUser, relPath);
+  if (!full) return res.set(EXT_CORS).status(403).json({ error: 'Invalid path' });
+  try {
+    const entries = fs.readdirSync(full).map(name => {
+      try {
+        const s = fs.statSync(path.join(full, name));
+        return { name, isDir: s.isDirectory(), size: s.isDirectory() ? 0 : s.size, mtime: s.mtime };
+      } catch { return null; }
+    }).filter(Boolean)
+      .filter(e => !e.name.startsWith('.'))
+      .sort((a, b) => (b.isDir ? 1 : 0) - (a.isDir ? 1 : 0) || a.name.localeCompare(b.name));
+    res.set(EXT_CORS).json({ ok: true, path: relPath, entries });
+  } catch (e) { res.set(EXT_CORS).status(500).json({ error: e.message }); }
+});
 // Версия расширения (без авторизации — для OTA проверки)
-const EXT_VERSION = '2.10.0';
+const EXT_VERSION = '2.11.0';
 app.get('/api/ext/version', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').json({
     version: EXT_VERSION,
@@ -3719,6 +3756,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.file-grid-item.selected{background:color-mix(in srgb,var(--accent-color) 14%,var(--surf-cont));box-shadow:0 0 0 2px var(--accent-color),0 12px 32px rgba(0,0,0,.32)}' +
   '.file-grid-item.drag-over{background:var(--accent-bg)!important;box-shadow:0 0 0 2px var(--accent-color)!important}' +
   '.file-grid-item.dragging{opacity:.35}' +
+  '#drag-ghost-el{position:fixed;top:-600px;left:-600px;pointer-events:none;z-index:9999;overflow:visible}' +
   '.file-thumb{width:56px;height:56px;border-radius:18px;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--accent-color) 20%,var(--surf-hi));color:var(--accent-light);font-size:30px;overflow:hidden;flex:0 0 auto}' +
   '.file-thumb .material-symbols-outlined{font-size:28px;color:var(--accent-light)}' +
   '.file-thumb img{width:100%;height:100%;object-fit:cover}' +
@@ -4481,7 +4519,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'window.addEventListener("hashchange",handleHash);' +
   'var renameFp="",renameIsDir=false,renameExt="";' +
   'var ctxFp="",ctxName="",ctxIsDir=false;' +
-  'var dragFp=null,dragName=null,dragIsDir=false,dragEl=null;' +
+  'var dragFp=null,dragName=null,dragIsDir=false,dragEl=null,dragItems=null,dragGhostEl=null;' +
   'var selectedItems={},lastEntries=[],lastBase="";' +
   'var previewFp="",previewName="",previewKind="",previewSrc="",mvZoom=1;' +
   'var activeAudioFp="",activeAudioName="",currentAudioQueue=[],sidebarPlayerInitialized=false;' +
@@ -4577,6 +4615,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
   'function setSectionChrome(kind){var a=document.querySelector(".mobile-actions");if(a)a.style.display=kind==="files"?"flex":"none";updateSmartToolbar(kind);if(kind!=="files"){try{clearTimeout(searchTimer);var s=document.getElementById("search-inp");if(s)s.value="";}catch(e){}}}' +
   'function moveItemTo(from,name,dest){dest=dest||"";if(!from||dest===from||dest.indexOf(from+"/")===0)return;var to=dest?(dest+"/"+name):name;if(to===from)return;fetch("/api/fm/move",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({from:from,to:to})}).then(function(r){return r.json();}).then(function(d){if(d.ok)navigateTo(activePath());else alert(d.error||"Ошибка перемещения");});}' +
+  'function moveMultiTo(items,dest){dest=dest||"";var valid=items.filter(function(item){if(!item.fp||item.fp===dest)return false;if(dest&&dest.indexOf(item.fp+"/")===0)return false;return true;});if(!valid.length)return;var promises=valid.map(function(item){var to=dest?(dest+"/"+item.name):item.name;if(to===item.fp)return Promise.resolve({ok:true});return fetch("/api/fm/move",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({from:item.fp,to:to})}).then(function(r){return r.json();});});Promise.all(promises).then(function(results){var errs=results.filter(function(d){return!d.ok;});clearSelection();navigateTo(activePath());if(errs.length)alert(errs.length+" файл(ов) не удалось переместить");});}' +
+  'function fileEmojiDrag(name,isDir){if(isDir)return"📁";var e=(name||"").split(".").pop().toLowerCase();return{mp4:"🎬",mkv:"🎬",avi:"🎬",mov:"🎬",webm:"🎬",mp3:"🎵",flac:"🎵",wav:"🎵",zip:"📦",rar:"📦","7z":"📦",tar:"📦",gz:"📦",exe:"💿",msi:"💿",iso:"💿",pdf:"📄",jpg:"🖼",jpeg:"🖼",png:"🖼",gif:"🖼",webp:"🖼"}[e]||"📄";}' +
+  'function createDragGhost(e,items){removeDragGhost();var count=items.length;var first=items[0];var cs=getComputedStyle(document.documentElement);var surfCont=cs.getPropertyValue("--surf-cont").trim()||"#1b1b1f";var onSurf=cs.getPropertyValue("--on-surf").trim()||"#e4e1e7";var accentRaw=cs.getPropertyValue("--accent-color").trim()||"120 80 255";var accent="rgb("+accentRaw+")";var numBg=Math.min(count-1,2);var w=180,cardH=48;var ghost=document.createElement("div");ghost.style.cssText="position:fixed;top:-600px;left:-600px;pointer-events:none;z-index:9999;width:"+(w+numBg*8)+"px;height:"+(cardH+numBg*8)+"px;overflow:visible";for(var i=numBg;i>0;i--){var bg=document.createElement("div");var off=(numBg-i+1)*6;var rot=(numBg-i+1)*2.5;bg.style.cssText="position:absolute;left:"+off+"px;top:"+off+"px;width:"+w+"px;height:"+cardH+"px;background:"+surfCont+";border-radius:13px;transform:rotate("+rot+"deg);box-shadow:0 4px 16px rgba(0,0,0,.45);border:1.5px solid rgba(255,255,255,.07);opacity:.62";ghost.appendChild(bg);}var front=document.createElement("div");front.style.cssText="position:absolute;left:0;top:0;width:"+w+"px;height:"+cardH+"px;background:"+surfCont+";border-radius:13px;display:flex;align-items:center;gap:8px;padding:0 12px;box-shadow:0 8px 30px rgba(0,0,0,.55);border:1.5px solid rgba(255,255,255,.13);overflow:hidden";var ico=document.createElement("span");ico.style.cssText="font-size:20px;flex-shrink:0;line-height:1";ico.textContent=fileEmojiDrag(first.name,first.isDir);var nm=document.createElement("span");nm.style.cssText="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:12px;font-weight:700;color:"+onSurf+";font-family:Manrope,system-ui,sans-serif";nm.textContent=first.name.length>22?first.name.slice(0,20)+"…":first.name;front.appendChild(ico);front.appendChild(nm);if(count>1){var badge=document.createElement("div");badge.style.cssText="position:absolute;top:-8px;right:-8px;background:"+accent+";color:#fff;border-radius:9999px;font-size:11px;font-weight:800;min-width:20px;height:20px;display:flex;align-items:center;justify-content:center;padding:0 4px;box-shadow:0 2px 8px rgba(0,0,0,.5);font-family:Manrope,system-ui,sans-serif";badge.textContent=count;front.appendChild(badge);}ghost.appendChild(front);document.body.appendChild(ghost);dragGhostEl=ghost;e.dataTransfer.setDragImage(ghost,24,cardH/2);}' +
+  'function removeDragGhost(){if(dragGhostEl){try{document.body.removeChild(dragGhostEl);}catch(ex){}dragGhostEl=null;}}' +
   'function showToast(title,body,url){title=title||"";body=body||"";toastUrl=url||"";if(!title&&!body&&!url)return hideToast();document.getElementById("toast-title").textContent=title;document.getElementById("toast-body").textContent=body||url||"";var actions=document.getElementById("toast-share-actions");if(actions){actions.style.display=url?"flex":"none";}document.getElementById("toast").style.display="flex";if(url&&navigator.clipboard)navigator.clipboard.writeText(url).catch(function(){});}' +
   'function hideToast(){document.getElementById("toast").style.display="none";}' +
   'function copyToast(){if(toastUrl&&navigator.clipboard)navigator.clipboard.writeText(toastUrl).then(function(){showToast("Скопировано",toastUrl,toastUrl);});}' +
@@ -5897,13 +5939,21 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  dragFp=row.dataset.fp;dragName=row.dataset.name;dragIsDir=row.dataset.dir==="true";dragEl=row;' +
   '  e.dataTransfer.effectAllowed="move";' +
   '  e.dataTransfer.setData("text/plain",dragFp);' +
-  '  setTimeout(function(){if(dragEl)dragEl.classList.add("dragging");},0);' +
+  '  var sel=selectedList();' +
+  '  var isMulti=sel.length>1&&!!selectedItems[dragFp];' +
+  '  dragItems=isMulti?sel:null;' +
+  '  if(isMulti){' +
+  '    createDragGhost(e,sel);' +
+  '    document.querySelectorAll("[data-fp]").forEach(function(el){if(selectedItems[el.dataset.fp])el.classList.add("dragging");});' +
+  '  }else{' +
+  '    setTimeout(function(){if(dragEl)dragEl.classList.add("dragging");},0);' +
+  '  }' +
   '});' +
   /* ── DRAG END ── */
   'document.addEventListener("dragend",function(){' +
-  '  if(dragEl)dragEl.classList.remove("dragging");' +
-  '  dragEl=null;dragFp=null;' +
-  '  clearDragOver();' +
+  '  document.querySelectorAll(".dragging").forEach(function(el){el.classList.remove("dragging");});' +
+  '  dragEl=null;dragFp=null;dragItems=null;' +
+  '  removeDragGhost();clearDragOver();' +
   '  document.getElementById("drop-zone").classList.remove("active");' +
   '});' +
   /* ── DRAG OVER ── */
@@ -5950,22 +6000,26 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  }' +
   '  /* internal move */\n' +
   '  if(!dragFp)return;' +
+  '  var destFp=null;' +
   '  var dropTarget=e.target.closest("[data-drop-path]");' +
   '  if(dropTarget){' +
   '    e.preventDefault();' +
-  '    var destDrop=dropTarget.dataset.dropPath||"";' +
-  '    var fromDrop=dragFp,nameDrop=dragName;' +
-  '    dragFp=null;' +
-  '    moveItemTo(fromDrop,nameDrop,destDrop);' +
-  '    return;' +
+  '    destFp=dropTarget.dataset.dropPath||"";' +
+  '  }else{' +
+  '    var target=e.target.closest("[data-dir=\'true\'][data-fp]");' +
+  '    if(!target||target.dataset.fp===dragFp){dragFp=null;dragItems=null;return;}' +
+  '    e.preventDefault();' +
+  '    destFp=target.dataset.fp;' +
   '  }' +
-  '  var target=e.target.closest("[data-dir=\'true\'][data-fp]");' +
-  '  if(!target||target.dataset.fp===dragFp){dragFp=null;return;}' +
-  '  e.preventDefault();' +
-  '  var destFp=target.dataset.fp;' +
-  '  var moveFp=dragFp,moveName=dragName;' +
-  '  dragFp=null;' +
-  '  moveItemTo(moveFp,moveName,destFp);' +
+  '  if(dragItems&&dragItems.length>1){' +
+  '    var multiItems=dragItems;' +
+  '    dragFp=null;dragItems=null;' +
+  '    moveMultiTo(multiItems,destFp);' +
+  '  }else{' +
+  '    var moveFp=dragFp,moveName=dragName;' +
+  '    dragFp=null;dragItems=null;' +
+  '    moveItemTo(moveFp,moveName,destFp);' +
+  '  }' +
   '});' +
   /* ── KEYBOARD ── */
   'document.addEventListener("keydown",function(e){' +

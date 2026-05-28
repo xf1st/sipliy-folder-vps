@@ -1,4 +1,4 @@
-// Sipliy Folder VPS — background service worker v2.4 (QR + OTA)
+// Sipliy Folder VPS — background service worker v2.5 (media DL + browse)
 
 const ICON = 'icons/icon-128.png';
 const POLL_ALARM = 'poll-vps';
@@ -58,6 +58,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
   if (msg.type === 'add-url-download') {
     sendDownload(msg.url, { filename: msg.filename || '', forceAutoDownload: true })
+      .then(data => sendResponse({ ok: true, ...(data || {}) }))
+      .catch(e => sendResponse({ ok: false, error: e.message || 'Ошибка' }));
+    return true;
+  }
+  if (msg.type === 'add-media-download') {
+    sendMediaDownload(msg.url, msg.mode || 'video', msg.filename || '')
       .then(data => sendResponse({ ok: true, ...(data || {}) }))
       .catch(e => sendResponse({ ok: false, error: e.message || 'Ошибка' }));
     return true;
@@ -602,6 +608,40 @@ async function sendDownload(url, opts = {}) {
   } catch (e) {
     flashBadge('!', '#dc2626');
     notify('✕ ' + (e.name === 'AbortError' ? 'Сервер не отвечает (10с)' : e.message));
+    throw e;
+  }
+}
+
+// ─── Медиа-загрузка на VPS через yt-dlp ──────────────────
+async function sendMediaDownload(url, mode, filename = '') {
+  const cfg = await getConfig();
+  if (!cfg.serverUrl || !cfg.token) { notify('Настройте расширение — кликните на иконку'); return; }
+  flashBadge('↑', '#a083d1');
+  try {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 12000);
+    const body = new URLSearchParams({ url, mode: mode || 'video' });
+    if (filename) body.set('filename', filename);
+    const res = await fetchExt(cfg, '/api/ext/media', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+      signal: ctrl.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      flashBadge('!', '#dc2626');
+      const msg = data.error || 'HTTP ' + res.status;
+      notify('✕ Медиа: ' + msg);
+      throw new Error(msg);
+    }
+    const modeLabels = { video: 'Видео', audio: 'MP3', best: 'Лучшее качество' };
+    notify(`↑ ${modeLabels[mode] || 'Медиа'}-загрузка запущена...\nКогда готово — файл появится на VPS`);
+    setupAlarms();
+    refreshBadge();
+    return data;
+  } catch (e) {
+    if (e.name !== 'AbortError') flashBadge('!', '#dc2626');
     throw e;
   }
 }
