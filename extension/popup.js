@@ -419,10 +419,80 @@ $('test-dl-btn').addEventListener('click', async () => {
   setTimeout(() => { btn.disabled = false; }, 1500);
 });
 
+// ─── YouTube Cookies (extension) ─────────────────────────
+async function loadExtCookiesStatus(cfg) {
+  const sec = $('cookies-section');
+  if (!sec || !cfg || !cfg.serverUrl || !cfg.token) return;
+  sec.style.display = 'block';
+  try {
+    const r = await fetch(cfg.serverUrl + '/api/ext/cookies', {
+      headers: { 'Authorization': 'Bearer ' + cfg.token }
+    });
+    if (!r.ok) { sec.style.display = 'none'; return; } // not admin
+    const d = await r.json();
+    const badge = $('ext-cookies-badge');
+    if (badge) {
+      badge.textContent = d.exists ? ('✅ загружены ' + new Date(d.mtime).toLocaleDateString('ru-RU')) : 'не загружены';
+      badge.style.background = d.exists ? 'rgba(74,222,128,.15)' : 'rgba(255,255,255,.06)';
+      badge.style.color = d.exists ? '#4ade80' : '';
+    }
+  } catch {}
+}
+
+async function uploadExtCookies(file) {
+  const cfg = await getConfig();
+  if (!cfg.serverUrl || !cfg.token) return;
+  const status = $('ext-cookies-status');
+  if (status) status.textContent = 'Загружаю...';
+  try {
+    const fd = new FormData();
+    fd.append('cookies', file);
+    const r = await fetch(cfg.serverUrl + '/api/ext/cookies', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + cfg.token },
+      body: fd
+    });
+    const d = await r.json();
+    if (status) { status.textContent = d.ok ? '✅ Готово! Cookies загружены на сервер' : (d.error || 'Ошибка'); status.style.color = d.ok ? '#4ade80' : '#ffb4ab'; }
+    if (d.ok) loadExtCookiesStatus(cfg);
+  } catch (e) {
+    if (status) { status.textContent = 'Ошибка: ' + e.message; status.style.color = '#ffb4ab'; }
+  }
+}
+
+async function deleteExtCookies() {
+  if (!confirm('Удалить cookies.txt с сервера?')) return;
+  const cfg = await getConfig();
+  if (!cfg.serverUrl || !cfg.token) return;
+  const status = $('ext-cookies-status');
+  try {
+    const r = await fetch(cfg.serverUrl + '/api/settings/cookies', {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + cfg.token }
+    });
+    const d = await r.json();
+    if (status) { status.textContent = d.ok ? 'Удалено' : (d.error || 'Ошибка'); status.style.color = d.ok ? '#4ade80' : '#ffb4ab'; }
+    if (d.ok) loadExtCookiesStatus(cfg);
+  } catch (e) {
+    if (status) { status.textContent = 'Ошибка'; status.style.color = '#ffb4ab'; }
+  }
+}
+
+const extCookiesInp = $('ext-cookies-inp');
+if (extCookiesInp) extCookiesInp.addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (f) uploadExtCookies(f);
+});
+const extCookiesDel = $('ext-cookies-del');
+if (extCookiesDel) extCookiesDel.addEventListener('click', deleteExtCookies);
+
 // ─── Initialization ───────────────────────────────────────
 (async () => {
   const { accounts } = await initSettings();
   if (accounts.length > 0) switchTab('downloads');
+  // Load cookies status for admin
+  const cfg = await getConfig();
+  if (cfg.token) loadExtCookiesStatus(cfg);
 })();
 
 // ─── Downloads tab ────────────────────────────────────────

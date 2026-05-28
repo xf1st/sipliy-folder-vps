@@ -615,6 +615,24 @@ function applyExtAccent(hex){
     </div>
   </div>
 
+  <!-- ── YouTube Cookies ─────────────────────────── -->
+  <div id="cookies-section" style="display:none; margin:0 16px 14px; padding:13px 14px; background:var(--surf-cont); border-radius:14px; border:1px solid var(--line);">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+      <span style="font-size:16px;">🍪</span>
+      <span style="font-size:.8rem;font-weight:800;color:var(--txt);">YouTube Cookies</span>
+      <span id="cookies-ext-badge" style="margin-left:auto;font-size:.65rem;font-weight:800;padding:2px 7px;border-radius:99px;background:rgba(255,255,255,.06);color:var(--muted);">не загружены</span>
+    </div>
+    <p style="font-size:.7rem;color:var(--muted);margin-bottom:10px;line-height:1.5;">Нужны для возрастных/приватных видео. Установите <a href="https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" style="color:var(--p);text-decoration:none;">Get cookies.txt LOCALLY</a>, откройте YouTube → экспортируйте → загрузите файл сюда.</p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <label style="cursor:pointer;display:inline-flex;align-items:center;gap:5px;font-size:.72rem;font-weight:700;padding:6px 12px;background:var(--p);color:#fff;border-radius:8px;">
+        📁 Загрузить
+        <input type="file" id="ext-cookies-inp" accept=".txt" style="display:none"/>
+      </label>
+      <button id="ext-cookies-del" style="font-size:.72rem;font-weight:700;padding:6px 12px;background:transparent;border:1px solid #93000a;color:#ffb4ab;border-radius:8px;cursor:pointer;">Удалить</button>
+    </div>
+    <div id="ext-cookies-status" style="font-size:.7rem;margin-top:8px;min-height:14px;color:var(--muted);"></div>
+  </div>
+
 </div>
 
 <!-- ── Загрузки ───────────────────────────────────────────── -->
