@@ -477,6 +477,35 @@
     transition: all 0.2s var(--m3-std); }
   .btn-update-check:hover { border-color: var(--p2); color: var(--p2); background: var(--surf-hi); }
   .btn-update-check.has-update { border-color: var(--warn); color: var(--warn); font-weight: 800; }
+
+  /* ── URL mode cards ── */
+  .url-mode-card {
+    border-radius: 10px; padding: 8px 6px; cursor: pointer; text-align: center;
+    transition: background .18s var(--m3-std), border-color .18s var(--m3-std), box-shadow .18s var(--m3-std);
+    background: var(--surf-hi); border: 1.5px solid transparent; user-select: none;
+  }
+  .url-mode-card:hover { background: rgba(255,255,255,0.07); }
+  .url-mode-card.selected {
+    background: rgba(160,120,255,0.12); border-color: var(--p);
+    box-shadow: 0 0 0 1px rgba(160,120,255,0.2);
+  }
+
+  /* ── File browser ── */
+  .fb-entry { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:10px;
+    background:var(--surf-cont); border:1px solid var(--line); margin-bottom:6px;
+    transition:all .15s var(--m3-std); }
+  .fb-entry:hover { border-color:rgba(255,255,255,.15); background:var(--surf-hi); }
+  .fb-entry:last-child { margin-bottom:0; }
+  .fb-entry.is-dir { cursor:pointer; }
+  .fb-ico { font-size:1.2rem; flex-shrink:0; }
+  .fb-info { flex:1; min-width:0; }
+  .fb-name { font-size:0.76rem; font-weight:700; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .fb-meta { font-size:0.64rem; color:var(--muted); margin-top:1px; }
+  .fb-crumb { font-size:0.72rem; color:var(--muted); cursor:pointer; padding:2px 6px; border-radius:6px;
+    transition:all .15s; border:none; background:none; font-family:inherit; }
+  .fb-crumb:hover { color:var(--p2); background:var(--surf-hi); }
+  .fb-crumb.active { color:var(--txt); cursor:default; }
+  .fb-sep { color:var(--muted); font-size:0.64rem; line-height:1; padding:0 1px; }
 </style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
@@ -495,6 +524,7 @@
 <div class="tabs">
   <button class="tab-btn active" data-tab="settings">⚙ Настройки</button>
   <button class="tab-btn" data-tab="downloads">📥 Загрузки <span class="count" id="dl-count"></span></button>
+  <button class="tab-btn" data-tab="files">📁 Файлы</button>
 </div>
 
 <!-- ── Настройки ──────────────────────────────────────────── -->
@@ -538,7 +568,7 @@
     </div>
 
     <div class="footer">
-      <span>v2.9.0 <span id="update-badge" class="update-badge" style="display:none">Обновление!</span></span>
+      <span>v<span id="ext-version">2.9.0</span> <span id="update-badge" class="update-badge" style="display:none">Обновление!</span></span>
       <button class="btn-update-check" id="check-update-btn" title="Проверить обновление">🔄</button>
       <a href="#" id="open-help">Инструкция</a>
     </div>
@@ -577,9 +607,37 @@
 
   <div class="url-box">
     <div class="url-box-title">🔗 URL → VPS</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">
+      <div class="url-mode-card selected" id="url-card-file" data-url-mode="file">
+        <div style="font-size:1.1rem;margin-bottom:2px">📄</div>
+        <div style="font-size:0.72rem;font-weight:700;color:#fff">Файл</div>
+        <div style="font-size:0.62rem;color:var(--muted)">Прямая ссылка</div>
+      </div>
+      <div class="url-mode-card" id="url-card-video" data-url-mode="video">
+        <div style="font-size:1.1rem;margin-bottom:2px">🎬</div>
+        <div style="font-size:0.72rem;font-weight:700;color:#fff">Видео</div>
+        <div style="font-size:0.62rem;color:var(--muted)">YouTube, VK...</div>
+      </div>
+      <div class="url-mode-card" id="url-card-audio" data-url-mode="audio">
+        <div style="font-size:1.1rem;margin-bottom:2px">🎵</div>
+        <div style="font-size:0.72rem;font-weight:700;color:#fff">MP3 аудио</div>
+        <div style="font-size:0.62rem;color:var(--muted)">Извлечь звук</div>
+      </div>
+      <div class="url-mode-card" id="url-card-best" data-url-mode="best">
+        <div style="font-size:1.1rem;margin-bottom:2px">⭐</div>
+        <div style="font-size:0.72rem;font-weight:700;color:#fff">Лучшее</div>
+        <div style="font-size:0.62rem;color:var(--muted)">Макс. качество</div>
+      </div>
+    </div>
+    <select id="url-mode-inp" style="display:none">
+      <option value="file">file</option>
+      <option value="video">video</option>
+      <option value="audio">audio</option>
+      <option value="best">best</option>
+    </select>
     <div class="url-grid">
       <input id="manual-url-inp" type="url" placeholder="https://example.com/file.zip или magnet:..." autocomplete="off"/>
-      <input id="manual-name-inp" type="text" placeholder="Имя файла, если нужно" autocomplete="off"/>
+      <input id="manual-name-inp" type="text" placeholder="Имя файла (необязательно)" autocomplete="off"/>
     </div>
     <div class="url-actions">
       <button class="btn btn-primary" id="manual-url-btn">Скачать через VPS</button>
@@ -624,6 +682,14 @@
   <div class="sec-label" style="margin-top:13px">Загружено с ПК</div>
   <div id="upload-file-list">
     <div class="empty-state"><div class="icon">📂</div>Файлов нет</div>
+  </div>
+</div>
+
+<!-- ── Файлы ──────────────────────────────────────────── -->
+<div class="panel" id="panel-files">
+  <div id="fb-breadcrumb" style="display:flex;align-items:center;gap:4px;margin-bottom:10px;flex-wrap:wrap;min-height:22px"></div>
+  <div id="fb-entries">
+    <div class="empty-state"><div class="icon">📂</div>Загрузка...</div>
   </div>
 </div>
 

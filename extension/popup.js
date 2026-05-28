@@ -8,8 +8,17 @@ function escHtml(s) {
 }
 function normalizeUrl(u) {
   u = (u || '').trim().replace(/\/+$/, '');
-  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
-  return u;
+  if (!u) return u;
+  const noScheme = u.replace(/^https?:\/\//i, '');
+  if (/^http:\/\//i.test(u) && /^(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(noScheme)) return u;
+  return 'https://' + noScheme;
+}
+function safeFilename(name) {
+  let n = String(name || '').split(/[\\/]/).pop() || '';
+  n = n.replace(/^[.\s]+/, '');
+  n = n.replace(/[<>:"|?*\x00-\x1f]/g, '_');
+  if (n.length > 200) n = n.slice(0, 200);
+  return n || 'download.bin';
 }
 function fmt(b) {
   if (!b || b < 0) return '—';
@@ -85,6 +94,7 @@ function switchTab(tabName) {
   document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
   $('panel-' + tabName).classList.add('active');
   if (tabName === 'downloads') loadDownloadsTab();
+  if (tabName === 'files') loadFilesTab();
 }
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => switchTab(btn.dataset.tab));
@@ -467,7 +477,7 @@ async function renderDownloads() {
           <div class="ready-meta">${fmt(f.size)} · готово ${fmtDate(f.readyAt)}</div>
         </div>
         <button class="btn-sm btn-share" style="flex-shrink:0;margin-right:4px" data-share-file="${escHtml(f.name)}" data-share-path="${escHtml(filePath)}" title="Публичная ссылка / QR">🔗</button>
-        <button class="btn-pc" data-url="${escHtml(encodeURIComponent(f.dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}" data-account-id="${escHtml(f.accountId || activeAcc?.id || '')}">⬇ На ПК</button>
+        <button class="btn-pc" data-name="${escHtml(encodeURIComponent(f.name))}" data-account-id="${escHtml(f.accountId || activeAcc?.id || '')}">⬇ На ПК</button>
       </div>`;
     }).join('');
   } else {
@@ -524,7 +534,6 @@ async function renderDownloads() {
 
   const renderSingleList = (files) => {
     return files.map(f => {
-      const dlUrl = cfg.serverUrl + '/api/ext-dl/' + encodeURIComponent(f.name) + '?t=' + encodeURIComponent(cfg.token);
       const filePath = f.path || ('/' + f.name);
       return `<div class="file-item">
         <div class="file-ico">${fileEmoji(f.name)}</div>
@@ -533,7 +542,7 @@ async function renderDownloads() {
           <div class="file-meta">${fmt(f.size)} · ${fmtDate(new Date(f.mtime).getTime())}</div>
         </div>
         <button class="btn-sm btn-share" data-share-file="${escHtml(f.name)}" data-share-path="${escHtml(filePath)}" title="Публичная ссылка / QR">🔗</button>
-        <button class="btn-sm btn-dl" data-url="${escHtml(encodeURIComponent(dlUrl))}" data-name="${escHtml(encodeURIComponent(f.name))}">⬇</button>
+        <button class="btn-sm btn-dl" data-name="${escHtml(encodeURIComponent(f.name))}">⬇</button>
       </div>`;
     }).join('');
   };
@@ -550,6 +559,31 @@ async function renderDownloads() {
       : '<div class="empty-state"><div class="icon">📂</div>Файлов нет</div>';
   }
 }
+
+// ─── URL mode selector ───────────────────────────────────────────
+let _currentUrlMode = 'file';
+
+function selectUrlMode(mode) {
+  _currentUrlMode = mode;
+  ['file', 'video', 'audio', 'best'].forEach(m => {
+    const card = $('url-card-' + m);
+    if (card) card.classList.toggle('selected', m === mode);
+  });
+  const sel = $('url-mode-inp');
+  if (sel) sel.value = mode;
+  const nameInp = $('manual-name-inp');
+  if (nameInp) {
+    nameInp.placeholder = mode === 'file'
+      ? 'Имя файла (необязательно)'
+      : 'Название без расширения (необязательно)';
+  }
+}
+
+// Mode card clicks (CSP-safe, no inline handlers)
+document.addEventListener('click', e => {
+  const card = e.target.closest('[data-url-mode]');
+  if (card) { selectUrlMode(card.dataset.urlMode); }
+});
 
 // ─── Manual URL -> VPS ───────────────────────────────────────────
 function guessUrlName(url) {
@@ -600,6 +634,7 @@ async function addManualUrlDownload() {
   const btn = $('manual-url-btn');
   const url = $('manual-url-inp').value.trim();
   const filename = $('manual-name-inp').value.trim();
+  const mode = _currentUrlMode || 'file';
 
   if (!cfg.serverUrl || !cfg.token) {
     setManualUrlStatus('err', 'Добавьте аккаунт');
@@ -612,6 +647,43 @@ async function addManualUrlDownload() {
   }
 
   btn.disabled = true;
+
+  // ── Media mode (yt-dlp) ──────────────────────────────
+  if (mode !== 'file') {
+    setManualUrlStatus('', 'Запускаю медиа-загрузку...');
+    try {
+      let data;
+      try {
+        data = await chrome.runtime.sendMessage({ type: 'add-media-download', url, mode, filename });
+        if (!data || !data.ok) throw new Error((data && data.error) || 'Ошибка');
+      } catch (msgErr) {
+        if (!/Receiving end does not exist|Could not establish connection/i.test(msgErr.message || '')) throw msgErr;
+        // SW спит — вызываем напрямую
+        const ctrl = new AbortController();
+        setTimeout(() => ctrl.abort(), 12000);
+        const body = new URLSearchParams({ url, mode });
+        if (filename) body.set('filename', filename);
+        const res = await fetch(cfg.serverUrl + '/api/ext/media', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + cfg.token, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body.toString(),
+          signal: ctrl.signal,
+        });
+        data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) throw new Error(data.error || 'HTTP ' + res.status);
+      }
+      $('manual-url-inp').value = '';
+      $('manual-name-inp').value = '';
+      setManualUrlStatus('ok', 'Медиа-загрузка запущена!');
+    } catch (e) {
+      setManualUrlStatus('err', e.name === 'AbortError' ? 'Сервер не ответил' : (e.message || 'Ошибка'));
+    } finally {
+      setTimeout(() => { btn.disabled = false; }, 700);
+    }
+    return;
+  }
+
+  // ── File mode (aria2) ────────────────────────────────
   setManualUrlStatus('', 'Отправляю...');
   try {
     let data;
@@ -709,27 +781,43 @@ async function cancelCaptureNextDownload() {
   refreshCaptureStatus();
 }
 
+// ─── Ticket helper (одноразовый URL для chrome.downloads) ─
+async function fetchTicketUrl(cfg, fileName) {
+  const res = await fetch(cfg.serverUrl + '/api/ext-ticket', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + cfg.token, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'file=' + encodeURIComponent(fileName),
+  });
+  if (!res.ok) throw new Error('ticket HTTP ' + res.status);
+  const d = await res.json();
+  if (!d.url) throw new Error('ticket missing url');
+  return cfg.serverUrl + d.url;
+}
+
 // ─── Download button handler (event delegation, CSP-safe) ─
 document.addEventListener('click', async e => {
-  const btn = e.target.closest('button[data-url][data-name]');
+  const btn = e.target.closest('button.btn-dl[data-name], button.btn-pc[data-name]');
   if (!btn) return;
-  const url  = decodeURIComponent(btn.dataset.url);
   const name = decodeURIComponent(btn.dataset.name);
   const accountId = btn.dataset.accountId || '';
   const orig = btn.textContent;
   btn.disabled = true; btn.textContent = '…';
+  let openedUrl = '';
   try {
-    await chrome.downloads.download({ url, filename: name, saveAs: false });
+    const cfg = await getConfig();
+    if (!cfg.serverUrl || !cfg.token) throw new Error('Аккаунт не настроен');
+    const url = await fetchTicketUrl(cfg, name);
+    openedUrl = url;
+    await chrome.downloads.download({ url, filename: safeFilename(name), saveAs: false });
     btn.textContent = '✓ Начато';
-    // Remove from readyFiles
     const { readyFiles = [] } = await new Promise(r => chrome.storage.local.get('readyFiles', r));
     await new Promise(r => chrome.storage.local.set({ readyFiles: readyFiles.filter(f => !(f.name === name && (!accountId || !f.accountId || f.accountId === accountId))) }, r));
     const card = document.getElementById('ri-' + encodeURIComponent(name));
     if (card) card.remove();
     if ($('ready-list') && !$('ready-list').children.length) $('ready-section').style.display = 'none';
   } catch (e) {
-    chrome.tabs.create({ url });
-    btn.textContent = '↗ Открыто';
+    if (openedUrl) chrome.tabs.create({ url: openedUrl });
+    btn.textContent = '✕ Ошибка';
   }
   setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
 });
@@ -864,8 +952,109 @@ document.addEventListener('click', e => {
   openShareModal(shareBtn.dataset.shareFile, shareBtn.dataset.sharePath);
 });
 
+// ─── File Browser (tab "Файлы") ───────────────────────────
+let fbCurrentPath = '';
+
+async function loadFilesTab() {
+  await browseFolder('');
+}
+
+async function browseFolder(relPath) {
+  fbCurrentPath = relPath;
+  const cfg = await getConfig();
+  const entriesEl = $('fb-entries');
+  const crumbEl = $('fb-breadcrumb');
+
+  // Breadcrumb
+  if (crumbEl) {
+    const parts = relPath ? relPath.split('/').filter(Boolean) : [];
+    let html = '<button class="fb-crumb" data-fb-path="">🏠 Корень</button>';
+    let builtPath = '';
+    parts.forEach((part, i) => {
+      builtPath = builtPath ? builtPath + '/' + part : part;
+      const isLast = i === parts.length - 1;
+      html += '<span class="fb-sep">›</span>';
+      html += `<button class="fb-crumb${isLast ? ' active' : ''}" data-fb-path="${escHtml(builtPath)}">${escHtml(part)}</button>`;
+    });
+    crumbEl.innerHTML = html;
+  }
+
+  if (!cfg.serverUrl || !cfg.token) {
+    if (entriesEl) entriesEl.innerHTML = '<div class="empty-state"><div class="icon">⚙️</div>Добавьте аккаунт</div>';
+    return;
+  }
+
+  if (entriesEl) entriesEl.innerHTML = '<div class="empty-state"><div class="icon" style="font-size:1.5rem">⏳</div>Загрузка...</div>';
+
+  try {
+    const r = await fetch(cfg.serverUrl + '/api/ext/browse?path=' + encodeURIComponent(relPath), {
+      headers: { 'Authorization': 'Bearer ' + cfg.token }
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'Ошибка');
+    const entries = d.entries || [];
+
+    if (!entries.length) {
+      if (entriesEl) entriesEl.innerHTML = '<div class="empty-state"><div class="icon">📂</div>Папка пустая</div>';
+      return;
+    }
+
+    if (entriesEl) {
+      entriesEl.innerHTML = entries.map(e => {
+        const ico = e.isDir ? '📁' : fileEmoji(e.name);
+        const meta = e.isDir ? 'Папка' : (fmt(e.size) + ' · ' + fmtDate(new Date(e.mtime).getTime()));
+        const entryRelPath = relPath ? (relPath + '/' + e.name) : e.name;
+        const sharePathStr = '/' + entryRelPath;
+        if (e.isDir) {
+          return `<div class="fb-entry is-dir" data-fb-folder="${escHtml(entryRelPath)}">
+            <div class="fb-ico">${ico}</div>
+            <div class="fb-info">
+              <div class="fb-name">${escHtml(e.name)}</div>
+              <div class="fb-meta">${meta}</div>
+            </div>
+            <span style="color:var(--muted);font-size:.85rem;flex-shrink:0">›</span>
+          </div>`;
+        } else {
+          return `<div class="fb-entry">
+            <div class="fb-ico">${ico}</div>
+            <div class="fb-info">
+              <div class="fb-name" title="${escHtml(e.name)}">${escHtml(e.name)}</div>
+              <div class="fb-meta">${meta}</div>
+            </div>
+            <button class="btn-sm btn-share" data-share-file="${escHtml(e.name)}" data-share-path="${escHtml(sharePathStr)}" title="Публичная ссылка">🔗</button>
+            <button class="btn-sm btn-dl" data-name="${escHtml(encodeURIComponent(e.name))}">⬇</button>
+          </div>`;
+        }
+      }).join('');
+    }
+  } catch (e) {
+    if (entriesEl) entriesEl.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div>${escHtml(e.message || 'Ошибка')}</div>`;
+  }
+}
+
+// File browser: breadcrumb + folder click navigation
+document.addEventListener('click', e => {
+  // Breadcrumb nav
+  const crumb = e.target.closest('button.fb-crumb[data-fb-path]');
+  if (crumb && !crumb.classList.contains('active')) {
+    browseFolder(crumb.dataset.fbPath);
+    return;
+  }
+  // Folder open
+  const folderEntry = e.target.closest('[data-fb-folder]');
+  if (folderEntry) {
+    browseFolder(folderEntry.dataset.fbFolder);
+    return;
+  }
+});
+
 // ─── OTA version check ────────────────────────────────────
 const CURRENT_VERSION = chrome.runtime.getManifest().version;
+{
+  const vEl = $('ext-version');
+  if (vEl) vEl.textContent = CURRENT_VERSION;
+}
 
 function versionNewer(a, b) {
   const pa = a.split('.').map(Number), pb = b.split('.').map(Number);

@@ -19,7 +19,7 @@ function loadShares() {
   catch { return {}; }
 }
 function saveShares(s) {
-  fs.writeFileSync(SHARES_FILE, JSON.stringify(s));
+  writeJsonAtomic(SHARES_FILE, s);
 }
 function shareOptionsFromBody(body = {}) {
   const maxDownloadsRaw = parseInt(body.maxDownloads, 10);
@@ -56,7 +56,7 @@ function loadTgUsers() {
   try { return JSON.parse(fs.readFileSync(TG_USERS_FILE, 'utf8')); }
   catch { return {}; }
 }
-function saveTgUsers(t) { fs.writeFileSync(TG_USERS_FILE, JSON.stringify(t)); }
+function saveTgUsers(t) { writeJsonAtomic(TG_USERS_FILE, t); }
 async function tgPost(method, data, options = {}) {
   const isFormData = data && typeof data.getHeaders === 'function';
   const headers = isFormData ? data.getHeaders() : {};
@@ -86,12 +86,12 @@ function loadTokens() {
   try { return JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8')); }
   catch { return {}; }
 }
-function saveTokens(t) { fs.writeFileSync(TOKENS_FILE, JSON.stringify(t)); }
+function saveTokens(t) { writeJsonAtomic(TOKENS_FILE, t); }
 function loadSettings() {
   try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); }
   catch { return {}; }
 }
-function saveSettings(s) { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s)); }
+function saveSettings(s) { writeJsonAtomic(SETTINGS_FILE, s); }
 function getUserRetention(username) {
   const s = loadSettings();
   const val = s[username];
@@ -108,7 +108,7 @@ function getUserMaxTgSize(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.10.0';
+const SITE_VERSION = '2.12.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -117,11 +117,11 @@ function loadUsers() {
   try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); }
   catch {
     const def = { xf1st: { password: '78457845Xf!', label: 'Admin', isAdmin: true } };
-    fs.writeFileSync(USERS_FILE, JSON.stringify(def, null, 2));
+    writeJsonAtomic(USERS_FILE, def, { pretty: true });
     return def;
   }
 }
-function saveUsers(u) { fs.writeFileSync(USERS_FILE, JSON.stringify(u, null, 2)); }
+function saveUsers(u) { writeJsonAtomic(USERS_FILE, u, { pretty: true }); }
 function isAdmin(username) { const u = loadUsers(); return u[username] && u[username].isAdmin; }
 const UPLOADS_FILE = '/opt/vps-downloader/uploads.json';
 function loadUploads() {
@@ -129,7 +129,7 @@ function loadUploads() {
   catch { return {}; }
 }
 function saveUploads(u) {
-  try { fs.writeFileSync(UPLOADS_FILE, JSON.stringify(u, null, 2)); } catch (e) {}
+  try { writeJsonAtomic(UPLOADS_FILE, u, { pretty: true }); } catch (e) {}
 }
 function registerUploadedFile(username, filename) {
   if (!username || !filename) return;
@@ -180,7 +180,7 @@ function logActivity(username, action, details) {
       details: details
     });
     if (list.length > 200) list.length = 200;
-    fs.writeFileSync(ACTIVITY_FILE, JSON.stringify(list, null, 2));
+    writeJsonAtomic(ACTIVITY_FILE, list, { pretty: true });
   } catch (e) {
     console.error('Error logging activity:', e);
   }
@@ -192,6 +192,89 @@ function htmlEscape(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
+
+// SSRF-защита для aria2.addUri: запрет file://, приватных IP, localhost, link-local.
+function isUriSafe(uri) {
+  if (typeof uri !== 'string') return false;
+  uri = uri.trim();
+  if (!uri) return false;
+  if (/^magnet:/i.test(uri)) return true;
+  let u;
+  try { u = new URL(uri); } catch { return false; }
+  const proto = u.protocol.toLowerCase();
+  if (!['http:', 'https:', 'ftp:', 'ftps:'].includes(proto)) return false;
+  const host = (u.hostname || '').toLowerCase();
+  if (!host) return false;
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0') return false;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const [a, b, c, d] = ipv4.slice(1).map(Number);
+    if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+    if (a === 127 || a === 10 || a === 0) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 169 && b === 254) return false; // AWS metadata / link-local
+    if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT
+    if (a >= 224) return false;
+  }
+  if (host.startsWith('[')) {
+    const v6 = host.slice(1, -1);
+    if (v6 === '::1' || v6 === '0:0:0:0:0:0:0:1' || v6 === '::' ) return false;
+    if (/^f[cd][0-9a-f]{2}:/i.test(v6)) return false; // ULA
+    if (/^fe[89ab][0-9a-f]:/i.test(v6)) return false; // link-local
+  }
+  return true;
+}
+
+// Атомарная запись JSON через .tmp + rename (sync, защищает от partial-write при kill процесса).
+function writeJsonAtomic(file, data, opts) {
+  const tmp = file + '.tmp.' + process.pid + '.' + crypto.randomBytes(4).toString('hex');
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(data, null, (opts && opts.pretty) ? 2 : 0));
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw e;
+  }
+}
+
+// Brute-force tracker для /login (in-memory).
+const _loginFails = new Map();
+function loginGate(ip) {
+  const e = _loginFails.get(ip);
+  if (!e) return { ok: true };
+  if (e.lockUntil && Date.now() < e.lockUntil) {
+    return { ok: false, retryAfter: Math.ceil((e.lockUntil - Date.now()) / 1000) };
+  }
+  return { ok: true };
+}
+function loginFail(ip) {
+  const e = _loginFails.get(ip) || { fails: 0, lockUntil: 0 };
+  e.fails++;
+  if (e.fails >= 5) {
+    // экспоненциально: 5→30с, 6→60с, 7→120с… потолок 30 мин
+    e.lockUntil = Date.now() + Math.min(30000 * Math.pow(2, e.fails - 5), 1800000);
+  }
+  _loginFails.set(ip, e);
+}
+function loginOk(ip) { _loginFails.delete(ip); }
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, e] of _loginFails) {
+    if (e.lockUntil && e.lockUntil < now - 3600000) _loginFails.delete(ip);
+  }
+}, 600000).unref?.();
+
+// Запретённые для загрузки расширения (XSS через preview, скрипты).
+const FORBIDDEN_UPLOAD_EXT = new Set(['.html', '.htm', '.svg', '.xhtml', '.xml', '.js', '.mjs']);
+function multerFileFilter(req, file, cb) {
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  if (FORBIDDEN_UPLOAD_EXT.has(ext)) {
+    return cb(new Error('Расширение ' + ext + ' запрещено'));
+  }
+  cb(null, true);
+}
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('/opt/vps-downloader/public', { maxAge: '7d' }));
@@ -201,7 +284,7 @@ app.use(session({
   resave: true,
   saveUninitialized: false,
   rolling: true,
-  cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true }, // 30 дней, обновляется при каждом Р В·Р В°Р С—росе
+  cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true, sameSite: 'lax' }, // 30 дней, обновляется при каждом Р В·Р В°Р С—росе
 }));
 function auth(req, res, next) {
   if (req.session.user) return next();
@@ -224,7 +307,7 @@ function loadMediaJobs() {
   catch { return {}; }
 }
 function saveMediaJobs(jobs) {
-  fs.writeFileSync(MEDIA_JOBS_FILE, JSON.stringify(jobs, null, 2));
+  writeJsonAtomic(MEDIA_JOBS_FILE, jobs, { pretty: true });
 }
 function mediaJobPublic(job) {
   const rawError = job.error || '';
@@ -519,14 +602,22 @@ app.get('/login', (req, res) => {
   res.send(loginPage());
 });
 app.post('/login', (req, res) => {
+  const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
+  const gate = loginGate(ip);
+  if (!gate.ok) {
+    res.set('Retry-After', String(gate.retryAfter));
+    return res.status(429).send(loginPage('Слишком много попыток. Попробуйте через ' + gate.retryAfter + ' с.'));
+  }
   const { username, password } = req.body;
   const users = loadUsers();
   const user = users[username];
   if (user && user.password === password) {
+    loginOk(ip);
     req.session.user = username;
     req.session.save(() => res.redirect('/'));
     return;
   }
+  loginFail(ip);
   res.send(loginPage('Неверный логин или пароль'));
 });
 app.post('/logout', (req, res) => {
@@ -634,6 +725,7 @@ app.post('/api/add', auth, async (req, res) => {
   const dlUrl = (req.body.url || '').trim();
   const outName = filenameWithUrlExtension(dlUrl, req.body.filename || '');
   if (!dlUrl) return res.status(400).json({ error: 'URL пустой' });
+  if (!isUriSafe(dlUrl)) return res.status(400).json({ error: 'URL заблокирован (приватный/локальный адрес или неподдерживаемая схема)' });
   const dir = userDir(req.session.user);
   try {
     const opts = { dir };
@@ -853,6 +945,7 @@ app.post('/api/add-ext', extCors, authToken, async (req, res) => {
   const dlUrl = (req.body.url || '').trim();
   const outName = filenameWithUrlExtension(dlUrl, req.body.filename || '');
   if (!dlUrl) return res.status(400).json({ error: 'URL пустой' });
+  if (!isUriSafe(dlUrl)) return res.status(400).json({ error: 'URL заблокирован (приватный/локальный адрес или неподдерживаемая схема)' });
   const dir = userDir(req.tokenUser);
   try {
     const opts = { dir };
@@ -878,6 +971,7 @@ const extUpload = multer({
     filename: (req, file, cb) => cb(null, path.basename(Buffer.from(file.originalname || 'download.bin', 'latin1').toString('utf8'))),
   }),
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
+  fileFilter: multerFileFilter,
 });
 app.post('/api/upload-ext', extCors, authToken, (req, res) => {
   extUpload.single('file')(req, res, (err) => {
@@ -972,8 +1066,45 @@ app.post('/api/ext/share', extCors, authToken, (req, res) => {
   const fullUrl = req.protocol + '://' + req.get('host') + '/share/' + token;
   res.set(EXT_CORS).json({ ok: true, token, url: '/share/' + token, fullUrl });
 });
+// Медиа-загрузка из расширения через yt-dlp (Bearer-auth)
+app.options('/api/ext/media',  (req, res) => res.set(EXT_CORS).sendStatus(204));
+app.post('/api/ext/media', extCors, authToken, (req, res) => {
+  const dlUrl = (req.body.url || '').trim();
+  const mode = ['video', 'audio', 'best'].includes(req.body.mode) ? req.body.mode : 'video';
+  const filename = (req.body.filename || '').trim();
+  if (!dlUrl) return res.status(400).json({ error: 'URL empty' });
+  if (!isUriSafe(dlUrl)) return res.status(400).json({ error: 'URL заблокирован (приватный/локальный адрес или неподдерживаемая схема)' });
+  const dir = userDir(req.tokenUser);
+  ytDlpAvailable((available) => {
+    if (!available) return res.status(500).json({ error: 'yt-dlp не установлен на сервере' });
+    try {
+      const job = startMediaJob({ username: req.tokenUser, url: dlUrl, dir, relPath: '', mode, filename });
+      res.json({ ok: true, job: mediaJobPublic(job) });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+});
+// Файловый браузер для расширения (Bearer-auth)
+app.options('/api/ext/browse', (req, res) => res.set(EXT_CORS).sendStatus(204));
+app.get('/api/ext/browse', extCors, authToken, (req, res) => {
+  const relPath = (req.query.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const full = fmResolve(req.tokenUser, relPath);
+  if (!full) return res.set(EXT_CORS).status(403).json({ error: 'Invalid path' });
+  try {
+    const entries = fs.readdirSync(full).map(name => {
+      try {
+        const s = fs.statSync(path.join(full, name));
+        return { name, isDir: s.isDirectory(), size: s.isDirectory() ? 0 : s.size, mtime: s.mtime };
+      } catch { return null; }
+    }).filter(Boolean)
+      .filter(e => !e.name.startsWith('.'))
+      .sort((a, b) => (b.isDir ? 1 : 0) - (a.isDir ? 1 : 0) || a.name.localeCompare(b.name));
+    res.set(EXT_CORS).json({ ok: true, path: relPath, entries });
+  } catch (e) { res.set(EXT_CORS).status(500).json({ error: e.message }); }
+});
 // Версия расширения (без авторизации — для OTA проверки)
-const EXT_VERSION = '2.10.0';
+const EXT_VERSION = '2.11.0';
 app.get('/api/ext/version', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').json({
     version: EXT_VERSION,
@@ -1016,13 +1147,55 @@ app.get('/ext/extension.zip', (req, res) => {
   if (!fs.existsSync(zipPath)) return res.status(404).send('Not found');
   res.download(zipPath, `sipliyfolder-extension-v${EXT_VERSION}.zip`);
 });
-// Скачать файл через токен в query-параметре (chrome.downloads не умеет слать заголовки)
+// Одноразовые ticket-URL'ы для chrome.downloads (тот не умеет слать заголовки).
+// Bearer-токен больше не должен попадать в URL/логи/history — extension сначала
+// получает ticket, потом тащит файл по ?ticket=. Старый ?t= тоже принимаем для
+// обратной совместимости со старыми версиями расширения.
+const _extTickets = new Map();
+function issueExtTicket(user, file) {
+  const t = crypto.randomBytes(24).toString('base64url');
+  _extTickets.set(t, { user, file, expiresAt: Date.now() + 60_000 });
+  return t;
+}
+function consumeExtTicket(ticket, file) {
+  const e = _extTickets.get(ticket);
+  if (!e) return null;
+  _extTickets.delete(ticket);
+  if (e.expiresAt < Date.now()) return null;
+  if (e.file !== file) return null;
+  return e.user;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, e] of _extTickets) if (e.expiresAt < now) _extTickets.delete(k);
+}, 60_000).unref?.();
+
+app.post('/api/ext-ticket', extCors, authToken, (req, res) => {
+  const file = (req.body.file || '').toString();
+  if (!file) return res.status(400).json({ error: 'file required' });
+  const safeFile = path.basename(file);
+  if (!safeFile) return res.status(400).json({ error: 'invalid file' });
+  const ticket = issueExtTicket(req.tokenUser, safeFile);
+  res.json({ ticket, url: '/api/ext-dl/' + encodeURIComponent(safeFile) + '?ticket=' + ticket });
+});
+app.options('/api/ext-ticket', (req, res) => res.set(EXT_CORS).sendStatus(204));
+
 app.get('/api/ext-dl/:file', (req, res) => {
-  const token = (req.query.t || '').trim();
-  const tokens = loadTokens();
-  const username = tokens[token];
+  const fileName = path.basename(req.params.file);
+  let username = null;
+  const ticket = (req.query.ticket || '').trim();
+  if (ticket) {
+    username = consumeExtTicket(ticket, fileName);
+  } else {
+    // legacy ?t= bearer (deprecated, оставлено для старого расширения)
+    const token = (req.query.t || '').trim();
+    if (token) {
+      const tokens = loadTokens();
+      username = tokens[token] || null;
+    }
+  }
   if (!username) return res.status(401).send('Unauthorized');
-  const file = path.join(userDir(username), path.basename(req.params.file));
+  const file = path.join(userDir(username), fileName);
   if (!fs.existsSync(file)) return res.status(404).send('Not found');
   res.set('Access-Control-Allow-Origin', '*');
   res.download(file);
@@ -1080,10 +1253,40 @@ app.delete('/api/users/:username', auth, (req, res) => {
   if (!users[target]) return res.status(404).json({ error: 'Пользователь не найден' });
   delete users[target];
   saveUsers(users);
-  // Сбрасываем токены удалённого пользователя
+  // Токены
   const tokens = loadTokens();
   Object.keys(tokens).forEach(t => { if (tokens[t] === target) delete tokens[t]; });
   saveTokens(tokens);
+  // Shares — снимаем все принадлежащие этому юзеру
+  const shares = loadShares();
+  Object.keys(shares).forEach(k => { if (shares[k] && shares[k].user === target) delete shares[k]; });
+  saveShares(shares);
+  // Uploads-реестр
+  try {
+    const uploads = loadUploads();
+    if (uploads[target]) { delete uploads[target]; saveUploads(uploads); }
+  } catch {}
+  // Media jobs
+  try {
+    const jobs = loadMediaJobs();
+    let changed = false;
+    Object.keys(jobs).forEach(id => { if (jobs[id] && jobs[id].user === target) { delete jobs[id]; changed = true; } });
+    if (changed) saveMediaJobs(jobs);
+  } catch {}
+  // Telegram-привязки
+  try {
+    const tg = loadTgUsers();
+    let changed = false;
+    Object.keys(tg).forEach(chatId => { if (tg[chatId] && tg[chatId].user === target) { delete tg[chatId]; changed = true; } });
+    if (changed) saveTgUsers(tg);
+  } catch {}
+  // Файлы пользователя
+  try {
+    const userPath = path.join(DOWNLOADS_ROOT, target);
+    if (fs.existsSync(userPath) && path.resolve(userPath).startsWith(path.resolve(DOWNLOADS_ROOT) + path.sep)) {
+      fs.rmSync(userPath, { recursive: true, force: true });
+    }
+  } catch (e) { console.error('Failed to remove user dir:', e.message); }
   res.json({ ok: true });
 });
 app.post('/api/change-password', auth, (req, res) => {
@@ -1163,7 +1366,7 @@ const storage = multer.diskStorage({
     cb(null, name);
   },
 });
-const upload = multer({ storage, limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
+const upload = multer({ storage, limits: { fileSize: 2 * 1024 * 1024 * 1024 }, fileFilter: multerFileFilter });
 app.post('/api/upload', auth, upload.array('files', 50), (req, res) => {
   if (!req.files || !req.files.length) return res.status(400).json({ error: 'Нет файлов' });
   req.files.forEach(f => registerUploadedFile(req.session.user, f.filename));
@@ -1572,9 +1775,13 @@ function fmZipItems(username, items, downloadName, cb, shareOptions) {
   const token = crypto.randomUUID();
   const archiveRel = '.archives/' + token + '.zip';
   const archivePath = path.join(fmArchiveDir(username), token + '.zip');
-  const args = ['-m', 'zipfile', '-c', archivePath].concat(picked.map(x => x.rel));
-  execFile('python3', args, { cwd: userDir(username), timeout: 10 * 60 * 1000 }, err => {
-    if (err) return cb(err);
+  const output = fs.createWriteStream(archivePath);
+  const archive = archiver('zip', { zlib: { level: 6 } });
+  let done = false;
+  const finish = (err) => {
+    if (done) return;
+    done = true;
+    if (err) { try { fs.unlinkSync(archivePath); } catch {} return cb(err); }
     const shares = loadShares();
     shares[token] = Object.assign({
       path: archiveRel,
@@ -1585,7 +1792,16 @@ function fmZipItems(username, items, downloadName, cb, shareOptions) {
     }, shareOptions || {});
     saveShares(shares);
     cb(null, { token, url: '/share/' + token, count: picked.length });
-  });
+  };
+  output.on('close', () => finish(null));
+  output.on('error', finish);
+  archive.on('error', finish);
+  archive.pipe(output);
+  for (const it of picked) {
+    if (it.isDir) archive.directory(it.full, it.name);
+    else archive.file(it.full, { name: it.name });
+  }
+  archive.finalize().catch(finish);
 }
 function fmArchiveEntryName(entryPath) {
   return path.basename(String(entryPath || '').replace(/\\/g, '/')) || 'archive-entry';
@@ -2099,6 +2315,7 @@ app.post('/api/fm/add-url', auth, async (req, res) => {
   const relPath = req.body.path || '';
   const outName = filenameWithUrlExtension(dlUrl, req.body.filename || '');
   if (!dlUrl) return res.status(400).json({ error: 'URL empty' });
+  if (!isUriSafe(dlUrl)) return res.status(400).json({ error: 'URL заблокирован (приватный/локальный адрес или неподдерживаемая схема)' });
   const dir = fmResolve(req.session.user, relPath);
   if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return res.status(403).json({ error: 'Invalid path' });
   try {
@@ -2137,6 +2354,7 @@ app.post('/api/fm/media', auth, (req, res) => {
   const mode = ['video', 'audio', 'best'].includes(req.body.mode) ? req.body.mode : 'video';
   const filename = (req.body.filename || '').trim();
   if (!dlUrl) return res.status(400).json({ error: 'URL empty' });
+  if (!isUriSafe(dlUrl)) return res.status(400).json({ error: 'URL заблокирован (приватный/локальный адрес или неподдерживаемая схема)' });
   const dir = fmResolve(req.session.user, relPath);
   if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return res.status(403).json({ error: 'Invalid path' });
   ytDlpAvailable((available) => {
@@ -2275,6 +2493,7 @@ const fmUploader = multer({
     filename: (req, file, cb) => cb(null, path.basename(Buffer.from(file.originalname, 'latin1').toString('utf8')).replace(/[/\\]/g, '_')),
   }),
   limits: { fileSize: 500 * 1024 * 1024 },
+  fileFilter: multerFileFilter,
 });
 app.post('/api/fm/upload', auth, (req, res) => {
   fmUploader.array('files', 50)(req, res, (err) => {
@@ -2291,20 +2510,36 @@ function runCleanup() {
   Object.keys(loadUsers()).forEach(function(username) {
     const retention = getUserRetention(username);
     if (retention === 0) return;
-    const dir = path.join(DOWNLOADS_ROOT, username);
-    if (!fs.existsSync(dir)) return;
+    const root = path.join(DOWNLOADS_ROOT, username);
+    if (!fs.existsSync(root)) return;
     const cutoff = Date.now() - retention * 24 * 60 * 60 * 1000;
-    try {
-      fs.readdirSync(dir).forEach(function(name) {
-        const file = path.join(dir, name);
+    function walk(dir) {
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const ent of entries) {
+        const full = path.join(dir, ent.name);
+        // Не трогаем служебные share-архивы — у них отдельный жизненный цикл.
+        if (full.startsWith(path.join(root, '.archives'))) continue;
         try {
-          if (fs.statSync(file).mtimeMs < cutoff) {
-            fs.unlinkSync(file);
-            removeUploadedFile(username, name);
+          if (ent.isDirectory()) {
+            walk(full);
+            // Пустую папку после чистки удалить.
+            try {
+              const left = fs.readdirSync(full);
+              if (!left.length) fs.rmdirSync(full);
+            } catch {}
+          } else {
+            if (fs.statSync(full).mtimeMs < cutoff) {
+              fs.unlinkSync(full);
+              const rel = path.relative(root, full).replace(/\\/g, '/');
+              removeUploadedFile(username, rel);
+              removeUploadedFile(username, ent.name);
+            }
           }
         } catch {}
-      });
-    } catch {}
+      }
+    }
+    walk(root);
   });
 }
 setInterval(runCleanup, 60 * 60 * 1000);
@@ -3521,6 +3756,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.file-grid-item.selected{background:color-mix(in srgb,var(--accent-color) 14%,var(--surf-cont));box-shadow:0 0 0 2px var(--accent-color),0 12px 32px rgba(0,0,0,.32)}' +
   '.file-grid-item.drag-over{background:var(--accent-bg)!important;box-shadow:0 0 0 2px var(--accent-color)!important}' +
   '.file-grid-item.dragging{opacity:.35}' +
+  '#drag-ghost-el{position:fixed;top:-600px;left:-600px;pointer-events:none;z-index:9999;overflow:visible}' +
   '.file-thumb{width:56px;height:56px;border-radius:18px;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--accent-color) 20%,var(--surf-hi));color:var(--accent-light);font-size:30px;overflow:hidden;flex:0 0 auto}' +
   '.file-thumb .material-symbols-outlined{font-size:28px;color:var(--accent-light)}' +
   '.file-thumb img{width:100%;height:100%;object-fit:cover}' +
@@ -4283,7 +4519,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'window.addEventListener("hashchange",handleHash);' +
   'var renameFp="",renameIsDir=false,renameExt="";' +
   'var ctxFp="",ctxName="",ctxIsDir=false;' +
-  'var dragFp=null,dragName=null,dragIsDir=false,dragEl=null;' +
+  'var dragFp=null,dragName=null,dragIsDir=false,dragEl=null,dragItems=null,dragGhostEl=null;' +
   'var selectedItems={},lastEntries=[],lastBase="";' +
   'var previewFp="",previewName="",previewKind="",previewSrc="",mvZoom=1;' +
   'var activeAudioFp="",activeAudioName="",currentAudioQueue=[],sidebarPlayerInitialized=false;' +
@@ -4379,6 +4615,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '}' +
   'function setSectionChrome(kind){var a=document.querySelector(".mobile-actions");if(a)a.style.display=kind==="files"?"flex":"none";updateSmartToolbar(kind);if(kind!=="files"){try{clearTimeout(searchTimer);var s=document.getElementById("search-inp");if(s)s.value="";}catch(e){}}}' +
   'function moveItemTo(from,name,dest){dest=dest||"";if(!from||dest===from||dest.indexOf(from+"/")===0)return;var to=dest?(dest+"/"+name):name;if(to===from)return;fetch("/api/fm/move",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({from:from,to:to})}).then(function(r){return r.json();}).then(function(d){if(d.ok)navigateTo(activePath());else alert(d.error||"Ошибка перемещения");});}' +
+  'function moveMultiTo(items,dest){dest=dest||"";var valid=items.filter(function(item){if(!item.fp||item.fp===dest)return false;if(dest&&dest.indexOf(item.fp+"/")===0)return false;return true;});if(!valid.length)return;var promises=valid.map(function(item){var to=dest?(dest+"/"+item.name):item.name;if(to===item.fp)return Promise.resolve({ok:true});return fetch("/api/fm/move",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({from:item.fp,to:to})}).then(function(r){return r.json();});});Promise.all(promises).then(function(results){var errs=results.filter(function(d){return!d.ok;});clearSelection();navigateTo(activePath());if(errs.length)alert(errs.length+" файл(ов) не удалось переместить");});}' +
+  'function fileEmojiDrag(name,isDir){if(isDir)return"📁";var e=(name||"").split(".").pop().toLowerCase();return{mp4:"🎬",mkv:"🎬",avi:"🎬",mov:"🎬",webm:"🎬",mp3:"🎵",flac:"🎵",wav:"🎵",zip:"📦",rar:"📦","7z":"📦",tar:"📦",gz:"📦",exe:"💿",msi:"💿",iso:"💿",pdf:"📄",jpg:"🖼",jpeg:"🖼",png:"🖼",gif:"🖼",webp:"🖼"}[e]||"📄";}' +
+  'function createDragGhost(e,items){removeDragGhost();var count=items.length;var first=items[0];var cs=getComputedStyle(document.documentElement);var surfCont=cs.getPropertyValue("--surf-cont").trim()||"#1b1b1f";var onSurf=cs.getPropertyValue("--on-surf").trim()||"#e4e1e7";var accentRaw=cs.getPropertyValue("--accent-color").trim()||"120 80 255";var accent="rgb("+accentRaw+")";var numBg=Math.min(count-1,2);var w=180,cardH=48;var ghost=document.createElement("div");ghost.style.cssText="position:fixed;top:-600px;left:-600px;pointer-events:none;z-index:9999;width:"+(w+numBg*8)+"px;height:"+(cardH+numBg*8)+"px;overflow:visible";for(var i=numBg;i>0;i--){var bg=document.createElement("div");var off=(numBg-i+1)*6;var rot=(numBg-i+1)*2.5;bg.style.cssText="position:absolute;left:"+off+"px;top:"+off+"px;width:"+w+"px;height:"+cardH+"px;background:"+surfCont+";border-radius:13px;transform:rotate("+rot+"deg);box-shadow:0 4px 16px rgba(0,0,0,.45);border:1.5px solid rgba(255,255,255,.07);opacity:.62";ghost.appendChild(bg);}var front=document.createElement("div");front.style.cssText="position:absolute;left:0;top:0;width:"+w+"px;height:"+cardH+"px;background:"+surfCont+";border-radius:13px;display:flex;align-items:center;gap:8px;padding:0 12px;box-shadow:0 8px 30px rgba(0,0,0,.55);border:1.5px solid rgba(255,255,255,.13);overflow:hidden";var ico=document.createElement("span");ico.style.cssText="font-size:20px;flex-shrink:0;line-height:1";ico.textContent=fileEmojiDrag(first.name,first.isDir);var nm=document.createElement("span");nm.style.cssText="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:12px;font-weight:700;color:"+onSurf+";font-family:Manrope,system-ui,sans-serif";nm.textContent=first.name.length>22?first.name.slice(0,20)+"…":first.name;front.appendChild(ico);front.appendChild(nm);if(count>1){var badge=document.createElement("div");badge.style.cssText="position:absolute;top:-8px;right:-8px;background:"+accent+";color:#fff;border-radius:9999px;font-size:11px;font-weight:800;min-width:20px;height:20px;display:flex;align-items:center;justify-content:center;padding:0 4px;box-shadow:0 2px 8px rgba(0,0,0,.5);font-family:Manrope,system-ui,sans-serif";badge.textContent=count;front.appendChild(badge);}ghost.appendChild(front);document.body.appendChild(ghost);dragGhostEl=ghost;e.dataTransfer.setDragImage(ghost,24,cardH/2);}' +
+  'function removeDragGhost(){if(dragGhostEl){try{document.body.removeChild(dragGhostEl);}catch(ex){}dragGhostEl=null;}}' +
   'function showToast(title,body,url){title=title||"";body=body||"";toastUrl=url||"";if(!title&&!body&&!url)return hideToast();document.getElementById("toast-title").textContent=title;document.getElementById("toast-body").textContent=body||url||"";var actions=document.getElementById("toast-share-actions");if(actions){actions.style.display=url?"flex":"none";}document.getElementById("toast").style.display="flex";if(url&&navigator.clipboard)navigator.clipboard.writeText(url).catch(function(){});}' +
   'function hideToast(){document.getElementById("toast").style.display="none";}' +
   'function copyToast(){if(toastUrl&&navigator.clipboard)navigator.clipboard.writeText(toastUrl).then(function(){showToast("Скопировано",toastUrl,toastUrl);});}' +
@@ -5699,13 +5939,21 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  dragFp=row.dataset.fp;dragName=row.dataset.name;dragIsDir=row.dataset.dir==="true";dragEl=row;' +
   '  e.dataTransfer.effectAllowed="move";' +
   '  e.dataTransfer.setData("text/plain",dragFp);' +
-  '  setTimeout(function(){if(dragEl)dragEl.classList.add("dragging");},0);' +
+  '  var sel=selectedList();' +
+  '  var isMulti=sel.length>1&&!!selectedItems[dragFp];' +
+  '  dragItems=isMulti?sel:null;' +
+  '  if(isMulti){' +
+  '    createDragGhost(e,sel);' +
+  '    document.querySelectorAll("[data-fp]").forEach(function(el){if(selectedItems[el.dataset.fp])el.classList.add("dragging");});' +
+  '  }else{' +
+  '    setTimeout(function(){if(dragEl)dragEl.classList.add("dragging");},0);' +
+  '  }' +
   '});' +
   /* ── DRAG END ── */
   'document.addEventListener("dragend",function(){' +
-  '  if(dragEl)dragEl.classList.remove("dragging");' +
-  '  dragEl=null;dragFp=null;' +
-  '  clearDragOver();' +
+  '  document.querySelectorAll(".dragging").forEach(function(el){el.classList.remove("dragging");});' +
+  '  dragEl=null;dragFp=null;dragItems=null;' +
+  '  removeDragGhost();clearDragOver();' +
   '  document.getElementById("drop-zone").classList.remove("active");' +
   '});' +
   /* ── DRAG OVER ── */
@@ -5752,22 +6000,26 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  }' +
   '  /* internal move */\n' +
   '  if(!dragFp)return;' +
+  '  var destFp=null;' +
   '  var dropTarget=e.target.closest("[data-drop-path]");' +
   '  if(dropTarget){' +
   '    e.preventDefault();' +
-  '    var destDrop=dropTarget.dataset.dropPath||"";' +
-  '    var fromDrop=dragFp,nameDrop=dragName;' +
-  '    dragFp=null;' +
-  '    moveItemTo(fromDrop,nameDrop,destDrop);' +
-  '    return;' +
+  '    destFp=dropTarget.dataset.dropPath||"";' +
+  '  }else{' +
+  '    var target=e.target.closest("[data-dir=\'true\'][data-fp]");' +
+  '    if(!target||target.dataset.fp===dragFp){dragFp=null;dragItems=null;return;}' +
+  '    e.preventDefault();' +
+  '    destFp=target.dataset.fp;' +
   '  }' +
-  '  var target=e.target.closest("[data-dir=\'true\'][data-fp]");' +
-  '  if(!target||target.dataset.fp===dragFp){dragFp=null;return;}' +
-  '  e.preventDefault();' +
-  '  var destFp=target.dataset.fp;' +
-  '  var moveFp=dragFp,moveName=dragName;' +
-  '  dragFp=null;' +
-  '  moveItemTo(moveFp,moveName,destFp);' +
+  '  if(dragItems&&dragItems.length>1){' +
+  '    var multiItems=dragItems;' +
+  '    dragFp=null;dragItems=null;' +
+  '    moveMultiTo(multiItems,destFp);' +
+  '  }else{' +
+  '    var moveFp=dragFp,moveName=dragName;' +
+  '    dragFp=null;dragItems=null;' +
+  '    moveItemTo(moveFp,moveName,destFp);' +
+  '  }' +
   '});' +
   /* ── KEYBOARD ── */
   'document.addEventListener("keydown",function(e){' +
