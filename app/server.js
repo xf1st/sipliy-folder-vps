@@ -4872,7 +4872,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '      var inp=document.getElementById("accent-color-input");' +
   '      var lbl=document.getElementById("accent-hex-label");' +
   '      if(inp)inp.value=d.accentHex;if(lbl)lbl.textContent=d.accentHex;' +
-  '      updateColorSwatches(d.accentHex);' +
+  '      if(typeof updateColorSwatches==="function")updateColorSwatches(d.accentHex);' +
+  '    } else {' +
+  '      var presets={"violet":"#a078ff","emerald":"#10b981","ruby":"#f43f5e","glacier":"#06b6d4"};' +
+  '      var cur=localStorage.getItem("cloud-accent-hex")||presets[localStorage.getItem("cloud-accent")]||null;' +
+  '      if(cur&&/^#[0-9a-fA-F]{6}$/.test(cur))saveAccentServer(cur);' +
   '    }' +
   '  }).catch(function(){});' +
   '}' +
