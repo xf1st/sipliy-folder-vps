@@ -507,6 +507,22 @@
   .fb-crumb.active { color:var(--txt); cursor:default; }
   .fb-sep { color:var(--muted); font-size:0.64rem; line-height:1; padding:0 1px; }
 </style>
+<script>
+// Accent theme sync — apply hex to extension CSS vars
+function hexToRgb(h){h=h.replace('#','');var r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16);return[r,g,b];}
+function darkenHex(h,f){var c=hexToRgb(h);return'#'+c.map(function(x){return Math.max(0,Math.round(x*f)).toString(16).padStart(2,'0');}).join('');}
+function lightenHex(h,f){var c=hexToRgb(h);return'#'+c.map(function(x){return Math.min(255,Math.round(x+(255-x)*f)).toString(16).padStart(2,'0');}).join('');}
+function applyExtAccent(hex){
+  if(!hex||!/^#[0-9a-fA-F]{6}$/.test(hex))return;
+  var c=hexToRgb(hex);
+  var light=lightenHex(hex,0.55);
+  var glow='rgba('+c[0]+','+c[1]+','+c[2]+',0.24)';
+  var root=document.documentElement;
+  root.style.setProperty('--p',hex);
+  root.style.setProperty('--p2',light);
+  root.style.setProperty('--accent-glow',glow);
+}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
 </head>

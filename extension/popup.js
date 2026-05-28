@@ -1,4 +1,4 @@
-// Sipliy Folder VPS — popup script v2.9 (multi-account)
+// Sipliy Folder VPS — popup script v2.10 (theme sync)
 
 const $ = id => document.getElementById(id);
 
@@ -178,6 +178,14 @@ async function initSettings() {
   renderAccountSwitcher(accounts, activeAccountId);
   updateHeaderSub(accounts, activeAccountId);
   checkAndUpdateDots(accounts, siteUrl);
+  // Sync accent color from active account
+  const acc = getActiveAccount(accounts, activeAccountId);
+  if (acc && siteUrl && acc.token) {
+    fetch(siteUrl + '/api/ext/theme', { headers: { 'Authorization': 'Bearer ' + acc.token } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d && d.accentHex && typeof applyExtAccent === 'function') applyExtAccent(d.accentHex); })
+      .catch(() => {});
+  }
   return { accounts, activeAccountId, siteUrl };
 }
 
