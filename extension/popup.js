@@ -498,20 +498,25 @@ if (syncThemeBtn) syncThemeBtn.addEventListener('click', async () => {
   if (!cfg.serverUrl || !cfg.token) return;
   syncThemeBtn.textContent = '...';
   syncThemeBtn.disabled = true;
+  const reset = (ok) => {
+    syncThemeBtn.textContent = ok ? '✓' : '↻ Синк';
+    syncThemeBtn.disabled = false;
+    if (ok) setTimeout(() => { syncThemeBtn.textContent = '↻ Синк'; }, 1200);
+  };
   try {
     const r = await fetch(cfg.serverUrl + '/api/ext/theme', {
       headers: { 'Authorization': 'Bearer ' + cfg.token }
     });
     const d = await r.json();
-    if (d.accentHex && typeof applyExtAccent === 'function') {
-      applyExtAccent(d.accentHex);
+    if (d && d.accentHex) {
+      if (typeof applyExtAccent === 'function') applyExtAccent(d.accentHex);
       updateThemeDot(d.accentHex);
-      syncThemeBtn.textContent = '✓';
-      setTimeout(() => { syncThemeBtn.textContent = '↻ Синк'; syncThemeBtn.disabled = false; }, 1200);
+      reset(true);
+    } else {
+      reset(false);
     }
   } catch {
-    syncThemeBtn.textContent = '↻ Синк';
-    syncThemeBtn.disabled = false;
+    reset(false);
   }
 });
 
