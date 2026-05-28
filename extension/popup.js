@@ -648,35 +648,37 @@ async function addManualUrlDownload() {
 
   btn.disabled = true;
 
-  // ── Media mode (yt-dlp) ──────────────────────────────
+  // ── Media mode (yt-dlp) — прямой fetch, без SW ──────────
   if (mode !== 'file') {
-    setManualUrlStatus('', 'Запускаю медиа-загрузку...');
+    setManualUrlStatus('', 'Запускаю...');
     try {
-      let data;
+      const ctrl = new AbortController();
+      const abortTimer = setTimeout(() => ctrl.abort(), 15000);
+      const body = new URLSearchParams({ url, mode });
+      if (filename) body.set('filename', filename);
+      let res, data;
       try {
-        data = await chrome.runtime.sendMessage({ type: 'add-media-download', url, mode, filename });
-        if (!data || !data.ok) throw new Error((data && data.error) || 'Ошибка');
-      } catch (msgErr) {
-        if (!/Receiving end does not exist|Could not establish connection/i.test(msgErr.message || '')) throw msgErr;
-        // SW спит — вызываем напрямую
-        const ctrl = new AbortController();
-        setTimeout(() => ctrl.abort(), 12000);
-        const body = new URLSearchParams({ url, mode });
-        if (filename) body.set('filename', filename);
-        const res = await fetch(cfg.serverUrl + '/api/ext/media', {
+        res = await fetch(cfg.serverUrl + '/api/ext/media', {
           method: 'POST',
           headers: { 'Authorization': 'Bearer ' + cfg.token, 'Content-Type': 'application/x-www-form-urlencoded' },
           body: body.toString(),
           signal: ctrl.signal,
         });
+        clearTimeout(abortTimer);
         data = await res.json().catch(() => ({}));
-        if (!res.ok || data.error) throw new Error(data.error || 'HTTP ' + res.status);
+      } catch (fetchErr) {
+        clearTimeout(abortTimer);
+        throw fetchErr;
       }
+      if (!res.ok || data.error) throw new Error(data.error || 'HTTP ' + res.status);
       $('manual-url-inp').value = '';
       $('manual-name-inp').value = '';
-      setManualUrlStatus('ok', 'Медиа-загрузка запущена!');
+      setManualUrlStatus('ok', 'Запущено! Файл появится когда скачается');
+      // Будим SW чтобы обновил файлы раньше
+      try { chrome.runtime.sendMessage({ type: 'sync-files' }); } catch(_) {}
     } catch (e) {
-      setManualUrlStatus('err', e.name === 'AbortError' ? 'Сервер не ответил' : (e.message || 'Ошибка'));
+      const msg = e.name === 'AbortError' ? 'Сервер не ответил (15с)' : (e.message || 'Ошибка соединения');
+      setManualUrlStatus('err', msg);
     } finally {
       setTimeout(() => { btn.disabled = false; }, 700);
     }
