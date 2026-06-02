@@ -119,7 +119,7 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.16.2';
+const SITE_VERSION = '2.16.3';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -446,8 +446,9 @@ function parseYtDlpLine(job, line) {
     job.name = job.file;
     changed = true;
   }
-  // Detect two-stream download upfront from yt-dlp info line
-  if (/Downloading 2 format/i.test(clean)) { job._twoStream = true; changed = true; }
+  // Detect two-stream download: "Downloading N format(s): 395+251" — compound format with '+'
+  const fmtLine = clean.match(/Downloading \d+ format\(s\):\s*(.+)$/i);
+  if (fmtLine && fmtLine[1].trim().includes('+')) { job._twoStream = true; changed = true; }
   // Stream destination — track which stream we're on
   const dest = clean.match(/\[download\]\s+Destination:\s+(.+)$/i);
   if (dest && dest[1]) {
@@ -458,19 +459,23 @@ function parseYtDlpLine(job, line) {
     if (job._destCount === 2) { job.streamLabel = 'Загрузка аудио'; job.progress = 50; }
     changed = true;
   }
-  // Progress: if two-stream, scale stream1→0-50% and stream2→50-100%; otherwise raw 0-100%
+  // Progress scaling:
+  // - Two-stream, stream 1: 0→50%   (raw/2)
+  // - Two-stream, stream 2: 50→100% (50+raw/2)  — destination handler resets to 50 on stream start
+  // - Single stream:        0→100%  (raw)
   const pct = clean.match(/\[download\]\s+([0-9.]+)%/);
   if (pct) {
     const raw = Math.max(0, Math.min(100, parseFloat(pct[1])));
     const dc = job._destCount || 1;
     let scaled;
-    if (job._twoStream) {
-      scaled = dc >= 2 ? 50 + raw / 2 : raw / 2;
+    if (dc >= 2) {
+      scaled = 50 + raw / 2;          // Always 50-100% for second stream
+    } else if (job._twoStream) {
+      scaled = raw / 2;               // 0-50% for first of two streams
     } else {
-      scaled = raw;
+      scaled = raw;                   // 0-100% for single stream
     }
-    // Allow going forward; second stream can go back because we reset progress=50 above
-    if (dc >= 2 || scaled > (job.progress || 0)) job.progress = scaled;
+    job.progress = Math.round(scaled * 10) / 10;
     changed = true;
   }
   const speed = clean.match(/\bat\s+([^\s]+\/s)/);
@@ -587,9 +592,11 @@ function startMediaJob({ username, url, dir, relPath, mode, filename, quality })
   } else if (fs.existsSync(YTDLP_COOKIES_FILE)) {
     args.push('--cookies', YTDLP_COOKIES_FILE);
   }
-  // Use Node.js for yt-dlp JS challenge solving (node v22 installed on VPS)
+  // Use Node.js for JS challenge solving (node v22 installed on VPS)
   args.push('--js-runtimes', 'node');
-  // Increase socket timeout to avoid transient SSL timeouts
+  // Force IPv6 — YouTube CDN blocks this VPS's IPv4 with SSL timeouts; IPv6 works fine
+  args.push('--force-ipv6');
+  // Increase socket timeout
   args.push('--socket-timeout', '30');
   args.push(url);
   const job = {
