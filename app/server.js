@@ -119,7 +119,7 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.15.0';
+const SITE_VERSION = '2.15.2';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -530,7 +530,7 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
     '--no-mtime',
     '--print', 'after_move:filepath',
     // Download 4 fragments in parallel — speeds up long videos significantly
-    '--concurrent-fragment-downloads', '4',
+    '--concurrent-fragments', '4',
     // Ensure HLS streams are saved as a single MPEG-TS container, not individual segments
     '--hls-use-mpegts',
     // Fix container issues after download (moov atom, etc.)
@@ -559,8 +559,8 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
   } else if (fs.existsSync(YTDLP_COOKIES_FILE)) {
     args.push('--cookies', YTDLP_COOKIES_FILE);
   }
-  // Workaround: use default client without tv to avoid DRM/format errors
-  args.push('--extractor-args', 'youtube:player_client=default,-tv');
+  // Use android+web clients — bypass JS runtime requirement, works on most servers
+  args.push('--extractor-args', 'youtube:player_client=android,web');
   args.push(url);
   const job = {
     id,
@@ -1192,7 +1192,7 @@ app.get('/api/ext/theme', extCors, authToken, (req, res) => {
   res.json({ accentHex: accentHex || '#a078ff' });
 });
 // Версия расширения (без авторизации — для OTA проверки)
-const EXT_VERSION = '2.14.0';
+const EXT_VERSION = '2.14.1';
 app.get('/api/ext/version', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').json({
     version: EXT_VERSION,
@@ -4622,7 +4622,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--outline-var);text-transform:uppercase;padding:10px 4px 4px 20px">Навигация</div>' +
   '<div class="nav-item active" data-action="nav-dashboard"><span class="material-symbols-outlined">dashboard</span><span>Главная</span></div>' +
   '<div class="nav-item" data-action="nav-files"><span class="material-symbols-outlined">folder</span><span>Мои файлы</span></div>' +
-  '<div class="nav-item" data-action="nav-recent"><span class="material-symbols-outlined">schedule</span><span>Недавние</span></div>' +
   '<div class="nav-item" data-action="nav-activity"><span class="material-symbols-outlined">list_alt</span><span>Активность</span></div>' +
   '<div class="nav-item" data-action="nav-settings"><span class="material-symbols-outlined">settings</span><span>Настройки</span></div>' +
   '<div style="flex:1"></div>' +
@@ -4727,7 +4726,6 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<nav class="mobile-bottom-nav">' +
   '<button class="bottom-nav-item active" data-action="nav-dashboard"><span class="material-symbols-outlined">home</span><span>Главная</span></button>' +
   '<button class="bottom-nav-item" data-action="nav-files"><span class="material-symbols-outlined">folder</span><span>Файлы</span></button>' +
-  '<button class="bottom-nav-item" data-action="nav-recent"><span class="material-symbols-outlined">schedule</span><span>Недавние</span></button>' +
   '<button class="bottom-nav-item" data-action="nav-activity"><span class="material-symbols-outlined">list_alt</span><span>Активность</span></button>' +
   '<button class="bottom-nav-item" data-action="nav-settings"><span class="material-symbols-outlined">settings</span><span>Настройки</span></button>' +
   '<button class="bottom-nav-item" data-action="upload-btn"><span class="material-symbols-outlined">upload</span><span>Загрузить</span></button>' +
@@ -5100,7 +5098,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function openQrModal(url){var full=url||toastUrl;if(!full)return;toastUrl=full;document.getElementById("qr-link-text").textContent=full;document.getElementById("qr-img").src=qrImageUrl(full);document.getElementById("qr-open-link").href=full;document.getElementById("modal-qr").style.display="flex";}' +
   'function closeQrModal(){document.getElementById("modal-qr").style.display="none";document.getElementById("qr-img").removeAttribute("src");}' +
   'function closeChangelogModal(){document.getElementById("modal-changelog").style.display="none";}' +
-  'function showChangelogModal(){var m=document.getElementById("modal-changelog");if(!m)return;document.getElementById("changelog-ver").textContent="' + SITE_VERSION + '";var b=document.getElementById("changelog-body");var h="<ul style=\'margin:0;padding-left:20px;display:flex;flex-direction:column;gap:10px\'>";h+="<li><b>YouTube Cookies для всех:</b> На странице настроек теперь каждый пользователь может загрузить свои куки-файлы для обхода блокировок YouTube.</li>";h+="<li><b>Стабильное скачивание:</b> Исправлена проблема DRM/недоступности форматов YouTube за счет оптимизации клиентов парсера.</li>";h+="<li><b>Конфиденциальность:</b> Обычные пользователи теперь видят в истории активности только свои записи, в то время как администраторы видят всё.</li>";h+="<li><b>Редизайн активности:</b> История получила премиальный внешний вид, оптимизированный под мобильные экраны и светлую тему.</li>";h+="<li><b>Раздел FAQ:</b> В форму скачивания добавлена ссылка на инструкцию по решению частых проблем.</li>";h+="</ul>";b.innerHTML=h;m.style.display="flex";localStorage.setItem("last_seen_changelog_version","' + SITE_VERSION + '");}' +
+  'function showChangelogModal(){var m=document.getElementById("modal-changelog");if(!m)return;document.getElementById("changelog-ver").textContent="' + SITE_VERSION + '";var b=document.getElementById("changelog-body");var h="<ul style=\'margin:0;padding-left:20px;display:flex;flex-direction:column;gap:10px\'>";h+="<li><b>🎬 Исправлена загрузка YouTube:</b> Установлен ffmpeg на сервере, исправлен флаг параллельных фрагментов. Видео теперь качаются стабильно.</li>";h+="<li><b>📥 Авто-скачивание:</b> В настройках появились тогглы — авто-скачать на ПК и уведомления браузера.</li>";h+="<li><b>🎨 Синхронизация темы:</b> Акцентный цвет расширения теперь повторяет цвет сайта по аккаунту.</li>";h+="<li><b>🍪 YouTube Cookies:</b> Каждый пользователь может загрузить свои cookies для возрастных и приватных видео.</li>";h+="<li><b>🔐 Безопасность:</b> Пароли теперь хранятся в виде PBKDF2-хэша (100k итераций), случайный session secret.</li>";h+="<li><b>🗑 Убрана плашка «Недавние»</b> из навигации.</li>";h+="</ul>";b.innerHTML=h;m.style.display="flex";localStorage.setItem("last_seen_changelog_version","' + SITE_VERSION + '");}' +
   'function checkChangelog(){var last=localStorage.getItem("last_seen_changelog_version");if(last!=="' + SITE_VERSION + '"){showChangelogModal();}}' +
   'function copyOrShowLink(url){var full=window.location.origin+url;showToast("Публичная ссылка готова",full,full);}' +
   'function playDoneSound(){try{var ac=new (window.AudioContext||window.webkitAudioContext)();var o=ac.createOscillator(),g=ac.createGain();o.type="sine";o.frequency.setValueAtTime(660,ac.currentTime);o.frequency.setValueAtTime(880,ac.currentTime+.12);g.gain.setValueAtTime(.0001,ac.currentTime);g.gain.exponentialRampToValueAtTime(.08,ac.currentTime+.02);g.gain.exponentialRampToValueAtTime(.0001,ac.currentTime+.34);o.connect(g);g.connect(ac.destination);o.start();o.stop(ac.currentTime+.36);}catch(e){}}' +
