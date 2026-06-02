@@ -1,4 +1,4 @@
-// Sipliy Folder VPS — background service worker v2.5 (media DL + browse)
+// Sipliy Folder VPS — background service worker v2.6 (settings: notif/badge/poll)
 
 const ICON = 'icons/icon-128.png';
 const POLL_ALARM = 'poll-vps';
@@ -40,8 +40,15 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 function setupAlarms() {
-  chrome.alarms.get(POLL_ALARM,   a => { if (!a) chrome.alarms.create(POLL_ALARM,   { periodInMinutes: 0.25 }); });
-  chrome.alarms.get(UPDATE_ALARM, a => { if (!a) chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 360  }); }); // 6 ч
+  chrome.storage.local.get('pollSpeed', d => {
+    const period = (typeof d.pollSpeed === 'number' && d.pollSpeed > 0) ? d.pollSpeed : 0.5;
+    chrome.alarms.get(POLL_ALARM, a => {
+      if (!a || Math.abs(a.periodInMinutes - period) > 0.01) {
+        chrome.alarms.clear(POLL_ALARM, () => chrome.alarms.create(POLL_ALARM, { periodInMinutes: period }));
+      }
+    });
+  });
+  chrome.alarms.get(UPDATE_ALARM, a => { if (!a) chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 360 }); });
 }
 
 // ─── Alarm: опрос загрузок + синхронизация файлов ─────────
@@ -56,6 +63,12 @@ chrome.alarms.onAlarm.addListener(async alarm => {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
+  if (msg.type === 'set-poll-speed') {
+    const period = Math.max(0.25, Math.min(10, Number(msg.periodInMinutes) || 0.5));
+    chrome.alarms.clear(POLL_ALARM, () => chrome.alarms.create(POLL_ALARM, { periodInMinutes: period }));
+    sendResponse({ ok: true });
+    return;
+  }
   if (msg.type === 'add-url-download') {
     sendDownload(msg.url, { filename: msg.filename || '', forceAutoDownload: true })
       .then(data => sendResponse({ ok: true, ...(data || {}) }))
@@ -665,12 +678,24 @@ async function getTicketUrl(cfg, fileName) {
   return cfg.serverUrl + d.url;
 }
 function notify(message) {
-  chrome.notifications.create({ type: 'basic', iconUrl: chrome.runtime.getURL(ICON), title: 'Sipliy Folder VPS', message: String(message), priority: 1 });
+  chrome.storage.local.get('extNotif', d => {
+    if (d.extNotif === false) return;
+    chrome.notifications.create({ type: 'basic', iconUrl: chrome.runtime.getURL(ICON), title: 'Sipliy Folder VPS', message: String(message), priority: 1 });
+  });
 }
-function flashBadge(text, color) { chrome.action.setBadgeBackgroundColor({ color }); chrome.action.setBadgeText({ text }); }
+function flashBadge(text, color) {
+  chrome.storage.local.get('extBadge', d => {
+    if (d.extBadge === false) return;
+    chrome.action.setBadgeBackgroundColor({ color });
+    chrome.action.setBadgeText({ text });
+  });
+}
 function updateBadge(count) {
-  if (count > 0) { chrome.action.setBadgeBackgroundColor({ color: '#6b509a' }); chrome.action.setBadgeText({ text: String(count) }); }
-  else chrome.action.setBadgeText({ text: '' });
+  chrome.storage.local.get('extBadge', d => {
+    if (d.extBadge === false) { chrome.action.setBadgeText({ text: '' }); return; }
+    if (count > 0) { chrome.action.setBadgeBackgroundColor({ color: '#6b509a' }); chrome.action.setBadgeText({ text: String(count) }); }
+    else chrome.action.setBadgeText({ text: '' });
+  });
 }
 async function refreshBadge() {
   const { pendingGids = {} } = await localGet('pendingGids');

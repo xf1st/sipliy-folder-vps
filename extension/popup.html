@@ -597,6 +597,43 @@ function applyExtAccent(hex){
       <button class="btn btn-secondary" id="test-dl-btn" style="width:100%;font-size:.76rem;padding:8px">🧪 Тест авто-загрузки на ПК</button>
     </div>
 
+    <hr class="settings-sep" style="margin:12px 0 10px">
+
+    <div class="toggle-row">
+      <div class="tl">
+        <strong>Уведомления</strong>
+        <span>Пуш при готовности файла</span>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="ext-notif" checked/>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row" style="margin-top:8px">
+      <div class="tl">
+        <strong>Бейдж счётчик</strong>
+        <span>Цифра на иконке расширения</span>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="ext-badge" checked/>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row" style="margin-top:8px;align-items:center">
+      <div class="tl">
+        <strong>Частота проверки</strong>
+        <span>Как часто спрашивать сервер</span>
+      </div>
+      <select id="poll-speed" style="background:var(--surf-hi);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:.72rem;font-weight:700;cursor:pointer;outline:none;">
+        <option value="0.25">15 сек</option>
+        <option value="0.5" selected>30 сек</option>
+        <option value="1">1 мин</option>
+        <option value="3">3 мин</option>
+      </select>
+    </div>
+
     <div class="footer">
       <span>v<span id="ext-version">2.9.0</span> <span id="update-badge" class="update-badge" style="display:none">Обновление!</span></span>
       <button class="btn-update-check" id="check-update-btn" title="Проверить обновление">🔄</button>

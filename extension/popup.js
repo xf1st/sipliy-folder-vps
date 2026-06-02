@@ -361,12 +361,34 @@ async function testConn(url, token) {
 }
 
 // ─── Global settings ──────────────────────────────────────
-chrome.storage.local.get('autoDownload', d => {
-  $('auto-dl').checked = d.autoDownload !== false;
-});
+chrome.storage.local.get(
+  ['autoDownload', 'extNotif', 'extBadge', 'pollSpeed'],
+  d => {
+    $('auto-dl').checked   = d.autoDownload !== false;
+    $('ext-notif').checked = d.extNotif     !== false;
+    $('ext-badge').checked = d.extBadge     !== false;
+    const ps = $('poll-speed');
+    if (ps && d.pollSpeed) ps.value = String(d.pollSpeed);
+  }
+);
+
 $('auto-dl').addEventListener('change', () =>
   chrome.storage.local.set({ autoDownload: $('auto-dl').checked })
 );
+$('ext-notif').addEventListener('change', () =>
+  chrome.storage.local.set({ extNotif: $('ext-notif').checked })
+);
+$('ext-badge').addEventListener('change', () => {
+  const on = $('ext-badge').checked;
+  chrome.storage.local.set({ extBadge: on });
+  if (!on) chrome.action.setBadgeText({ text: '' });
+});
+$('poll-speed').addEventListener('change', () => {
+  const v = parseFloat($('poll-speed').value);
+  chrome.storage.local.set({ pollSpeed: v });
+  // Tell background to recreate alarm with new period
+  chrome.runtime.sendMessage({ type: 'set-poll-speed', periodInMinutes: v }).catch(() => {});
+});
 
 $('test-dl-btn').addEventListener('click', async () => {
   const btn = $('test-dl-btn');
