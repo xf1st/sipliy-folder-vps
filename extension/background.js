@@ -334,7 +334,10 @@ async function syncVpsFilesForAccount(acc) {
       .filter(p => p.accountId === acc.id)
       .map(p => p.name)
   );
-  const newFiles = files.filter(f => !knownSet.has(f.name) && f.source !== 'upload' && !pendingNames.has(f.name));
+  // Filter out yt-dlp intermediate streams like "video.f399.mp4", "video.f140.m4a"
+  // These are temporary files deleted after merging — we only want the final merged file
+  const isYtdlpIntermediate = name => /\.\w*f\d+\.(mp4|m4a|webm|mkv|opus|wav|aac)$/i.test(name);
+  const newFiles = files.filter(f => !knownSet.has(f.name) && f.source !== 'upload' && !pendingNames.has(f.name) && !isYtdlpIntermediate(f.name));
 
   if (newFiles.length > 0) {
     const { readyFiles = [] } = await localGet('readyFiles');

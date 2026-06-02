@@ -119,7 +119,7 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.16.3';
+const SITE_VERSION = '2.16.4';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -620,7 +620,9 @@ function startMediaJob({ username, url, dir, relPath, mode, filename, quality })
   };
   jobs[id] = job;
   saveMediaJobs(jobs);
-  const child = spawn('yt-dlp', args, { cwd: dir });
+  // PYTHONUNBUFFERED=1 prevents Python from buffering stderr in pipe mode
+  // Without it, progress lines are held in a 4KB buffer and delivered all at once at the end
+  const child = spawn('yt-dlp', args, { cwd: dir, env: { ...process.env, PYTHONUNBUFFERED: '1' } });
   mediaProcesses.set(id, child);
   child.stdout.on('data', chunk => {
     const current = loadMediaJobs();
@@ -1151,9 +1153,10 @@ app.get('/api/downloads-ext', extCors, authToken, async (req, res) => {
 app.get('/api/files-ext', extCors, authToken, (req, res) => {
   const dir = userDir(req.tokenUser);
   try {
+    const ytdlpIntermediate = name => /\.\w*f\d+\.(mp4|m4a|webm|mkv|opus|wav|aac)$/i.test(name);
     const files = fs.readdirSync(dir)
       .filter(name => {
-        try { return fs.statSync(path.join(dir, name)).isFile(); } catch { return false; }
+        try { return fs.statSync(path.join(dir, name)).isFile() && !ytdlpIntermediate(name); } catch { return false; }
       })
       .map(name => {
         const s = fs.statSync(path.join(dir, name));
@@ -1244,7 +1247,7 @@ app.get('/api/ext/theme', extCors, authToken, (req, res) => {
   res.json({ accentHex: accentHex || '#a078ff' });
 });
 // Версия расширения (без авторизации — для OTA проверки)
-const EXT_VERSION = '2.14.1';
+const EXT_VERSION = '2.14.2';
 app.get('/api/ext/version', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').json({
     version: EXT_VERSION,
