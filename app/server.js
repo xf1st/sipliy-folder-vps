@@ -119,7 +119,7 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.16.0';
+const SITE_VERSION = '2.16.1';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -627,14 +627,22 @@ function startMediaJob({ username, url, dir, relPath, mode, filename, quality })
     const current = loadMediaJobs();
     const j = current[id];
     if (!j) return;
-    const IGNORE_PATTERNS = ['SABR', 'android client', 'missing a URL', 'player_client', 'JS runtime', 'javascript runtime', 'skipped as they are', 'streaming experiment', 'github.com/yt-dlp'];
-    const lines = String(chunk).trim().split(/\r?\n/).filter(l => {
-      const lc = l.toLowerCase();
-      return l.trim() && !IGNORE_PATTERNS.some(p => lc.includes(p.toLowerCase()));
+    j.status = j.status === 'starting' ? 'active' : j.status;
+    const allLines = String(chunk).split(/\r?\n/);
+    // yt-dlp writes ALL progress ([download] X%) to stderr — parse it here
+    allLines.forEach(line => parseYtDlpLine(j, line));
+    // Filter noise and extract real errors/warnings for display
+    const IGNORE_PATTERNS = ['SABR', 'android client', 'missing a URL', 'player_client', 'JS runtime', 'javascript runtime', 'skipped as they are', 'streaming experiment', 'github.com/yt-dlp', '[download]', '[info]', '[youtube]', '[ffmpeg]', '[Merger]', '[ExtractAudio]', '[VideoConvertor]'];
+    const displayLines = allLines.filter(l => {
+      const lt = l.trim();
+      return lt && !IGNORE_PATTERNS.some(p => lt.toLowerCase().includes(p.toLowerCase()));
     });
-    const realErrors = lines.filter(line => /^ERROR:/i.test(line));
+    const realErrors = displayLines.filter(line => /^ERROR:/i.test(line));
     if (realErrors.length) j.error = realErrors.slice(-2).join(' ');
-    else if (lines.length) j.warning = lines.slice(-2).join(' ');
+    else {
+      const warnLines = displayLines.filter(line => /^WARNING:/i.test(line));
+      if (warnLines.length) j.warning = warnLines.slice(-1).join(' ');
+    }
     j.updatedAt = new Date().toISOString();
     current[id] = j;
     saveMediaJobs(current);
@@ -6725,7 +6733,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'loadDisk();' +
   'loadTransfers();' +
   'checkConnection(true);' +
-  'setInterval(loadTransfers,5000);' +
+  'setInterval(function(){loadTransfers();},2000);' +
   'setInterval(loadDisk,60000);' +
   'setInterval(function(){checkConnection(true);},15000);' +
   '</script>' +
