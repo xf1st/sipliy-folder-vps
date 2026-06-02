@@ -430,7 +430,7 @@ async function loadExtCookiesStatus(cfg) {
     });
     if (!r.ok) { sec.style.display = 'none'; return; } // not admin
     const d = await r.json();
-    const badge = $('ext-cookies-badge');
+    const badge = $('cookies-ext-badge');
     if (badge) {
       badge.textContent = d.exists ? ('✅ загружены ' + new Date(d.mtime).toLocaleDateString('ru-RU')) : 'не загружены';
       badge.style.background = d.exists ? 'rgba(74,222,128,.15)' : 'rgba(255,255,255,.06)';

@@ -50,6 +50,10 @@ function shareIsExpired(s) {
 const TOKENS_FILE = '/opt/vps-downloader/tokens.json';
 const SETTINGS_FILE = '/opt/vps-downloader/settings.json';
 const YTDLP_COOKIES_FILE = '/opt/vps-downloader/yt-cookies.txt';
+function getUserCookiesPath(username) {
+  if (!username) return YTDLP_COOKIES_FILE;
+  return `/opt/vps-downloader/yt-cookies-${username}.txt`;
+}
 const TG_TOKEN = '8981938565:AAGrVbZwhuuw_AEFauvwr4tWVVhOgUCHNQ4';
 const TG_BOT_NAME = 'SiplyiFolderUpload_bot';
 const TG_USERS_FILE = '/opt/vps-downloader/tg-users.json';
@@ -115,16 +119,50 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.13.0';
+const SITE_VERSION = '2.14.5';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
 const USERS_FILE = '/opt/vps-downloader/users.json';
+const SECRET_FILE = '/opt/vps-downloader/session-secret.txt';
+
+// ─── Password helpers (PBKDF2 / SHA-256, 100 000 итераций) ───────────────────
+function hashPassword(plain) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.pbkdf2Sync(String(plain).trim(), Buffer.from(salt, 'hex'), 100000, 32, 'sha256').toString('hex');
+  return { passwordHash: hash, passwordSalt: salt };
+}
+function verifyPassword(plain, user) {
+  if (!user) return false;
+  // Новый формат: PBKDF2
+  if (user.passwordHash && user.passwordSalt) {
+    const test = crypto.pbkdf2Sync(String(plain).trim(), Buffer.from(user.passwordSalt, 'hex'), 100000, 32, 'sha256').toString('hex');
+    return test === user.passwordHash;
+  }
+  // Старый формат (plaintext) — используем при миграции
+  return user.password === plain;
+}
+
+// ─── Session secret: читаем из файла или генерируем новый ────────────────────
+function getSessionSecret() {
+  try {
+    const s = fs.readFileSync(SECRET_FILE, 'utf8').trim();
+    if (s && s.length >= 32) return s;
+  } catch {}
+  const secret = crypto.randomBytes(48).toString('hex');
+  try { fs.writeFileSync(SECRET_FILE, secret, { mode: 0o600 }); } catch {}
+  return secret;
+}
+
 function loadUsers() {
   try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); }
   catch {
-    const def = { xf1st: { password: '78457845Xf!', label: 'Admin', isAdmin: true } };
+    // Первый запуск: создаём admin с случайным паролем, выводим в лог
+    const tempPass = crypto.randomBytes(8).toString('hex');
+    const { passwordHash, passwordSalt } = hashPassword(tempPass);
+    const def = { xf1st: { passwordHash, passwordSalt, label: 'Admin', isAdmin: true } };
     writeJsonAtomic(USERS_FILE, def, { pretty: true });
+    console.log('\n⚠️  ПЕРВЫЙ ЗАПУСК — временный пароль для xf1st: ' + tempPass + '\n    Смени его в настройках сразу после входа!\n');
     return def;
   }
 }
@@ -287,7 +325,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static('/opt/vps-downloader/public', { maxAge: '7d' }));
 app.use(session({
   store: new FileStore({ path: '/opt/vps-downloader/sessions', ttl: 30 * 24 * 60 * 60 }),
-  secret: 'vps-dl-secret-key-2024',
+  secret: getSessionSecret(),
   resave: true,
   saveUninitialized: false,
   rolling: true,
@@ -491,15 +529,38 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
     '--restrict-filenames',
     '--no-mtime',
     '--print', 'after_move:filepath',
+    // Download 4 fragments in parallel — speeds up long videos significantly
+    '--concurrent-fragment-downloads', '4',
+    // Ensure HLS streams are saved as a single MPEG-TS container, not individual segments
+    '--hls-use-mpegts',
+    // Fix container issues after download (moov atom, etc.)
+    '--fixup', 'detect_or_warn',
     '-o', output,
   ];
-  if (mode === 'audio') args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
-  else if (mode === 'video') args.push('-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b', '--merge-output-format', 'mp4');
-  else args.push('-f', 'b/bv*+ba/b', '--merge-output-format', 'mp4');
+  if (mode === 'audio') {
+    args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
+  } else if (mode === 'video') {
+    // Prefer a pre-muxed mp4 first (no merge needed), then fallback to best separate streams
+    args.push(
+      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+      '--merge-output-format', 'mp4',
+    );
+  } else {
+    // Best quality mode — same strategy
+    args.push(
+      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+      '--merge-output-format', 'mp4',
+    );
+  }
   // Use cookies file if uploaded (for age-restricted / auth-required content)
-  if (fs.existsSync(YTDLP_COOKIES_FILE)) args.push('--cookies', YTDLP_COOKIES_FILE);
-  // Workaround: use tv client to avoid JS runtime requirement
-  args.push('--extractor-args', 'youtube:player_client=tv,web');
+  const userCookiesPath = getUserCookiesPath(username);
+  if (fs.existsSync(userCookiesPath)) {
+    args.push('--cookies', userCookiesPath);
+  } else if (fs.existsSync(YTDLP_COOKIES_FILE)) {
+    args.push('--cookies', YTDLP_COOKIES_FILE);
+  }
+  // Workaround: use default client without tv to avoid DRM/format errors
+  args.push('--extractor-args', 'youtube:player_client=default,-tv');
   args.push(url);
   const job = {
     id,
@@ -608,6 +669,7 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
   return job;
 }
 // ─── Routes ─────────────────────────────────────────────────────
+app.get('/faq.html', auth, (req, res) => res.send(faqPage()));
 app.get('/login', (req, res) => {
   if (req.session.user) return res.redirect('/');
   res.send(loginPage());
@@ -622,7 +684,16 @@ app.post('/login', (req, res) => {
   const { username, password } = req.body;
   const users = loadUsers();
   const user = users[username];
-  if (user && user.password === password) {
+  if (user && verifyPassword(password, user)) {
+    // Миграция: если пароль хранится в старом plaintext-формате — хешируем на лету
+    if (!user.passwordHash && user.password) {
+      const { passwordHash, passwordSalt } = hashPassword(password);
+      user.passwordHash = passwordHash;
+      user.passwordSalt = passwordSalt;
+      delete user.password;
+      users[username] = user;
+      saveUsers(users);
+    }
     loginOk(ip);
     req.session.user = username;
     req.session.save(() => res.redirect('/'));
@@ -673,8 +744,8 @@ app.get('/api/disk', auth, (req, res) => {
   // 2. Fallback for older Node.js versions on Unix-like systems (Linux/macOS)
   if (process.platform !== 'win32') {
     try {
-      const { execSync } = require('child_process');
-      const out = execSync(`df -Pk "${root}"`, { timeout: 2000, encoding: 'utf8' });
+      const { execFileSync } = require('child_process');
+      const out = execFileSync('df', ['-Pk', root], { timeout: 2000, encoding: 'utf8' });
       const lines = out.trim().split('\n');
       if (lines.length >= 2) {
         const parts = lines[1].replace(/\s+/g, ' ').split(' ');
@@ -1256,9 +1327,11 @@ app.post('/api/users', auth, (req, res) => {
   const { username, password, label } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Логин и пароль обязательны' });
   if (!/^[a-z0-9_]{2,32}$/.test(username)) return res.status(400).json({ error: 'Логин: только строчные буквы, цифры, _ (2–32 символа)' });
+  if (password.length < 6) return res.status(400).json({ error: 'Пароль минимум 6 символов' });
   const users = loadUsers();
   if (users[username]) return res.status(409).json({ error: 'Пользователь уже существует' });
-  users[username] = { password, label: label || username, isAdmin: false };
+  const { passwordHash, passwordSalt } = hashPassword(password);
+  users[username] = { passwordHash, passwordSalt, label: label || username, isAdmin: false };
   saveUsers(users);
   res.json({ ok: true });
 });
@@ -1312,8 +1385,12 @@ app.post('/api/change-password', auth, (req, res) => {
   const users = loadUsers();
   const me = users[req.session.user];
   if (!me) return res.status(404).json({ error: 'Пользователь не найден' });
-  if (me.password !== currentPassword) return res.status(403).json({ error: 'Неверный текущий пароль' });
-  me.password = newPassword;
+  if (!verifyPassword(currentPassword, me)) return res.status(403).json({ error: 'Неверный текущий пароль' });
+  const { passwordHash, passwordSalt } = hashPassword(newPassword);
+  me.passwordHash = passwordHash;
+  me.passwordSalt = passwordSalt;
+  delete me.password; // удаляем старый plaintext если был
+  users[req.session.user] = me;
   saveUsers(users);
   res.json({ ok: true });
 });
@@ -1360,14 +1437,13 @@ const cookiesUpload = multer({
   fileFilter: (req, file, cb) => cb(null, true),
 });
 app.get('/api/settings/cookies', auth, (req, res) => {
-  if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Admin only' });
-  const exists = fs.existsSync(YTDLP_COOKIES_FILE);
+  const userCookiesPath = getUserCookiesPath(req.session.user);
+  const exists = fs.existsSync(userCookiesPath);
   let mtime = null;
-  if (exists) { try { mtime = fs.statSync(YTDLP_COOKIES_FILE).mtime.toISOString(); } catch {} }
+  if (exists) { try { mtime = fs.statSync(userCookiesPath).mtime.toISOString(); } catch {} }
   res.json({ exists, mtime });
 });
 app.post('/api/settings/cookies', auth, (req, res) => {
-  if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Admin only' });
   cookiesUpload.single('cookies')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'Файл не передан' });
@@ -1375,26 +1451,26 @@ app.post('/api/settings/cookies', auth, (req, res) => {
     if (!txt.includes('youtube.com') && !txt.includes('# Netscape HTTP Cookie File')) {
       return res.status(400).json({ error: 'Неверный формат. Нужен Netscape cookies.txt от YouTube.' });
     }
-    fs.writeFileSync(YTDLP_COOKIES_FILE, txt, 'utf8');
+    const userCookiesPath = getUserCookiesPath(req.session.user);
+    fs.writeFileSync(userCookiesPath, txt, 'utf8');
     res.json({ ok: true });
   });
 });
 app.delete('/api/settings/cookies', auth, (req, res) => {
-  if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Admin only' });
-  try { if (fs.existsSync(YTDLP_COOKIES_FILE)) fs.unlinkSync(YTDLP_COOKIES_FILE); } catch {}
+  const userCookiesPath = getUserCookiesPath(req.session.user);
+  try { if (fs.existsSync(userCookiesPath)) fs.unlinkSync(userCookiesPath); } catch {}
   res.json({ ok: true });
 });
-// Cookies upload via extension (Bearer auth, admin only)
+// Cookies upload via extension (Bearer auth)
 app.options('/api/ext/cookies', (req, res) => res.set(EXT_CORS).sendStatus(204));
 app.get('/api/ext/cookies', extCors, authToken, (req, res) => {
-  if (!isAdmin(req.tokenUser)) return res.status(403).set(EXT_CORS).json({ error: 'Admin only' });
-  const exists = fs.existsSync(YTDLP_COOKIES_FILE);
+  const userCookiesPath = getUserCookiesPath(req.tokenUser);
+  const exists = fs.existsSync(userCookiesPath);
   let mtime = null;
-  if (exists) { try { mtime = fs.statSync(YTDLP_COOKIES_FILE).mtime.toISOString(); } catch {} }
+  if (exists) { try { mtime = fs.statSync(userCookiesPath).mtime.toISOString(); } catch {} }
   res.set(EXT_CORS).json({ exists, mtime });
 });
 app.post('/api/ext/cookies', extCors, authToken, (req, res) => {
-  if (!isAdmin(req.tokenUser)) return res.status(403).set(EXT_CORS).json({ error: 'Admin only' });
   cookiesUpload.single('cookies')(req, res, (err) => {
     if (err) return res.status(400).set(EXT_CORS).json({ error: err.message });
     if (!req.file) return res.status(400).set(EXT_CORS).json({ error: 'Файл не передан' });
@@ -1402,7 +1478,8 @@ app.post('/api/ext/cookies', extCors, authToken, (req, res) => {
     if (!txt.includes('youtube.com') && !txt.includes('# Netscape HTTP Cookie File')) {
       return res.status(400).set(EXT_CORS).json({ error: 'Неверный формат. Нужен Netscape cookies.txt.' });
     }
-    fs.writeFileSync(YTDLP_COOKIES_FILE, txt, 'utf8');
+    const userCookiesPath = getUserCookiesPath(req.tokenUser);
+    fs.writeFileSync(userCookiesPath, txt, 'utf8');
     res.set(EXT_CORS).json({ ok: true });
   });
 });
@@ -2107,7 +2184,13 @@ app.get('/api/fm/recent', auth, (req, res) => {
 });
 // GET /api/activity
 app.get('/api/activity', auth, (req, res) => {
-  res.json(loadActivity());
+  const allActivities = loadActivity();
+  if (isAdmin(req.session.user)) {
+    res.json(allActivities);
+  } else {
+    const filtered = allActivities.filter(a => a.username === req.session.user);
+    res.json(filtered);
+  }
 });
 // GET /api/fm/search?q=
 app.get('/api/fm/search', auth, (req, res) => {
@@ -2794,6 +2877,266 @@ function loginPage(error) {
     '</div>' +
   '</div>' +
   '</body></html>';
+}
+function faqPage() {
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>FAQ & Решение проблем — CloudSpace</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>ℹ️</text></svg>">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&family=Manrope:wght@400;500;700;800&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200">
+  <style>
+    :root {
+      --bg: #12101a;
+      --surf: #1b1b1f;
+      --surf-cont: #1f1f23;
+      --surf-hi: #2a292e;
+      --on-surf: #e4e1e7;
+      --on-surf-var: #c9c5cf;
+      --outline: #84948b;
+      --accent-color: #a078ff;
+      --accent-light: #d2bbff;
+      --accent-gradient: linear-gradient(135deg, #a078ff, #7c3aed);
+      --font-display: "Plus Jakarta Sans", Manrope, sans-serif;
+    }
+    body {
+      font-family: Manrope, sans-serif;
+      background: var(--bg);
+      color: var(--on-surf);
+      margin: 0;
+      padding: 0;
+      line-height: 1.6;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    .container {
+      width: 100%;
+      max-width: 760px;
+      padding: 40px 24px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+    .header-icon {
+      width: 52px;
+      height: 52px;
+      border-radius: 18px;
+      background: var(--accent-gradient);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      box-shadow: 0 8px 24px rgba(160, 120, 255, 0.3);
+    }
+    .header-icon span {
+      font-size: 28px;
+    }
+    h1 {
+      font-family: var(--font-display);
+      font-size: 28px;
+      font-weight: 800;
+      margin: 0;
+      color: #fff;
+      letter-spacing: -0.5px;
+    }
+    .header-sub {
+      font-size: 14px;
+      color: var(--on-surf-var);
+      margin-top: 4px;
+    }
+    .card {
+      background: var(--surf-cont);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 24px;
+      padding: 28px;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+      margin-bottom: 20px;
+    }
+    .faq-item {
+      margin-bottom: 24px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      padding-bottom: 24px;
+    }
+    .faq-item:last-child {
+      margin-bottom: 0;
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+    .faq-question {
+      font-family: var(--font-display);
+      font-size: 18px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .faq-question span {
+      color: var(--accent-light);
+    }
+    .faq-answer {
+      font-size: 14px;
+      color: var(--on-surf-var);
+    }
+    .faq-answer p {
+      margin: 0 0 12px;
+    }
+    .faq-answer p:last-child {
+      margin-bottom: 0;
+    }
+    .faq-answer ul, .faq-answer ol {
+      margin: 8px 0;
+      padding-left: 20px;
+    }
+    .faq-answer li {
+      margin-bottom: 6px;
+    }
+    .badge {
+      background: rgba(160, 120, 255, 0.15);
+      border: 1px solid rgba(160, 120, 255, 0.3);
+      color: var(--accent-light);
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    a {
+      color: var(--accent-light);
+      text-decoration: none;
+      border-bottom: 1px dotted var(--accent-light);
+      transition: color 0.2s, border-color 0.2s;
+    }
+    a:hover {
+      color: #fff;
+      border-bottom-color: #fff;
+    }
+    .btn-back {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--surf-hi);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--on-surf);
+      font-size: 13px;
+      font-weight: 700;
+      padding: 10px 20px;
+      border-radius: 9999px;
+      cursor: pointer;
+      text-decoration: none;
+      transition: background 0.2s, border-color 0.2s, transform 0.2s;
+      margin-top: 10px;
+    }
+    .btn-back:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.15);
+      transform: translateY(-1px);
+    }
+    .alert-box {
+      background: rgba(255, 100, 80, 0.1);
+      border: 1px solid rgba(255, 100, 80, 0.25);
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 20px;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .alert-box span {
+      color: #ff6454;
+      font-size: 24px;
+      flex-shrink: 0;
+    }
+    .alert-box-content {
+      font-size: 13px;
+      color: #ffdad6;
+      line-height: 1.5;
+    }
+    .alert-box-content b {
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-icon">
+        <span class="material-symbols-outlined">help_center</span>
+      </div>
+      <div>
+        <h1>FAQ и Решение проблем</h1>
+        <div class="header-sub">Помощь по скачиванию видео и настройке YouTube Cookies</div>
+      </div>
+    </div>
+
+    <div class="alert-box">
+      <span class="material-symbols-outlined">warning</span>
+      <div class="alert-box-content">
+        <b>Не скачивается YouTube видео?</b> YouTube ввёл жесткие ограничения на скачивание со сторонних серверов (включая VPS). Без загруженного файла cookies.txt большинство видеороликов (особенно приватные, с ограничением по возрасту или новые видео) скачиваться не будут.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="faq-item">
+        <div class="faq-question">
+          <span class="material-symbols-outlined">cookie</span>
+          Как настроить YouTube Cookies для загрузки?
+        </div>
+        <div class="faq-answer">
+          <p>Чтобы скачивание работало стабильно, вам необходимо передать серверу файл авторизации cookies с вашего браузера:</p>
+          <ol>
+            <li>Установите расширение в браузер (например, <b>Get cookies.txt LOCALLY</b> для Chrome/Edge/Opera или <b>cookies.txt</b> для Firefox).</li>
+            <li>Откройте сайт <a href="https://www.youtube.com" target="_blank">YouTube</a> в новой вкладке и убедитесь, что вы авторизованы (или просто находитесь на главной странице).</li>
+            <li>Нажмите на иконку расширения и выберите <b>Export</b> (или скачайте cookies для домена youtube.com). Файл должен называться примерно <code>youtube.com_cookies.txt</code> или <code>cookies.txt</code>.</li>
+            <li>Перейдите в CloudSpace → <b>Настройки</b> → раздел <b>🍪 YouTube Cookies</b>.</li>
+            <li>Нажмите <b>Загрузить cookies.txt</b> и выберите скачанный файл.</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="faq-item">
+        <div class="faq-question">
+          <span class="material-symbols-outlined">error</span>
+          Что делать при ошибке "Requested format is not available"?
+        </div>
+        <div class="faq-answer">
+          <p>Эта ошибка возникает, когда YouTube блокирует запросы к определенным потокам видео или требует подтверждения возраста/авторизации.</p>
+          <ul>
+            <li>Убедитесь, что вы загрузили свежий файл cookies.txt в настройках CloudSpace.</li>
+            <li>Попробуйте сменить тип загрузки с <b>Видео</b> на <b>Лучшее качество</b> (или наоборот).</li>
+            <li>Cookies имеют свойство устаревать. Если скачивание работало, но перестало — удалите старые куки в настройках и загрузите новые.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="faq-item">
+        <div class="faq-question">
+          <span class="material-symbols-outlined">admin_panel_settings</span>
+          Кто может управлять YouTube Cookies?
+        </div>
+        <div class="faq-answer">
+          <p>Любой авторизованный пользователь CloudSpace может загружать и удалять собственные YouTube Cookies.</p>
+          <p>Сервер автоматически использует ваши личные cookies при ваших скачиваниях. Если у вас они не загружены, сервер попытается использовать общие cookies, предоставленные администратором.</p>
+        </div>
+      </div>
+    </div>
+
+    <a href="/cloud" class="btn-back">
+      <span class="material-symbols-outlined">arrow_back</span>
+      Вернуться в CloudSpace
+    </a>
+  </div>
+</body>
+</html>`;
 }
 function mainPage(username) {
   const usersData = loadUsers();
@@ -3876,6 +4219,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '#upload-panel{display:none;position:fixed;right:24px;bottom:24px;z-index:350;width:min(420px,calc(100vw - 48px));background:var(--surf-cont);border:none;border-radius:24px;padding:20px;box-shadow:0 20px 70px rgba(0,0,0,.55);animation:slideUp .32s var(--m3-spring) both}' +
   '#toast{display:none;flex-direction:column;position:fixed;right:24px;bottom:24px;z-index:650;width:min(360px,calc(100vw - 48px));background:#18181c;border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,0.5);animation:slideUp .28s var(--m3-spring) both;box-sizing:border-box} #toast .toast-circle{transition:transform .2s cubic-bezier(.4,0,.2,1)} #toast .toast-circle:hover{transform:scale(1.08);background:color-mix(in srgb,var(--accent-color) 18%,#1b1b1e)!important}' +
   '#connection-pill{display:none;position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:700;align-items:center;gap:8px;background:rgba(28,25,33,.94);border:1px solid var(--accent-color);border-radius:9999px;padding:8px 14px;color:var(--on-surf);font-size:12px;font-weight:800;box-shadow:0 10px 34px rgba(0,0,0,.42);backdrop-filter:blur(18px)}' +
+  '.activity-row{background:var(--surf-cont);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px;transition:all .22s cubic-bezier(0.4,0,0.2,1);position:relative;overflow:hidden}' +
+  '.activity-row:hover{background:var(--surf-hi);border-color:color-mix(in srgb,var(--accent-color) 40%,rgba(255,255,255,0.12));transform:translateY(-1px);box-shadow:0 6px 20px rgba(0,0,0,0.15)}' +
+  '.activity-user-badge{font-size:11px;font-weight:700;color:var(--accent-light);background:var(--accent-bg);border:1px solid color-mix(in srgb,var(--accent-color) 30%,transparent);padding:2px 8px;border-radius:6px;display:inline-block}' +
+  'body.light .activity-row{background:#ffffff;border-color:#e4e1eb}' +
+  'body.light .activity-row:hover{background:#f8f6fc;border-color:var(--accent-color)}' +
+  '@media (max-width:768px){.activity-row{flex-direction:column;align-items:flex-start!important;gap:12px!important}.activity-row>div:last-child{align-items:flex-start!important;text-align:left!important;width:100%}}' +
   '#connection-pill.offline{display:flex;border-color:#93000a;color:#ffdad6}' +
   '#connection-pill.checking{display:flex;border-color:var(--accent-color);color:var(--accent-light)}' +
   '#connection-pill .dot{width:8px;height:8px;border-radius:9999px;background:var(--accent-color);box-shadow:0 0 12px var(--accent-glow)}' +
@@ -4112,6 +4461,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.mobile-toolbar [data-action="toggle-theme"]{font-size:0!important}' +
   '.mobile-toolbar [data-action="toggle-theme"]::before{content:"contrast";font-family:"Material Symbols Outlined";font-size:26px}' +
   '.mobile-toolbar [data-action="upload-btn"]::before{content:"upload";font-family:"Material Symbols Outlined";font-size:34px;font-variation-settings:"FILL" 1,"wght" 700,"GRAD" 0,"opsz" 32}' +
+  '.mobile-toolbar [data-action="upload-btn"] span{display:none!important}' +
   '.mobile-actions{display:flex!important;padding:0 20px 28px!important;gap:10px!important;overflow-x:auto;border-bottom:0!important;background:transparent!important}' +
   '.mobile-actions button{white-space:nowrap;min-height:44px;background:var(--surf-hi);border:none;color:var(--on-surf)}' +
   '#mobile-storage{display:block!important;margin:0 20px 34px!important;padding:20px 28px!important}' +
@@ -4185,9 +4535,15 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '#preview-info{max-height:30dvh!important}' +
   '.preview-media-wrap{min-height:180px!important}' +
   '.preview-media-wrap .plyr video{max-height:44dvh!important}' +
-  '.mv-top{min-height:58px!important;height:auto!important}' +
-  '.mv-title{font-size:13px!important}' +
-  '.mv-icon{width:38px!important;height:38px!important}' +
+  '.mv-top{min-height:48px!important;height:48px!important;gap:4px!important;padding:0 8px!important}' +
+  '.mv-title{font-size:12px!important;margin-right:4px!important}' +
+  '.mv-icon{width:32px!important;height:32px!important;background:transparent!important;border:none!important}' +
+  '.mv-icon span{font-size:20px!important}' +
+  '.plyr__controls{padding:6px!important}' +
+  '.plyr__controls .plyr__control{padding:6px!important}' +
+  '.plyr__time{font-size:11px!important}' +
+  '.pl-carousel::-webkit-scrollbar{display:none!important}' +
+  '.pl-carousel{scrollbar-width:none!important}' +
   '.mv-stage{padding:8px!important}' +
   '.mv-stage .plyr video{max-height:calc(100dvh - 132px)!important}' +
   '.modal-backdrop{align-items:flex-end!important;padding:10px!important;z-index:800!important}' +
@@ -4225,6 +4581,26 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<header class="mobile-topbar">' +
   '<div class="mobile-avatar"><span class="material-symbols-outlined">person</span></div>' +
   '<div class="mobile-brand">CloudSpace</div>' +
+  '<div id="mobile-header-player" style="display:none;align-items:center;width:100%;height:100%;gap:10px">' +
+  '  <div class="player-cover-art" style="width:36px;height:36px;border-radius:8px;font-size:18px;box-shadow:none">' +
+  '    <span class="material-symbols-outlined" style="font-size:20px">music_note</span>' +
+  '  </div>' +
+  '  <div style="flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center">' +
+  '    <div id="m-player-title" style="font-size:12px;font-weight:800;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.2">—</div>' +
+  '    <div id="m-player-artist" style="font-size:10px;color:#958ea0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.2;margin-top:1px">—</div>' +
+  '  </div>' +
+  '  <div style="display:flex;align-items:center;gap:4px">' +
+  '    <button class="btn-ghost" id="m-player-btn-play" title="Воспроизведение" style="width:36px!important;height:36px!important;min-height:36px!important;padding:0!important;border-radius:50%!important;display:flex!important;align-items:center;justify-content:center">' +
+  '      <span class="material-symbols-outlined" id="m-player-play-icon" style="font-size:22px">play_arrow</span>' +
+  '    </button>' +
+  '    <button class="btn-ghost" id="m-player-btn-next" title="Следующий трек" style="width:36px!important;height:36px!important;min-height:36px!important;padding:0!important;border-radius:50%!important;display:flex!important;align-items:center;justify-content:center">' +
+  '      <span class="material-symbols-outlined" style="font-size:22px">skip_next</span>' +
+  '    </button>' +
+  '    <button class="btn-ghost" id="m-player-btn-close" title="Закрыть плеер" style="width:36px!important;height:36px!important;min-height:36px!important;padding:0!important;border-radius:50%!important;display:flex!important;align-items:center;justify-content:center;color:#958ea0">' +
+  '      <span class="material-symbols-outlined" style="font-size:20px">close</span>' +
+  '    </button>' +
+  '  </div>' +
+  '</div>' +
   '</header>' +
   /* ── SIDEBAR ── */
   '<aside class="sidebar flex flex-col py-6 px-4 gap-2 sticky top-0 h-screen overflow-y-auto">' +
@@ -4506,6 +4882,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="url-name-hint" style="font-size:11px;color:var(--on-surf-var);margin-bottom:14px">Для медиа расширение добавится автоматически: .mp4 или .mp3</div>' +
   /* status */
   '<div id="url-status" style="font-size:12px;color:var(--on-surf-var);min-height:18px;margin-bottom:14px"></div>' +
+  '<div style="font-size:11px;color:#958ea0;margin-bottom:14px;display:flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:14px;color:var(--accent-light)">info</span>Не загружается YouTube? <a href="/faq.html" target="_blank" style="color:var(--accent-light);text-decoration:none;border-bottom:1px dotted var(--accent-light)">Решения проблем в FAQ</a></div>' +
   /* buttons */
   '<div style="display:flex;gap:10px;justify-content:flex-end">' +
   '<button class="btn-ghost" data-action="close-url-modal">Отмена</button>' +
@@ -4572,6 +4949,15 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '</div>' +
   '<div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn-primary" data-action="sm-create"><span class="material-symbols-outlined">add_link</span> Создать ссылку</button></div>' +
   '</div>' +
+  '</div></div>' +
+  '<div id="modal-changelog" class="modal-backdrop" style="display:none">' +
+  '<div class="modal" style="width:min(500px,94vw);max-height:80vh;display:flex;flex-direction:column;padding:24px;border-radius:24px;background:var(--surf-cont);border:1px solid rgba(255,255,255,.05)">' +
+  '  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">' +
+  '    <span class="material-symbols-outlined" style="color:var(--accent-color);font-size:28px">campaign</span>' +
+  '    <div style="font-weight:800;font-size:18px;color:var(--on-surf);flex:1">Что нового в версии <span id="changelog-ver"></span></div>' +
+  '  </div>' +
+  '  <div id="changelog-body" style="flex:1;overflow-y:auto;font-size:13px;line-height:1.6;color:#cbc3d7;margin-bottom:18px;max-height:50vh;padding-right:4px"></div>' +
+  '  <div style="display:flex;justify-content:flex-end"><button class="btn-primary" data-action="close-changelog" style="min-width:100px">Отлично</button></div>' +
   '</div></div>' +
   '<script>' +
   'var userIsAdmin = ' + (profile.isAdmin ? 'true' : 'false') + ';' +
@@ -4704,6 +5090,9 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function qrImageUrl(url){return "/api/qr?data="+encodeURIComponent(url);}' +
   'function openQrModal(url){var full=url||toastUrl;if(!full)return;toastUrl=full;document.getElementById("qr-link-text").textContent=full;document.getElementById("qr-img").src=qrImageUrl(full);document.getElementById("qr-open-link").href=full;document.getElementById("modal-qr").style.display="flex";}' +
   'function closeQrModal(){document.getElementById("modal-qr").style.display="none";document.getElementById("qr-img").removeAttribute("src");}' +
+  'function closeChangelogModal(){document.getElementById("modal-changelog").style.display="none";}' +
+  'function showChangelogModal(){var m=document.getElementById("modal-changelog");if(!m)return;document.getElementById("changelog-ver").textContent="' + SITE_VERSION + '";var b=document.getElementById("changelog-body");var h="<ul style=\'margin:0;padding-left:20px;display:flex;flex-direction:column;gap:10px\'>";h+="<li><b>YouTube Cookies для всех:</b> На странице настроек теперь каждый пользователь может загрузить свои куки-файлы для обхода блокировок YouTube.</li>";h+="<li><b>Стабильное скачивание:</b> Исправлена проблема DRM/недоступности форматов YouTube за счет оптимизации клиентов парсера.</li>";h+="<li><b>Конфиденциальность:</b> Обычные пользователи теперь видят в истории активности только свои записи, в то время как администраторы видят всё.</li>";h+="<li><b>Редизайн активности:</b> История получила премиальный внешний вид, оптимизированный под мобильные экраны и светлую тему.</li>";h+="<li><b>Раздел FAQ:</b> В форму скачивания добавлена ссылка на инструкцию по решению частых проблем.</li>";h+="</ul>";b.innerHTML=h;m.style.display="flex";localStorage.setItem("last_seen_changelog_version","' + SITE_VERSION + '");}' +
+  'function checkChangelog(){var last=localStorage.getItem("last_seen_changelog_version");if(last!=="' + SITE_VERSION + '"){showChangelogModal();}}' +
   'function copyOrShowLink(url){var full=window.location.origin+url;showToast("Публичная ссылка готова",full,full);}' +
   'function playDoneSound(){try{var ac=new (window.AudioContext||window.webkitAudioContext)();var o=ac.createOscillator(),g=ac.createGain();o.type="sine";o.frequency.setValueAtTime(660,ac.currentTime);o.frequency.setValueAtTime(880,ac.currentTime+.12);g.gain.setValueAtTime(.0001,ac.currentTime);g.gain.exponentialRampToValueAtTime(.08,ac.currentTime+.02);g.gain.exponentialRampToValueAtTime(.0001,ac.currentTime+.34);o.connect(g);g.connect(ac.destination);o.start();o.stop(ac.currentTime+.36);}catch(e){}}' +
   'function notifyDone(name){playDoneSound();showToast("Загрузка завершена",name||"Файл готов","");if("Notification" in window){if(Notification.permission==="granted")new Notification("CloudSpace: загрузка завершена",{body:name||"Файл готов"});else if(Notification.permission==="default")Notification.requestPermission().then(function(p){if(p==="granted")new Notification("CloudSpace: загрузка завершена",{body:name||"Файл готов"});});}}' +
@@ -4800,6 +5189,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   "  h+='<select id=\"dash-mode-inp\" class=\"inp\"><option value=\"file\">Обычный файл</option><option value=\"video\">Видео</option><option value=\"audio\">MP3 audio</option><option value=\"best\">Лучший файл</option></select></div>';" +
   "  h+='<div id=\"dash-buttons-row\" style=\"display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center\"><input id=\"dash-name-inp\" class=\"inp\" placeholder=\"Имя без расширения, если нужно\" style=\"margin:0\"><button class=\"btn-primary\" data-action=\"dashboard-url-download\"><span class=\"material-symbols-outlined\">download</span> Загрузить</button><button id=\"dash-upload-btn\" class=\"btn-ghost\" data-action=\"upload-btn\"><span class=\"material-symbols-outlined\">upload_file</span> С ПК</button></div>';" +
   "  h+='<div id=\"dash-url-status\" style=\"font-size:12px;color:#8ff0a4;min-height:18px;margin-top:12px\"></div>';" +
+  "  h+='<div style=\"font-size:11px;color:#958ea0;margin-top:10px;display:flex;align-items:center;gap:6px\"><span class=\"material-symbols-outlined\" style=\"font-size:14px;color:var(--accent-light)\">info</span>Не загружается YouTube? <a href=\"/faq.html\" target=\"_blank\" style=\"color:var(--accent-light);text-decoration:none;border-bottom:1px dotted var(--accent-light)\">Попробуйте cookies.txt или откройте FAQ</a></div>';" +
   "  h+='</div>';" +
   "  h+='<div style=\"display:grid;grid-template-rows:auto 1fr;gap:18px\">';" +
   "  h+='<div class=\"card\" data-action=\"nav-files\" style=\"margin:0;padding:24px;cursor:pointer;border-radius:28px;background:linear-gradient(145deg,color-mix(in srgb,var(--accent-color) 12%,var(--surf-cont)),var(--surf-cont));min-height:160px;transition:transform .3s var(--m3-spring),box-shadow .3s\"><div style=\"display:flex;align-items:center;justify-content:space-between;gap:12px\"><div style=\"width:48px;height:48px;border-radius:16px;background:color-mix(in srgb,var(--accent-color) 22%,var(--surf-hi));display:flex;align-items:center;justify-content:center\"><span class=\"material-symbols-outlined\" style=\"font-size:28px;color:var(--accent-light);font-variation-settings:chr(39)FILL chr(39) 1,chr(39)wght chr(39) 600,chr(39)GRAD chr(39) 0,chr(39)opsz chr(39) 28\">folder_open</span></div><span class=\"material-symbols-outlined\" style=\"color:var(--outline)\">arrow_forward_ios</span></div><div style=\"font-size:24px;font-weight:800;color:var(--on-surf);margin-top:20px;font-family:var(--font-display);letter-spacing:-.01em\">Мои файлы</div><div id=\"dash-files-meta\" style=\"font-size:13px;color:var(--on-surf-var);margin-top:6px\">Считаю хранилище...</div></div>';" +
@@ -5046,17 +5436,17 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    h+=\'<div style="display:flex;flex-direction:column;gap:10px">\';' +
   '    for(var i=0;i<items.length;i++){' +
   '      var x=items[i],style=getActivityActionStyle(x.action);' +
-  '      h+=\'<div class="history-row" style="background:#1b1b1e;border:1px solid #2d2936;border-radius:14px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px;transition:all .2s">\' +' +
+  '      h+=\'<div class="activity-row">\' +' +
   '        \'<div style="display:flex;align-items:center;gap:14px;min-width:0;flex:1">\' +' +
-  '          \'<div style="width:40px;height:40px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:\' + style.color + \'"><span class="material-symbols-outlined" style="font-size:22px">\' + style.icon + \'</span></div>\' +' +
+  '          \'<div style="width:42px;height:42px;border-radius:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:\' + style.color + \'"><span class="material-symbols-outlined" style="font-size:22px">\' + style.icon + \'</span></div>\' +' +
   '          \'<div style="min-width:0;text-align:left;">\' +' +
-  '            \'<div style="font-size:14px;font-weight:700;color:#e4e1e6">\' + H(x.action) + \'</div>\' +' +
-  '            \'<div style="font-size:12px;color:#cbc3d7;margin-top:4px;word-break:break-all">\' + H(x.details||"") + \'</div>\' +' +
+  '            \'<div style="font-size:14px;font-weight:800;color:var(--on-surf)">\' + H(x.action) + \'</div>\' +' +
+  '            \'<div style="font-size:12px;color:var(--outline);margin-top:4px;word-break:break-all">\' + H(x.details||"") + \'</div>\' +' +
   '          \'</div>\' +' +
   '        \'</div>\' +' +
   '        \'<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;text-align:right">\' +' +
-  '          \'<span style="font-size:11px;font-weight:600;color:\' + style.color + \';background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);padding:2px 8px;border-radius:6px">@\' + H(x.username) + \'</span>\' +' +
-  '          \'<span style="font-size:11px;color:#958ea0;margin-top:2px">\' + fmtDateTime(x.timestamp) + \'</span>\' +' +
+  '          \'<span class="activity-user-badge">@\' + H(x.username) + \'</span>\' +' +
+  '          \'<span style="font-size:11px;color:var(--outline);margin-top:2px">\' + fmtDateTime(x.timestamp) + \'</span>\' +' +
   '        \'</div>\' +' +
   '      \'</div>\';' +
   '    }' +
@@ -5302,14 +5692,24 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    openPreview(nextFp,nextEntry.name,false,0,autoPlay);' +
   '  }' +
   '}' +
-  'function initPlyr(selector,isVideo,key,startTime,autoPlay){if(typeof Plyr==="undefined")return null;var opts={controls:isVideo?["play-large","play","progress","current-time","duration","mute","volume","captions","settings","pip","airplay","fullscreen"]:["play","progress","current-time","duration","mute","volume"],settings:["captions","quality","speed","loop"],keyboard:{focused:true,global:false},tooltips:{controls:true,seek:true}};var p=new Plyr(selector,opts);if(isVideo)fitPlyrToVideo(document.querySelector(selector),p);p.on("ready",function(e){var savedTime=localStorage.getItem(key);var useTime=(startTime!==undefined&&startTime!==null)?startTime:(savedTime?parseFloat(savedTime):0);e.detail.plyr.currentTime=useTime;if(autoPlay){setTimeout(function(){try{e.detail.plyr.play();}catch(err){}},50);}});p.on("timeupdate",function(e){localStorage.setItem(key,e.detail.plyr.currentTime);});p.on("ended",function(e){playSibling("next",true);});return p;}\n' +
+  'function initPlyr(selector,isVideo,key,startTime,autoPlay){if(typeof Plyr==="undefined")return null;var isMobile=window.innerWidth<=768;var opts={controls:isVideo?(isMobile?["play-large","play","progress","current-time","settings","fullscreen"]:["play-large","play","progress","current-time","duration","mute","volume","captions","settings","pip","airplay","fullscreen"]):(isMobile?["play","progress","current-time"]:["play","progress","current-time","duration","mute","volume"]),settings:["captions","quality","speed","loop"],keyboard:{focused:true,global:false},tooltips:{controls:!isMobile,seek:!isMobile}};var p=new Plyr(selector,opts);if(isVideo)fitPlyrToVideo(document.querySelector(selector),p);p.on("ready",function(e){var savedTime=localStorage.getItem(key);var useTime=(startTime!==undefined&&startTime!==null)?startTime:(savedTime?parseFloat(savedTime):0);e.detail.plyr.currentTime=useTime;if(autoPlay){setTimeout(function(){try{e.detail.plyr.play();}catch(err){}},50);}});p.on("timeupdate",function(e){localStorage.setItem(key,e.detail.plyr.currentTime);});p.on("ended",function(e){playSibling("next",true);});return p;}\n' +
   'function playGlobalAudio(fp,name,forcePlay){' +
   '  var audio=document.getElementById("global-audio");' +
   '  if(!audio)return;' +
   '  activeAudioFp=fp;activeAudioName=name;' +
   '  if(!window.sidebarPlayerInitialized){initSidebarPlayer();}' +
-  '  var playerCard=document.getElementById("sidebar-player");' +
-  '  if(playerCard)playerCard.style.display="flex";' +
+  '  var isMobile=window.innerWidth<=768;' +
+  '  if(isMobile){' +
+  '    var mPlayer=document.getElementById("mobile-header-player");' +
+  '    if(mPlayer)mPlayer.style.display="flex";' +
+  '    var avatar=document.querySelector(".mobile-avatar");' +
+  '    var brand=document.querySelector(".mobile-brand");' +
+  '    if(avatar)avatar.style.display="none";' +
+  '    if(brand)brand.style.display="none";' +
+  '  }else{' +
+  '    var playerCard=document.getElementById("sidebar-player");' +
+  '    if(playerCard)playerCard.style.display="flex";' +
+  '  }' +
   '  updatePlayerTrackInfo();' +
   '  var src="/api/fm/preview?path="+encodeURIComponent(fp);' +
   '  if(audio.src!==window.location.origin+src&&audio.getAttribute("src")!==src){audio.src=src;}' +
@@ -5326,6 +5726,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  if(!name)return;' +
   '  var titleEl=document.getElementById("player-title");' +
   '  var artistEl=document.getElementById("player-artist");' +
+  '  var mTitleEl=document.getElementById("m-player-title");' +
+  '  var mArtistEl=document.getElementById("m-player-artist");' +
   '  var baseName=name.replace(/\\.[^/.]+$/,"");' +
   '  var parts=baseName.split(" - ");' +
   '  var title=baseName;' +
@@ -5342,6 +5744,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  }' +
   '  if(titleEl)titleEl.textContent=title;' +
   '  if(artistEl)artistEl.textContent=artist;' +
+  '  if(mTitleEl)mTitleEl.textContent=title;' +
+  '  if(mArtistEl)mArtistEl.textContent=artist;' +
   '}' +
   'function buildAudioQueue(){' +
   '  currentAudioQueue=[];' +
@@ -5403,6 +5807,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  if(icon)icon.textContent=isPlaying?"pause":"play_arrow";' +
   '  var btn=document.getElementById("player-btn-play");' +
   '  if(btn)btn.title=isPlaying?"Пауза":"Воспроизведение";' +
+  '  var mIcon=document.getElementById("m-player-play-icon");' +
+  '  if(mIcon)mIcon.textContent=isPlaying?"pause":"play_arrow";' +
+  '  var mBtn=document.getElementById("m-player-btn-play");' +
+  '  if(mBtn)mBtn.title=isPlaying?"Пауза":"Воспроизведение";' +
   '}' +
   'function toggleRepeatMode(){' +
   '  var repeat=localStorage.getItem("player-repeat-mode")||"off";' +
@@ -5436,6 +5844,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  if(audio)audio.pause();' +
   '  var card=document.getElementById("sidebar-player");' +
   '  if(card)card.style.display="none";' +
+  '  var mPlayer=document.getElementById("mobile-header-player");' +
+  '  if(mPlayer)mPlayer.style.display="none";' +
+  '  var avatar=document.querySelector(".mobile-avatar");' +
+  '  var brand=document.querySelector(".mobile-brand");' +
+  '  if(avatar)avatar.style.display="flex";' +
+  '  if(brand)brand.style.display="block";' +
   '  activeAudioFp="";activeAudioName="";' +
   '}' +
   'function renderPlaylistModalTracks(){' +
@@ -5544,6 +5958,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    });' +
   '  }' +
   '  updateRepeatButtonUI();' +
+  '  var mPlayBtn=document.getElementById("m-player-btn-play");' +
+  '  if(mPlayBtn)mPlayBtn.addEventListener("click",toggleGlobalPlay);' +
+  '  var mNextBtn=document.getElementById("m-player-btn-next");' +
+  '  if(mNextBtn)mNextBtn.addEventListener("click",function(){nextGlobalTrack(false);});' +
+  '  var mCloseBtn=document.getElementById("m-player-btn-close");' +
+  '  if(mCloseBtn)mCloseBtn.addEventListener("click",closeSidebarPlayer);' +
   '  window.sidebarPlayerInitialized=true;' +
   '}' +
   'function fmtDuration(secs){' +
@@ -5691,11 +6111,12 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    setTimeout(function() {' +
   '      if(typeof Plyr === "undefined") { console.error("Plyr is not loaded!"); return; }' +
   '      var isVideo = previewKind === "video";' +
+  '      var isMobile = window.innerWidth <= 768;' +
   '      var opts = { ' +
-  '        controls: isVideo ? ["play-large", "play", "progress", "current-time", "duration", "mute", "volume", "captions", "settings", "pip", "airplay", "fullscreen"] : ["play", "progress", "current-time", "duration", "mute", "volume"],' +
+  '        controls: isVideo ? (isMobile ? ["play-large", "play", "progress", "current-time", "settings", "fullscreen"] : ["play-large", "play", "progress", "current-time", "duration", "mute", "volume", "captions", "settings", "pip", "airplay", "fullscreen"]) : (isMobile ? ["play", "progress", "current-time"] : ["play", "progress", "current-time", "duration", "mute", "volume"]),' +
   '        settings: ["captions", "quality", "speed", "loop"],' +
   '        keyboard: { focused: true, global: true },' +
-  '        tooltips: { controls: true, seek: true }' +
+  '        tooltips: { controls: !isMobile, seek: !isMobile }' +
   '      };' +
   '      try {' +
   '        if(window.plyrInstance) { window.plyrInstance.destroy(); }' +
@@ -5897,7 +6318,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '      var mt=media[j],mp=Math.round(mt.progress||0);h+=\'<div class="transfer-card is-active"><div class="transfer-top"><div class="transfer-name">\'+H(mt.name||mt.file||"Media download")+\'</div><div class="transfer-status">\'+H((mt.mode||"media")+" / "+(mt.status||"unknown"))+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+mp+\'%</div></div>\';' +
   '      h+=\'<div class="progress-track"><div class="progress-fill" style="width:\'+mp+\'%"></div></div>\';' +
   '      h+=\'<div class="transfer-meta"><div>\\u0418\\u0441\\u0442\\u043e\\u0447\\u043d\\u0438\\u043a: media</div><div>\\u0421\\u043a\\u043e\\u0440\\u043e\\u0441\\u0442\\u044c: \'+H(mt.speed||"-")+\'</div><div>ETA: \'+H(mt.eta||"-")+\'</div><div>\\u041f\\u0430\\u043f\\u043a\\u0430: \'+H(mt.folder||"\\u041c\\u043e\\u0438 \\u0444\\u0430\\u0439\\u043b\\u044b")+\'</div></div>\';' +
-  '      if(mt.error)h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(mt.error)+\'</div>\';if(mt.warning)h+=\'<div style="font-size:12px;color:#cbbcff">\'+H(mt.warning)+\'</div>\';' +
+  '      if(mt.error){h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(mt.error)+\'</div>\';if(mt.error.toLowerCase().indexOf("youtube")!==-1||mt.error.toLowerCase().indexOf("format")!==-1){h+=\'<div style="font-size:11px;color:#cbbcff;margin-top:4px"><a href="/faq.html" target="_blank" style="color:var(--accent-light);text-decoration:none;border-bottom:1px dotted var(--accent-light)">Решение проблем в FAQ (cookies.txt)</a></div>\';}}if(mt.warning)h+=\'<div style="font-size:12px;color:#cbbcff">\'+H(mt.warning)+\'</div>\';' +
   '      h+=\'<div class="transfer-controls"><button class="btn-ghost" data-action="media-cancel" data-job="\'+H(mt.id)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> \\u041e\\u0442\\u043c\\u0435\\u043d\\u0430</button></div></div>\';' +
   '    }document.getElementById("transfers-list").innerHTML=h;' +
   '  }).catch(function(){});' +
@@ -5957,6 +6378,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="open-toast-link"){if(toastUrl)window.open(toastUrl,"_blank");}' +
   '  else if(action==="qr-link"){openQrModal(el.dataset.url);}' +
   '  else if(action==="close-qr"){closeQrModal();}' +
+  '  else if(action==="close-changelog"){closeChangelogModal();}' +
   '  else if(action==="close-share-manager"){closeShareManager();}' +
   '  else if(action==="sm-create"){createManagedShare();}' +
   '  else if(action==="sm-save"){saveManagedShare(el.dataset.token);}' +
@@ -6213,7 +6635,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    window.dispatchEvent(new Event("resize"));' +
   '  });' +
   '})();' +
-  'applyTheme();loadAccentFromServer();' +
+  'applyTheme();loadAccentFromServer();checkChangelog();' +
   '(function(){var h=parseHash();if(h){if(h.type==="dashboard")loadDashboard();else if(h.type==="recent")loadRecent();else if(h.type==="activity")loadActivityLog();else if(h.type==="settings")loadCloudSettings();else navigateTo(h.path||"");return;}var saved=localStorage.getItem("fm-path");if(saved===null)loadDashboard();else if(saved==="__dashboard__")loadDashboard();else if(saved==="__recent__")loadRecent();else if(saved==="__activity__")loadActivityLog();else if(saved==="__settings__")loadCloudSettings();else navigateTo(saved||"");})();initSidebarPlayer();' +
   'loadDisk();' +
   'loadTransfers();' +
