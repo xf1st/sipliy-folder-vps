@@ -443,7 +443,7 @@ async function pollPendingDownloads() {
                 pendingGids[gid].status = 'complete';
                 pendingGids[gid].name   = match.name;
                 changed = true;
-                onComplete(cfg, match.name, match.size, gid, pendingGids[gid]);
+                await onComplete(cfg, match.name, match.size, gid, pendingGids[gid]);
                 continue;
               }
             }
@@ -460,7 +460,7 @@ async function pollPendingDownloads() {
         changed = true;
 
         if (d.status === 'complete' && prevStatus !== 'complete') {
-          onComplete(cfg, d.name || info.name, d.size, gid, pendingGids[gid]);
+          await onComplete(cfg, d.name || info.name, d.size, gid, pendingGids[gid]);
         } else if (d.status === 'error' && prevStatus !== 'error') {
           notify(`✕ Ошибка загрузки: ${trunc(d.name || info.name, 40)}`);
         }
@@ -487,6 +487,16 @@ async function onComplete(cfg, name, size, gid, info = {}) {
     readyFiles.unshift({ name, size, readyAt: Date.now(), accountId: cfg.accountId });
     if (readyFiles.length > 50) readyFiles.pop();
     await localSet({ readyFiles });
+  }
+
+  // ── Антидубль: добавляем файл в baseline syncVpsFiles, чтобы он не скачал повторно ──
+  if (cfg.accountId) {
+    const stateKey = 'lastVpsFiles_' + cfg.accountId;
+    const stored = await localGet(stateKey);
+    const baseline = stored[stateKey];
+    if (Array.isArray(baseline) && !baseline.includes(name)) {
+      await localSet({ [stateKey]: [...baseline, name] });
+    }
   }
 
   let autoDlOk = false;
