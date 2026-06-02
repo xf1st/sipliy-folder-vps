@@ -119,7 +119,7 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.16.5';
+const SITE_VERSION = '2.16.6';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -448,6 +448,12 @@ function parseYtDlpLine(job, line) {
     job.name = job.file;
     changed = true;
   }
+  // Extraction phase — label each step so user knows what's happening
+  if (/\[youtube\].*Downloading webpage/i.test(clean))                  { job.streamLabel = 'Получение страницы...';       changed = true; }
+  if (/\[youtube\].*Downloading.*player API/i.test(clean))              { job.streamLabel = 'Загрузка плеера YouTube...';  changed = true; }
+  if (/\[jsc:(node|deno|bun)\]|Solving JS challenge/i.test(clean))      { job.streamLabel = 'Решение JS-задачи...';        changed = true; }
+  if (/\[youtube\].*Downloading m3u8/i.test(clean))                     { job.streamLabel = 'Получение плейлиста...';      changed = true; }
+  if (/\[info\].*Downloading \d+ format/i.test(clean))                  { job.streamLabel = 'Начинаю скачивание...';       changed = true; }
   // Detect two-stream download: "Downloading N format(s): 395+251" — compound format with '+'
   const fmtLine = clean.match(/Downloading \d+ format\(s\):\s*(.+)$/i);
   if (fmtLine && fmtLine[1].trim().includes('+')) { job._twoStream = true; changed = true; }
@@ -6421,7 +6427,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    for(var j=0;j<media.length;j++){' +
   '      var mt=media[j],mp=Math.round(mt.progress||0);' +
   '      var modeLabel=mt.mode==="audio"?"MP3":"Видео";if(mt.quality)modeLabel+=" "+mt.quality+"p";' +
-  '      var statusLabel=mt.streamLabel||(mt.status==="starting"?"Запуск...":mt.status==="processing"?"Обработка...":mt.status==="complete"?"Готово":mt.status||"");' +
+  '      var statusLabel=mt.streamLabel||(mt.status==="starting"?"Подготовка...":mt.status==="active"?"Загрузка...":mt.status==="processing"?"Обработка...":mt.status==="complete"?"Готово":mt.status||"");' +
   '      h+=\'<div class="transfer-card is-active"><div class="transfer-top"><div class="transfer-name">\'+H(mt.name||mt.file||"Media download")+\'</div><div class="transfer-status">\'+H(modeLabel+" / "+statusLabel)+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+mp+\'%</div></div>\';' +
   '      h+=\'<div class="progress-track"><div class="progress-fill" style="width:\'+mp+\'%"></div></div>\';' +
   '      h+=\'<div class="transfer-meta"><div>\\u0421\\u043a\\u043e\\u0440\\u043e\\u0441\\u0442\\u044c: \'+H(mt.speed||"-")+\'</div><div>ETA: \'+H(mt.eta||"-")+\'</div><div>\\u041f\\u0430\\u043f\\u043a\\u0430: \'+H(mt.folder||"\\u041c\\u043e\\u0438 \\u0444\\u0430\\u0439\\u043b\\u044b")+\'</div></div>\';' +
