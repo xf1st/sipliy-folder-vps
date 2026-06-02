@@ -119,7 +119,7 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.16.1';
+const SITE_VERSION = '2.16.2';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -587,8 +587,10 @@ function startMediaJob({ username, url, dir, relPath, mode, filename, quality })
   } else if (fs.existsSync(YTDLP_COOKIES_FILE)) {
     args.push('--cookies', YTDLP_COOKIES_FILE);
   }
-  // Use android+web clients — bypass JS runtime requirement, works on most servers
-  args.push('--extractor-args', 'youtube:player_client=android,web');
+  // Use Node.js for yt-dlp JS challenge solving (node v22 installed on VPS)
+  args.push('--js-runtimes', 'node');
+  // Increase socket timeout to avoid transient SSL timeouts
+  args.push('--socket-timeout', '30');
   args.push(url);
   const job = {
     id,
