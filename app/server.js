@@ -119,7 +119,7 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.15.2';
+const SITE_VERSION = '2.16.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -361,10 +361,12 @@ function mediaJobPublic(job) {
     id: job.id,
     url: job.url,
     mode: job.mode,
+    quality: job.quality || '',
     status: job.status,
     progress: job.progress || 0,
     speed: job.speed || '',
     eta: job.eta || '',
+    streamLabel: job.streamLabel || '',
     name: job.name || 'Media download',
     file: job.file || '',
     folder: job.folder || '',
@@ -431,35 +433,55 @@ function parseYtDlpLine(job, line) {
   const clean = String(line || '').trim();
   if (!clean) return false;
   let changed = false;
+  // Resolved output file path
   if ((clean.startsWith('/') || /^[A-Za-z]:[\\/]/.test(clean)) && fs.existsSync(clean)) {
     job.file = path.basename(clean);
     job.name = job.file;
     changed = true;
   }
-  const dest = clean.match(/Destination:\s+(.+)$/i) || clean.match(/Merging formats into\s+"(.+)"$/i);
-  if (dest && dest[1]) {
-    job.file = path.basename(dest[1].replace(/^"|"$/g, ''));
+  // Merging destination
+  const mergeDest = clean.match(/Merging formats into\s+"(.+)"$/i);
+  if (mergeDest && mergeDest[1]) {
+    job.file = path.basename(mergeDest[1].replace(/^"|"$/g, ''));
     job.name = job.file;
     changed = true;
   }
+  // Detect two-stream download upfront from yt-dlp info line
+  if (/Downloading 2 format/i.test(clean)) { job._twoStream = true; changed = true; }
+  // Stream destination — track which stream we're on
+  const dest = clean.match(/\[download\]\s+Destination:\s+(.+)$/i);
+  if (dest && dest[1]) {
+    job._destCount = (job._destCount || 0) + 1;
+    job.file = path.basename(dest[1]);
+    job.name = job.file;
+    if (job._destCount === 1) job.streamLabel = 'Загрузка видео';
+    if (job._destCount === 2) { job.streamLabel = 'Загрузка аудио'; job.progress = 50; }
+    changed = true;
+  }
+  // Progress: if two-stream, scale stream1→0-50% and stream2→50-100%; otherwise raw 0-100%
   const pct = clean.match(/\[download\]\s+([0-9.]+)%/);
   if (pct) {
-    job.progress = Math.max(0, Math.min(100, parseFloat(pct[1])));
+    const raw = Math.max(0, Math.min(100, parseFloat(pct[1])));
+    const dc = job._destCount || 1;
+    let scaled;
+    if (job._twoStream) {
+      scaled = dc >= 2 ? 50 + raw / 2 : raw / 2;
+    } else {
+      scaled = raw;
+    }
+    // Allow going forward; second stream can go back because we reset progress=50 above
+    if (dc >= 2 || scaled > (job.progress || 0)) job.progress = scaled;
     changed = true;
   }
   const speed = clean.match(/\bat\s+([^\s]+\/s)/);
-  if (speed) {
-    job.speed = speed[1];
-    changed = true;
-  }
+  if (speed) { job.speed = speed[1]; changed = true; }
   const eta = clean.match(/\bETA\s+([^\s]+)/);
-  if (eta) {
-    job.eta = eta[1];
-    changed = true;
+  if (eta) { job.eta = eta[1]; changed = true; }
+  if (clean.includes('[Merger]') || clean.includes('[ffmpeg]')) {
+    job.status = 'processing'; job.streamLabel = 'Слияние файлов'; job.speed = ''; job.eta = ''; changed = true;
   }
-  if (clean.includes('[ExtractAudio]') || clean.includes('[Merger]')) {
-    job.status = 'processing';
-    changed = true;
+  if (clean.includes('[ExtractAudio]')) {
+    job.status = 'processing'; job.streamLabel = 'Конвертация в MP3'; job.speed = ''; changed = true;
   }
   return changed;
 }
@@ -515,7 +537,20 @@ function validateMediaFile(mode, fullPath, cb) {
     });
   });
 }
-function startMediaJob({ username, url, dir, relPath, mode, filename }) {
+function buildMediaFormat(mode, quality) {
+  if (mode === 'audio') return null;
+  const validH = { '2160': 2160, '1440': 1440, '1080': 1080, '720': 720, '480': 480, '360': 360 };
+  const maxH = validH[quality] || null;
+  if (mode === 'best') {
+    // Truly best — allow webm/mkv, no height restriction unless specified
+    if (maxH) return `bestvideo[height<=${maxH}]+bestaudio/best[height<=${maxH}]`;
+    return 'bestvideo+bestaudio/best';
+  }
+  // video mode — prefer mp4, default cap 1080p for compatibility
+  const h = maxH || 1080;
+  return `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`;
+}
+function startMediaJob({ username, url, dir, relPath, mode, filename, quality }) {
   const jobs = loadMediaJobs();
   const id = crypto.randomUUID();
   const safeBase = stripKnownMediaExt(filename);
@@ -539,18 +574,11 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
   ];
   if (mode === 'audio') {
     args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
-  } else if (mode === 'video') {
-    // Prefer a pre-muxed mp4 first (no merge needed), then fallback to best separate streams
-    args.push(
-      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
-      '--merge-output-format', 'mp4',
-    );
   } else {
-    // Best quality mode — same strategy
-    args.push(
-      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
-      '--merge-output-format', 'mp4',
-    );
+    const fmt = buildMediaFormat(mode, quality);
+    // For best mode without height restriction, use mkv to avoid webm→mp4 re-encode
+    const mergeExt = (mode === 'best' && !quality) ? 'mkv' : 'mp4';
+    args.push('-f', fmt, '--merge-output-format', mergeExt);
   }
   // Use cookies file if uploaded (for age-restricted / auth-required content)
   const userCookiesPath = getUserCookiesPath(username);
@@ -567,10 +595,12 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
     user: username,
     url,
     mode,
+    quality: quality || '',
     status: 'starting',
     progress: 0,
     speed: '',
     eta: '',
+    streamLabel: '',
     name: safeBase || 'Media download',
     file: '',
     folder: relPath || '',
@@ -597,7 +627,11 @@ function startMediaJob({ username, url, dir, relPath, mode, filename }) {
     const current = loadMediaJobs();
     const j = current[id];
     if (!j) return;
-    const lines = String(chunk).trim().split(/\r?\n/).filter(Boolean);
+    const IGNORE_PATTERNS = ['SABR', 'android client', 'missing a URL', 'player_client', 'JS runtime', 'javascript runtime', 'skipped as they are', 'streaming experiment', 'github.com/yt-dlp'];
+    const lines = String(chunk).trim().split(/\r?\n/).filter(l => {
+      const lc = l.toLowerCase();
+      return l.trim() && !IGNORE_PATTERNS.some(p => lc.includes(p.toLowerCase()));
+    });
     const realErrors = lines.filter(line => /^ERROR:/i.test(line));
     if (realErrors.length) j.error = realErrors.slice(-2).join(' ');
     else if (lines.length) j.warning = lines.slice(-2).join(' ');
@@ -1154,13 +1188,14 @@ app.post('/api/ext/media', extCors, authToken, (req, res) => {
   const dlUrl = (req.body.url || '').trim();
   const mode = ['video', 'audio', 'best'].includes(req.body.mode) ? req.body.mode : 'video';
   const filename = (req.body.filename || '').trim();
+  const quality = ['2160','1440','1080','720','480','360'].includes(req.body.quality) ? req.body.quality : '';
   if (!dlUrl) return res.status(400).json({ error: 'URL empty' });
   if (!isUriSafe(dlUrl)) return res.status(400).json({ error: 'URL заблокирован (приватный/локальный адрес или неподдерживаемая схема)' });
   const dir = userDir(req.tokenUser);
   ytDlpAvailable((available) => {
     if (!available) return res.status(500).json({ error: 'yt-dlp не установлен на сервере' });
     try {
-      const job = startMediaJob({ username: req.tokenUser, url: dlUrl, dir, relPath: '', mode, filename });
+      const job = startMediaJob({ username: req.tokenUser, url: dlUrl, dir, relPath: '', mode, filename, quality });
       res.json({ ok: true, job: mediaJobPublic(job) });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -2515,6 +2550,7 @@ app.post('/api/fm/media', auth, (req, res) => {
   const relPath = req.body.path || '';
   const mode = ['video', 'audio', 'best'].includes(req.body.mode) ? req.body.mode : 'video';
   const filename = (req.body.filename || '').trim();
+  const quality = ['2160','1440','1080','720','480','360'].includes(req.body.quality) ? req.body.quality : '';
   if (!dlUrl) return res.status(400).json({ error: 'URL empty' });
   if (!isUriSafe(dlUrl)) return res.status(400).json({ error: 'URL заблокирован (приватный/локальный адрес или неподдерживаемая схема)' });
   const dir = fmResolve(req.session.user, relPath);
@@ -2522,7 +2558,7 @@ app.post('/api/fm/media', auth, (req, res) => {
   ytDlpAvailable((available) => {
     if (!available) return res.status(500).json({ error: 'yt-dlp is not installed on server' });
     try {
-      const job = startMediaJob({ username: req.session.user, url: dlUrl, dir, relPath, mode, filename });
+      const job = startMediaJob({ username: req.session.user, url: dlUrl, dir, relPath, mode, filename, quality });
       logActivity(req.session.user, 'Загрузка по ссылке', 'Добавлена медиа-задача (' + mode + '): ' + dlUrl + (relPath ? ' в ' + relPath : ''));
       res.json({ ok: true, job: mediaJobPublic(job) });
     } catch (e) {
@@ -4884,9 +4920,33 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div style="font-size:12px;color:var(--on-surf-var);line-height:1.45">Наилучший доступный медиаформат</div>' +
   '</div>' +
   '</div>' + /* end grid */
+  /* quality + audio selector — shown only for video/best modes */
+  '<div id="url-media-opts" style="display:none;margin-bottom:16px">' +
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+  '<div>' +
+  '<div style="font-size:11px;font-weight:600;color:var(--on-surf-var);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px">Разрешение</div>' +
+  '<select id="url-quality-inp" style="width:100%;background:var(--surf-hi);color:var(--on-surf);border:1.5px solid var(--outline-var);border-radius:10px;padding:9px 12px;font-size:13px;font-family:Manrope,sans-serif;outline:none;cursor:pointer">' +
+  '<option value="">Лучшее доступное</option>' +
+  '<option value="2160">4K (2160p)</option>' +
+  '<option value="1440">2K (1440p)</option>' +
+  '<option value="1080">1080p Full HD</option>' +
+  '<option value="720">720p HD</option>' +
+  '<option value="480">480p</option>' +
+  '<option value="360">360p</option>' +
+  '</select>' +
+  '</div>' +
+  '<div>' +
+  '<div style="font-size:11px;font-weight:600;color:var(--on-surf-var);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px">Контейнер</div>' +
+  '<select id="url-container-inp" style="width:100%;background:var(--surf-hi);color:var(--on-surf);border:1.5px solid var(--outline-var);border-radius:10px;padding:9px 12px;font-size:13px;font-family:Manrope,sans-serif;outline:none;cursor:pointer">' +
+  '<option value="mp4">MP4 (совместимый)</option>' +
+  '<option value="mkv">MKV (лучшее качество)</option>' +
+  '</select>' +
+  '</div>' +
+  '</div>' +
+  '</div>' +
   /* optional filename */
   '<input id="url-name-inp" type="text" placeholder="Имя без расширения (необязательно)" autocomplete="off" data-form-type="other" data-lpignore="true" data-1p-ignore>' +
-  '<div id="url-name-hint" style="font-size:11px;color:var(--on-surf-var);margin-bottom:14px">Для медиа расширение добавится автоматически: .mp4 или .mp3</div>' +
+  '<div id="url-name-hint" style="font-size:11px;color:var(--on-surf-var);margin-bottom:14px">Для медиа расширение добавится автоматически: .mp4 / .mkv или .mp3</div>' +
   /* status */
   '<div id="url-status" style="font-size:12px;color:var(--on-surf-var);min-height:18px;margin-bottom:14px"></div>' +
   '<div style="font-size:11px;color:#958ea0;margin-bottom:14px;display:flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:14px;color:var(--accent-light)">info</span>Не загружается YouTube? <a href="/faq.html" target="_blank" style="color:var(--accent-light);text-decoration:none;border-bottom:1px dotted var(--accent-light)">Решения проблем в FAQ</a></div>' +
@@ -5098,7 +5158,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function openQrModal(url){var full=url||toastUrl;if(!full)return;toastUrl=full;document.getElementById("qr-link-text").textContent=full;document.getElementById("qr-img").src=qrImageUrl(full);document.getElementById("qr-open-link").href=full;document.getElementById("modal-qr").style.display="flex";}' +
   'function closeQrModal(){document.getElementById("modal-qr").style.display="none";document.getElementById("qr-img").removeAttribute("src");}' +
   'function closeChangelogModal(){document.getElementById("modal-changelog").style.display="none";}' +
-  'function showChangelogModal(){var m=document.getElementById("modal-changelog");if(!m)return;document.getElementById("changelog-ver").textContent="' + SITE_VERSION + '";var b=document.getElementById("changelog-body");var h="<ul style=\'margin:0;padding-left:20px;display:flex;flex-direction:column;gap:10px\'>";h+="<li><b>🎬 Исправлена загрузка YouTube:</b> Установлен ffmpeg на сервере, исправлен флаг параллельных фрагментов. Видео теперь качаются стабильно.</li>";h+="<li><b>📥 Авто-скачивание:</b> В настройках появились тогглы — авто-скачать на ПК и уведомления браузера.</li>";h+="<li><b>🎨 Синхронизация темы:</b> Акцентный цвет расширения теперь повторяет цвет сайта по аккаунту.</li>";h+="<li><b>🍪 YouTube Cookies:</b> Каждый пользователь может загрузить свои cookies для возрастных и приватных видео.</li>";h+="<li><b>🔐 Безопасность:</b> Пароли теперь хранятся в виде PBKDF2-хэша (100k итераций), случайный session secret.</li>";h+="<li><b>🗑 Убрана плашка «Недавние»</b> из навигации.</li>";h+="</ul>";b.innerHTML=h;m.style.display="flex";localStorage.setItem("last_seen_changelog_version","' + SITE_VERSION + '");}' +
+  'function showChangelogModal(){var m=document.getElementById("modal-changelog");if(!m)return;document.getElementById("changelog-ver").textContent="' + SITE_VERSION + '";var b=document.getElementById("changelog-body");var h="<ul style=\'margin:0;padding-left:20px;display:flex;flex-direction:column;gap:10px\'>";h+="<li><b>🎬 Выбор разрешения видео:</b> В диалоге загрузки теперь есть селекторы качества (360p–4K) и контейнера (MP4/MKV).</li>";h+="<li><b>📊 Прогресс загрузки:</b> Правильное отображение двух потоков (видео 0→50%, аудио 50→100%), статусы «Загрузка видео/аудио», «Слияние файлов».</li>";h+="<li><b>🔕 Фильтр предупреждений:</b> Технические WARNING от yt-dlp (SABR, android client) больше не показываются как ошибки.</li>";h+="<li><b>🏆 Лучшее качество:</b> Режим «Лучшее» теперь реально выбирает лучший формат без ограничений (webm/mkv), а «Видео» ограничивается 1080p mp4.</li>";h+="<li><b>🎨 Тема + настройки:</b> Синхронизация акцента, тогглы уведомлений и авто-скачивания.</li>";h+="</ul>";b.innerHTML=h;m.style.display="flex";localStorage.setItem("last_seen_changelog_version","' + SITE_VERSION + '");}' +
   'function checkChangelog(){var last=localStorage.getItem("last_seen_changelog_version");if(last!=="' + SITE_VERSION + '"){showChangelogModal();}}' +
   'function copyOrShowLink(url){var full=window.location.origin+url;showToast("Публичная ссылка готова",full,full);}' +
   'function playDoneSound(){try{var ac=new (window.AudioContext||window.webkitAudioContext)();var o=ac.createOscillator(),g=ac.createGain();o.type="sine";o.frequency.setValueAtTime(660,ac.currentTime);o.frequency.setValueAtTime(880,ac.currentTime+.12);g.gain.setValueAtTime(.0001,ac.currentTime);g.gain.exponentialRampToValueAtTime(.08,ac.currentTime+.02);g.gain.exponentialRampToValueAtTime(.0001,ac.currentTime+.34);o.connect(g);g.connect(ac.destination);o.start();o.stop(ac.currentTime+.36);}catch(e){}}' +
@@ -5524,8 +5584,13 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    if(!card)continue;' +
   '    if(modes[i]===mode){card.classList.add("selected");}else{card.classList.remove("selected");}' +
   '  }' +
+  '  var opts=document.getElementById("url-media-opts");' +
+  '  if(opts)opts.style.display=(mode==="video"||mode==="best")?"block":"none";' +
+  '  var contInp=document.getElementById("url-container-inp");' +
+  '  if(contInp&&mode==="best"&&!document.getElementById("url-quality-inp").value){contInp.value="mkv";}' +
+  '  else if(contInp&&mode==="video"){contInp.value="mp4";}' +
   '}' +
-  'function openUrlModal(prefill){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value=prefill||"";document.getElementById("url-dl-inp-batch").value="";document.getElementById("url-name-inp").value="";selectUrlMode("file");document.getElementById("url-status").textContent="";if(window.urlBatchMode){toggleUrlBatchMode();}setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
+  'function openUrlModal(prefill){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value=prefill||"";document.getElementById("url-dl-inp-batch").value="";document.getElementById("url-name-inp").value="";var qi=document.getElementById("url-quality-inp");if(qi)qi.value="";selectUrlMode("file");document.getElementById("url-status").textContent="";if(window.urlBatchMode){toggleUrlBatchMode();}setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
   'function closeUrlModal(){document.getElementById("modal-url").style.display="none";document.getElementById("url-dl-inp").value="";document.getElementById("url-dl-inp-batch").value="";document.getElementById("url-name-inp").value="";document.getElementById("url-status").textContent="";if(window.urlBatchMode){toggleUrlBatchMode();}}' +
   'function stripInputMediaExt(name){return String(name||"").replace(/\\.(mp4|webm|mkv|mov|m4v|mp3|m4a|opus|ogg|wav|flac|aac)$/i,"");}' +
   'function toggleUrlBatchMode(){' +
@@ -5577,8 +5642,9 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    var urls=text.split("\\n").map(function(x){return x.trim();}).filter(Boolean);' +
   '    if(!urls.length){st.textContent="Вставьте ссылки";return;}' +
   '    st.textContent="Запускаю " + urls.length + " загрузок...";' +
+  '    var quality=document.getElementById("url-quality-inp")?document.getElementById("url-quality-inp").value:"";' +
   '    var promises=urls.map(function(url){' +
-  '      return fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:"",path:folder,mode:mode})})' +
+  '      return fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:"",path:folder,mode:mode,quality:quality})})' +
   '        .then(function(r){return r.json();})' +
   '        .then(function(d){' +
   '          if(d.ok){' +
@@ -5596,10 +5662,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  }else{' +
   '    var url=document.getElementById("url-dl-inp").value.trim();' +
   '    var name=document.getElementById("url-name-inp").value.trim();' +
+  '    var quality=(document.getElementById("url-quality-inp")||{}).value||"";' +
   '    if(!url){st.textContent="Вставь URL";return;}' +
   '    if(media)name=stripInputMediaExt(name);' +
   '    st.textContent=media?"Запускаю медиа-загрузку...":"Добавляю загрузку...";' +
-  '    fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:folder,mode:mode})})' +
+  '    fetch(media?"/api/fm/media":"/api/fm/add-url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url,filename:name,path:folder,mode:mode,quality:quality})})' +
   '      .then(function(r){return r.json();})' +
   '      .then(function(d){' +
   '        if(d.ok){' +
@@ -6330,10 +6397,13 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '      h+=\'<button class="btn-ghost" data-action="transfer-remove" data-gid="\'+H(t.gid)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> \\u0423\\u0431\\u0440\\u0430\\u0442\\u044c</button></div></div>\';' +
   '    }' +
   '    for(var j=0;j<media.length;j++){' +
-  '      var mt=media[j],mp=Math.round(mt.progress||0);h+=\'<div class="transfer-card is-active"><div class="transfer-top"><div class="transfer-name">\'+H(mt.name||mt.file||"Media download")+\'</div><div class="transfer-status">\'+H((mt.mode||"media")+" / "+(mt.status||"unknown"))+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+mp+\'%</div></div>\';' +
+  '      var mt=media[j],mp=Math.round(mt.progress||0);' +
+  '      var modeLabel=mt.mode==="audio"?"MP3":"Видео";if(mt.quality)modeLabel+=" "+mt.quality+"p";' +
+  '      var statusLabel=mt.streamLabel||(mt.status==="starting"?"Запуск...":mt.status==="processing"?"Обработка...":mt.status==="complete"?"Готово":mt.status||"");' +
+  '      h+=\'<div class="transfer-card is-active"><div class="transfer-top"><div class="transfer-name">\'+H(mt.name||mt.file||"Media download")+\'</div><div class="transfer-status">\'+H(modeLabel+" / "+statusLabel)+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+mp+\'%</div></div>\';' +
   '      h+=\'<div class="progress-track"><div class="progress-fill" style="width:\'+mp+\'%"></div></div>\';' +
-  '      h+=\'<div class="transfer-meta"><div>\\u0418\\u0441\\u0442\\u043e\\u0447\\u043d\\u0438\\u043a: media</div><div>\\u0421\\u043a\\u043e\\u0440\\u043e\\u0441\\u0442\\u044c: \'+H(mt.speed||"-")+\'</div><div>ETA: \'+H(mt.eta||"-")+\'</div><div>\\u041f\\u0430\\u043f\\u043a\\u0430: \'+H(mt.folder||"\\u041c\\u043e\\u0438 \\u0444\\u0430\\u0439\\u043b\\u044b")+\'</div></div>\';' +
-  '      if(mt.error){h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(mt.error)+\'</div>\';if(mt.error.toLowerCase().indexOf("youtube")!==-1||mt.error.toLowerCase().indexOf("format")!==-1){h+=\'<div style="font-size:11px;color:#cbbcff;margin-top:4px"><a href="/faq.html" target="_blank" style="color:var(--accent-light);text-decoration:none;border-bottom:1px dotted var(--accent-light)">Решение проблем в FAQ (cookies.txt)</a></div>\';}}if(mt.warning)h+=\'<div style="font-size:12px;color:#cbbcff">\'+H(mt.warning)+\'</div>\';' +
+  '      h+=\'<div class="transfer-meta"><div>\\u0421\\u043a\\u043e\\u0440\\u043e\\u0441\\u0442\\u044c: \'+H(mt.speed||"-")+\'</div><div>ETA: \'+H(mt.eta||"-")+\'</div><div>\\u041f\\u0430\\u043f\\u043a\\u0430: \'+H(mt.folder||"\\u041c\\u043e\\u0438 \\u0444\\u0430\\u0439\\u043b\\u044b")+\'</div></div>\';' +
+  '      if(mt.error){h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(mt.error)+\'</div>\';if(mt.error.toLowerCase().indexOf("youtube")!==-1||mt.error.toLowerCase().indexOf("format")!==-1){h+=\'<div style="font-size:11px;color:#cbbcff;margin-top:4px"><a href="/faq.html" target="_blank" style="color:var(--accent-light);text-decoration:none;border-bottom:1px dotted var(--accent-light)">Решение проблем в FAQ (cookies.txt)</a></div>\';}}' +
   '      h+=\'<div class="transfer-controls"><button class="btn-ghost" data-action="media-cancel" data-job="\'+H(mt.id)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> \\u041e\\u0442\\u043c\\u0435\\u043d\\u0430</button></div></div>\';' +
   '    }document.getElementById("transfers-list").innerHTML=h;' +
   '  }).catch(function(){});' +
