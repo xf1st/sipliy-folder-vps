@@ -119,7 +119,7 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.16.4';
+const SITE_VERSION = '2.16.5';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -409,6 +409,8 @@ async function syncAriaDownloadJobs(username) {
   });
   Object.values(jobs).forEach(j => {
     if (!j || j.user !== username || seen.has(j.id) || ['complete', 'error', 'cancelled'].includes(j.status)) return;
+    // Skip jobs whose yt-dlp process is still running — file may exist but download isn't done
+    if (mediaProcesses.has(j.id)) return;
     const folder = fmResolve(username, j.folder || '');
     const expected = j.file || j.name;
     if (folder && expected && fs.existsSync(path.join(folder, path.basename(expected)))) {
@@ -1247,7 +1249,7 @@ app.get('/api/ext/theme', extCors, authToken, (req, res) => {
   res.json({ accentHex: accentHex || '#a078ff' });
 });
 // Версия расширения (без авторизации — для OTA проверки)
-const EXT_VERSION = '2.14.2';
+const EXT_VERSION = '2.14.3';
 app.get('/api/ext/version', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').json({
     version: EXT_VERSION,

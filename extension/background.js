@@ -41,7 +41,7 @@ chrome.runtime.onStartup.addListener(() => {
 
 function setupAlarms() {
   chrome.storage.local.get('pollSpeed', d => {
-    const period = (typeof d.pollSpeed === 'number' && d.pollSpeed > 0) ? d.pollSpeed : 0.5;
+    const period = (typeof d.pollSpeed === 'number' && d.pollSpeed > 0) ? d.pollSpeed : 0.25;
     chrome.alarms.get(POLL_ALARM, a => {
       if (!a || Math.abs(a.periodInMinutes - period) > 0.01) {
         chrome.alarms.clear(POLL_ALARM, () => chrome.alarms.create(POLL_ALARM, { periodInMinutes: period }));
