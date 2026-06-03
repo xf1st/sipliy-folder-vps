@@ -119,7 +119,7 @@ function getUserAccentHex(username) {
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.16.6';
+const SITE_VERSION = '2.16.7';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -484,6 +484,7 @@ function parseYtDlpLine(job, line) {
       scaled = raw;                   // 0-100% for single stream
     }
     job.progress = Math.round(scaled * 10) / 10;
+    if (job.progress > 0 && job.progress < 5) console.log('[media-debug] progress update:', job.id ? job.id.slice(0,8) : '?', job.progress + '%', 'dc=' + (job._destCount||1), 'twoStream=' + !!job._twoStream);
     changed = true;
   }
   const speed = clean.match(/\bat\s+([^\s]+\/s)/);
@@ -645,8 +646,10 @@ function startMediaJob({ username, url, dir, relPath, mode, filename, quality })
   child.stderr.on('data', chunk => {
     const current = loadMediaJobs();
     const j = current[id];
-    if (!j) return;
+    if (!j) { console.log('[media-debug] job not found:', id); return; }
+    const prevStatus = j.status;
     j.status = j.status === 'starting' ? 'active' : j.status;
+    if (prevStatus === 'starting') console.log('[media-debug] job', id.slice(0,8), '→ active, first chunk len:', chunk.length);
     const allLines = String(chunk).split(/\r?\n/);
     // yt-dlp writes ALL progress ([download] X%) to stderr — parse it here
     allLines.forEach(line => parseYtDlpLine(j, line));
@@ -4264,6 +4267,10 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '.progress-track{background:var(--surf-hi);border:none;border-radius:9999px;height:8px;overflow:hidden;flex:1}' +
   '.progress-fill{height:100%;border-radius:9999px;background:linear-gradient(90deg,var(--accent-color),var(--accent-hover));transition:width .4s var(--m3-std)}' +
   '.progress-fill.done{background:#10B981;box-shadow:0 0 10px rgba(16,185,129,.45)}' +
+  '@keyframes pf-slide{0%{transform:translateX(-100%)}100%{transform:translateX(500%)}}' +
+  '.progress-fill.indeterminate{width:20%!important;animation:pf-slide 1.4s linear infinite;transition:none}' +
+  '@keyframes pf-pulse{0%,100%{opacity:.55}50%{opacity:1}}' +
+  '.progress-fill.processing{width:100%!important;animation:pf-pulse 1.1s ease-in-out infinite;transition:none}' +
   '.transfer-card.is-error{border-color:#93000a;background:rgba(147,0,10,.07);padding-left:12px;padding-right:12px;border-radius:16px}' +
   '.transfer-card.is-active{border-color:var(--accent-hover);background:var(--accent-bg);padding-left:12px;padding-right:12px;border-radius:16px}' +
   '.transfer-section-title{font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;color:var(--outline);margin:4px 0}' +
@@ -4977,11 +4984,21 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="url-name-hint" style="font-size:11px;color:var(--on-surf-var);margin-bottom:14px">Для медиа расширение добавится автоматически: .mp4 / .mkv или .mp3</div>' +
   /* status */
   '<div id="url-status" style="font-size:12px;color:var(--on-surf-var);min-height:18px;margin-bottom:14px"></div>' +
-  '<div style="font-size:11px;color:#958ea0;margin-bottom:14px;display:flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:14px;color:var(--accent-light)">info</span>Не загружается YouTube? <a href="/faq.html" target="_blank" style="color:var(--accent-light);text-decoration:none;border-bottom:1px dotted var(--accent-light)">Решения проблем в FAQ</a></div>' +
+  /* inline media progress — hidden until download starts */
+  '<div id="url-modal-progress" style="display:none;margin-bottom:16px">' +
+  '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+  '<span id="url-prog-phase" style="font-size:13px;font-weight:600;color:var(--on-surf)">Подготовка...</span>' +
+  '<span id="url-prog-right" style="font-size:12px;color:var(--on-surf-var)"></span>' +
+  '</div>' +
+  '<div style="height:6px;background:var(--surf-hi);border-radius:3px;overflow:hidden">' +
+  '<div id="url-prog-bar" class="progress-fill indeterminate" style="height:100%;background:var(--accent-color);border-radius:3px;transform-origin:left;width:0%"></div>' +
+  '</div>' +
+  '</div>' +
+  '<div style="font-size:11px;color:#958ea0;margin-bottom:14px;display:flex;align-items:center;gap:6px" id="url-faq-hint"><span class="material-symbols-outlined" style="font-size:14px;color:var(--accent-light)">info</span>Не загружается YouTube? <a href="/faq.html" target="_blank" style="color:var(--accent-light);text-decoration:none;border-bottom:1px dotted var(--accent-light)">Решения проблем в FAQ</a></div>' +
   /* buttons */
-  '<div style="display:flex;gap:10px;justify-content:flex-end">' +
+  '<div style="display:flex;gap:10px;justify-content:flex-end" id="url-modal-btns">' +
   '<button class="btn-ghost" data-action="close-url-modal">Отмена</button>' +
-  '<button class="btn-primary" data-action="confirm-url-download" style="display:inline-flex;align-items:center;gap:8px">' +
+  '<button class="btn-primary" id="url-submit-btn" data-action="confirm-url-download" style="display:inline-flex;align-items:center;gap:8px">' +
   '<span class="material-symbols-outlined" style="font-size:18px;font-variation-settings:\'FILL\' 1">download</span>Загрузить' +
   '</button>' +
   '</div></div></div>' +
@@ -5186,7 +5203,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function openQrModal(url){var full=url||toastUrl;if(!full)return;toastUrl=full;document.getElementById("qr-link-text").textContent=full;document.getElementById("qr-img").src=qrImageUrl(full);document.getElementById("qr-open-link").href=full;document.getElementById("modal-qr").style.display="flex";}' +
   'function closeQrModal(){document.getElementById("modal-qr").style.display="none";document.getElementById("qr-img").removeAttribute("src");}' +
   'function closeChangelogModal(){document.getElementById("modal-changelog").style.display="none";}' +
-  'function showChangelogModal(){var m=document.getElementById("modal-changelog");if(!m)return;document.getElementById("changelog-ver").textContent="' + SITE_VERSION + '";var b=document.getElementById("changelog-body");var h="<ul style=\'margin:0;padding-left:20px;display:flex;flex-direction:column;gap:10px\'>";h+="<li><b>🎬 Выбор разрешения видео:</b> В диалоге загрузки теперь есть селекторы качества (360p–4K) и контейнера (MP4/MKV).</li>";h+="<li><b>📊 Прогресс загрузки:</b> Правильное отображение двух потоков (видео 0→50%, аудио 50→100%), статусы «Загрузка видео/аудио», «Слияние файлов».</li>";h+="<li><b>🔕 Фильтр предупреждений:</b> Технические WARNING от yt-dlp (SABR, android client) больше не показываются как ошибки.</li>";h+="<li><b>🏆 Лучшее качество:</b> Режим «Лучшее» теперь реально выбирает лучший формат без ограничений (webm/mkv), а «Видео» ограничивается 1080p mp4.</li>";h+="<li><b>🎨 Тема + настройки:</b> Синхронизация акцента, тогглы уведомлений и авто-скачивания.</li>";h+="</ul>";b.innerHTML=h;m.style.display="flex";localStorage.setItem("last_seen_changelog_version","' + SITE_VERSION + '");}' +
+  'function showChangelogModal(){var m=document.getElementById("modal-changelog");if(!m)return;document.getElementById("changelog-ver").textContent="' + SITE_VERSION + '";var b=document.getElementById("changelog-body");var h="<ul style=\'margin:0;padding-left:20px;display:flex;flex-direction:column;gap:10px\'>";h+="<li><b>⏳ Прогресс в диалоге:</b> После отправки медиа-ссылки диалог не закрывается — показывает анимированный прогресс, фазу загрузки и скорость прямо внутри.</li>";h+="<li><b>🎞 Анимация подготовки:</b> Пока yt-dlp ещё не начал качать (0%), прогресс-бар показывает бегущую анимацию и отсчёт прошедшего времени вместо застывшего нуля.</li>";h+="<li><b>🗑 Очистка ошибок:</b> Призрачные записи «Ошибка» без имени файла убраны из списка; добавлена кнопка «✕ Очистить ошибки» в расширении.</li>";h+="<li><b>🔘 Кнопка «Через браузер»:</b> Исправлено — кнопка перехвата больше не показывает «Ошибка» когда service worker спал.</li>";h+="</ul>";b.innerHTML=h;m.style.display="flex";localStorage.setItem("last_seen_changelog_version","' + SITE_VERSION + '");}' +
   'function checkChangelog(){var last=localStorage.getItem("last_seen_changelog_version");if(last!=="' + SITE_VERSION + '"){showChangelogModal();}}' +
   'function copyOrShowLink(url){var full=window.location.origin+url;showToast("Публичная ссылка готова",full,full);}' +
   'function playDoneSound(){try{var ac=new (window.AudioContext||window.webkitAudioContext)();var o=ac.createOscillator(),g=ac.createGain();o.type="sine";o.frequency.setValueAtTime(660,ac.currentTime);o.frequency.setValueAtTime(880,ac.currentTime+.12);g.gain.setValueAtTime(.0001,ac.currentTime);g.gain.exponentialRampToValueAtTime(.08,ac.currentTime+.02);g.gain.exponentialRampToValueAtTime(.0001,ac.currentTime+.34);o.connect(g);g.connect(ac.destination);o.start();o.stop(ac.currentTime+.36);}catch(e){}}' +
@@ -5619,7 +5636,20 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(contInp&&mode==="video"){contInp.value="mp4";}' +
   '}' +
   'function openUrlModal(prefill){document.getElementById("modal-url").style.display="flex";document.getElementById("url-dl-inp").value=prefill||"";document.getElementById("url-dl-inp-batch").value="";document.getElementById("url-name-inp").value="";var qi=document.getElementById("url-quality-inp");if(qi)qi.value="";selectUrlMode("file");document.getElementById("url-status").textContent="";if(window.urlBatchMode){toggleUrlBatchMode();}setTimeout(function(){document.getElementById("url-dl-inp").focus();},20);}' +
-  'function closeUrlModal(){document.getElementById("modal-url").style.display="none";document.getElementById("url-dl-inp").value="";document.getElementById("url-dl-inp-batch").value="";document.getElementById("url-name-inp").value="";document.getElementById("url-status").textContent="";if(window.urlBatchMode){toggleUrlBatchMode();}}' +
+  'var _urlProgTimer=null;' +
+  'function closeUrlModal(){' +
+  '  clearTimeout(_urlProgTimer);_urlProgTimer=null;' +
+  '  document.getElementById("modal-url").style.display="none";' +
+  '  document.getElementById("url-dl-inp").value="";' +
+  '  document.getElementById("url-dl-inp-batch").value="";' +
+  '  document.getElementById("url-name-inp").value="";' +
+  '  document.getElementById("url-status").textContent="";' +
+  '  var prog=document.getElementById("url-modal-progress");if(prog)prog.style.display="none";' +
+  '  var bar=document.getElementById("url-prog-bar");if(bar){bar.className="progress-fill indeterminate";bar.style.width="0%";}' +
+  '  var submitBtn=document.getElementById("url-submit-btn");if(submitBtn){submitBtn.disabled=false;submitBtn.style.opacity="";}' +
+  '  var faqHint=document.getElementById("url-faq-hint");if(faqHint)faqHint.style.display="";' +
+  '  if(window.urlBatchMode){toggleUrlBatchMode();}' +
+  '}' +
   'function stripInputMediaExt(name){return String(name||"").replace(/\\.(mp4|webm|mkv|mov|m4v|mp3|m4a|opus|ogg|wav|flac|aac)$/i,"");}' +
   'function toggleUrlBatchMode(){' +
   '  urlBatchMode=!urlBatchMode;' +
@@ -5700,12 +5730,62 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '        if(d.ok){' +
   '          var gid=d.gid||(d.job&&d.job.id);' +
   '          if(gid){knownMediaStatuses[gid]="active";markPendingUrlJob(gid,folder);}' +
-  '          st.textContent=media?"Медиа-загрузка запущена":"Загрузка добавлена";' +
-  '          closeUrlModal();' +
-  '          loadTransfers();' +
+  '          if(media&&gid){' +
+  '            st.textContent="";' +
+  '            var submitBtn=document.getElementById("url-submit-btn");' +
+  '            if(submitBtn){submitBtn.disabled=true;submitBtn.style.opacity="0.45";}' +
+  '            var faqHint=document.getElementById("url-faq-hint");if(faqHint)faqHint.style.display="none";' +
+  '            document.getElementById("url-modal-progress").style.display="block";' +
+  '            startUrlModalProgress(gid,folder);' +
+  '          }else{' +
+  '            st.textContent=media?"Медиа-загрузка запущена":"Загрузка добавлена";' +
+  '            closeUrlModal();loadTransfers();' +
+  '          }' +
   '        }else st.textContent=d.error||"Ошибка";' +
   '      }).catch(function(){st.textContent="Ошибка";});' +
   '  }' +
+  '}' +
+  'function startUrlModalProgress(jobId,folder){' +
+  '  clearTimeout(_urlProgTimer);' +
+  '  function tick(){' +
+  '    fetch("/api/fm/media-jobs").then(function(r){return r.json();}).then(function(jobs){' +
+  '      var job=jobs.find(function(j){return j.id===jobId;});' +
+  '      var bar=document.getElementById("url-prog-bar");' +
+  '      var phase=document.getElementById("url-prog-phase");' +
+  '      var right=document.getElementById("url-prog-right");' +
+  '      if(!bar||!phase)return;' +
+  '      if(!job){' +
+  '        phase.textContent="Загружено!";' +
+  '        bar.className="progress-fill done";bar.style.width="100%";' +
+  '        setTimeout(function(){closeUrlModal();loadTransfers();},1000);' +
+  '        return;' +
+  '      }' +
+  '      var mp=job.progress||0;' +
+  '      var isPrep=(job.status==="starting"||(job.status==="active"&&mp===0));' +
+  '      var isProc=(job.status==="processing");' +
+  '      if(isProc){bar.className="progress-fill processing";bar.style.width="100%";}' +
+  '      else if(isPrep){bar.className="progress-fill indeterminate";}' +
+  '      else{bar.className="progress-fill"+(mp>=100?" done":"");bar.style.width=mp+"%";}' +
+  '      var label=job.streamLabel||"";' +
+  '      if(job.status==="complete"){phase.textContent="Загружено!";right.textContent="";}' +
+  '      else if(job.status==="error"){phase.textContent="Ошибка";right.textContent="";}' +
+  '      else if(isProc){phase.textContent="Слияние файлов...";right.textContent="";}' +
+  '      else if(isPrep){phase.textContent=label||"Подготовка...";right.textContent="";}' +
+  '      else{phase.textContent=label||(mp+"%");right.textContent=(job.speed&&job.eta)?job.speed+" · "+job.eta:(job.speed||"");}' +
+  '      if(job.status==="complete"){' +
+  '        bar.className="progress-fill done";bar.style.width="100%";' +
+  '        setTimeout(function(){closeUrlModal();loadTransfers();},1000);return;' +
+  '      }' +
+  '      if(job.status==="error"){' +
+  '        var st=document.getElementById("url-status");' +
+  '        if(st)st.textContent=job.error||"Ошибка загрузки";' +
+  '        setTimeout(function(){closeUrlModal();loadTransfers();},2500);return;' +
+  '      }' +
+  '      if(job.status==="cancelled"){setTimeout(function(){closeUrlModal();},800);return;}' +
+  '      _urlProgTimer=setTimeout(tick,1500);' +
+  '    }).catch(function(){_urlProgTimer=setTimeout(tick,2000);});' +
+  '  }' +
+  '  tick();' +
   '}' +
   'function updatePreviewNavButtons(){' +
   '  var prevBtn=document.getElementById("preview-btn-prev");' +
@@ -6428,11 +6508,21 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '      var mt=media[j],mp=Math.round(mt.progress||0);' +
   '      var modeLabel=mt.mode==="audio"?"MP3":"Видео";if(mt.quality)modeLabel+=" "+mt.quality+"p";' +
   '      var statusLabel=mt.streamLabel||(mt.status==="starting"?"Подготовка...":mt.status==="active"?"Загрузка...":mt.status==="processing"?"Обработка...":mt.status==="complete"?"Готово":mt.status||"");' +
-  '      h+=\'<div class="transfer-card is-active"><div class="transfer-top"><div class="transfer-name">\'+H(mt.name||mt.file||"Media download")+\'</div><div class="transfer-status">\'+H(modeLabel+" / "+statusLabel)+\'</div><div style="font-size:12px;color:#958ea0;width:42px;text-align:right">\'+mp+\'%</div></div>\';' +
-  '      h+=\'<div class="progress-track"><div class="progress-fill" style="width:\'+mp+\'%"></div></div>\';' +
-  '      h+=\'<div class="transfer-meta"><div>\\u0421\\u043a\\u043e\\u0440\\u043e\\u0441\\u0442\\u044c: \'+H(mt.speed||"-")+\'</div><div>ETA: \'+H(mt.eta||"-")+\'</div><div>\\u041f\\u0430\\u043f\\u043a\\u0430: \'+H(mt.folder||"\\u041c\\u043e\\u0438 \\u0444\\u0430\\u0439\\u043b\\u044b")+\'</div></div>\';' +
+  '      var _elapsed=mt.createdAt?Math.floor((Date.now()-new Date(mt.createdAt).getTime())/1000):0;' +
+  '      var _elStr=_elapsed>=3600?Math.floor(_elapsed/3600)+"ч "+Math.floor((_elapsed%3600)/60)+"м":_elapsed>=60?Math.floor(_elapsed/60)+"м "+(_elapsed%60)+"с":_elapsed+"с";' +
+  '      var _isPrep=(mt.status==="starting"||(mt.status==="active"&&mp===0));' +
+  '      var _isProc=mt.status==="processing";' +
+  '      var _pfCls="progress-fill"+(_isProc?" processing":(_isPrep?" indeterminate":(mp>=100?" done":"")));' +
+  '      var _pctStr=_isPrep?_elStr:mp+"%";' +
+  '      h+=\'<div class="transfer-card is-active"><div class="transfer-top"><div class="transfer-name">\'+H(mt.name||mt.file||"Media download")+\'</div><div class="transfer-status">\'+H(modeLabel+" / "+statusLabel)+\'</div><div style="font-size:12px;color:#958ea0;min-width:38px;text-align:right">\'+_pctStr+\'</div></div>\';' +
+  '      h+=\'<div class="progress-track"><div class="\'+_pfCls+\'" style="width:\'+mp+\'%"></div></div>\';' +
+  '      h+=\'<div class="transfer-meta">\';' +
+  '      if(mt.speed)h+=\'<div>Скорость: \'+H(mt.speed)+\'</div>\';' +
+  '      if(mt.eta)h+=\'<div>ETA: \'+H(mt.eta)+\'</div>\';' +
+  '      h+=\'<div>Время: \'+_elStr+\'</div>\';' +
+  '      h+=\'<div>Папка: \'+H(mt.folder||"Мои файлы")+\'</div></div>\';' +
   '      if(mt.error){h+=\'<div style="font-size:12px;color:#ffb4ab">\'+H(mt.error)+\'</div>\';if(mt.error.toLowerCase().indexOf("youtube")!==-1||mt.error.toLowerCase().indexOf("format")!==-1){h+=\'<div style="font-size:11px;color:#cbbcff;margin-top:4px"><a href="/faq.html" target="_blank" style="color:var(--accent-light);text-decoration:none;border-bottom:1px dotted var(--accent-light)">Решение проблем в FAQ (cookies.txt)</a></div>\';}}' +
-  '      h+=\'<div class="transfer-controls"><button class="btn-ghost" data-action="media-cancel" data-job="\'+H(mt.id)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> \\u041e\\u0442\\u043c\\u0435\\u043d\\u0430</button></div></div>\';' +
+  '      h+=\'<div class="transfer-controls"><button class="btn-ghost" data-action="media-cancel" data-job="\'+H(mt.id)+\'" style="color:#ffb4ab;border-color:#93000a"><span class="material-symbols-outlined">close</span> Отмена</button></div></div>\';' +
   '    }document.getElementById("transfers-list").innerHTML=h;' +
   '  }).catch(function(){});' +
   '}' +

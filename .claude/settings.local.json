@@ -37,7 +37,10 @@
       "Read(//d/tmp/**)",
       "Bash(unzip -o stitch_vps_remote_file_fetcher.zip -d stitch_design)",
       "Bash(curl -s -c /tmp/cookies.txt -d \"username=admin&password=admin123\" -X POST http://77.73.135.98:8080/login -L)",
-      "Bash(curl -s -b /tmp/cookies.txt http://77.73.135.98:8080/)"
+      "Bash(curl -s -b /tmp/cookies.txt http://77.73.135.98:8080/)",
+      "Bash(node deploy_ext.js)",
+      "Bash(node --check D:/sites/VPS_downloader/app/server.js)",
+      "Bash(node -e ' *)"
     ]
   }
 }
