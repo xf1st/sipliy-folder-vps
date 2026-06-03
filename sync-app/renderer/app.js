@@ -61,19 +61,16 @@ function updateClock() {
 
 // ── Connection check ──────────────────────────────────────────────────────
 async function checkConnection() {
-  const dot   = document.getElementById('conn-dot');
-  const label = document.getElementById('conn-label');
   const urlEl = document.getElementById('server-url-label');
-
   if (urlEl) urlEl.textContent = (config.serverUrl || '—').replace(/^https?:\/\//, '');
 
   try {
-    const res = await fetch(config.serverUrl + '/api/ping', {
+    // Любой HTTP-ответ = сервер живой (404 тоже ок — значит работает)
+    await fetch(config.serverUrl + '/login', {
       signal: AbortSignal.timeout(4000),
       credentials: 'include',
     });
-    const ok = res.ok || res.status === 401; // 401 = сервер отвечает, просто не авторизован
-    setConnStatus(ok ? 'connected' : 'error');
+    setConnStatus('connected');
   } catch {
     setConnStatus('offline');
   }
@@ -410,14 +407,17 @@ function saveSettings() {
 async function testConnection() {
   const label = document.getElementById('test-conn-label');
   if (label) label.textContent = 'Проверяю...';
-  const url = document.getElementById('cfg-server-url')?.value.trim() || config.serverUrl;
+  const url = (document.getElementById('cfg-server-url')?.value.trim() || config.serverUrl).replace(/\/$/, '');
   try {
-    const res = await fetch(url + '/api/ping', { signal: AbortSignal.timeout(5000) });
-    if (label) label.textContent = res.ok || res.status === 401 ? '✓ Сервер доступен' : '✗ Ошибка ' + res.status;
-  } catch {
-    if (label) label.textContent = '✗ Не удалось подключиться';
+    const res = await fetch(url + '/login', { signal: AbortSignal.timeout(5000) });
+    // Любой HTTP-ответ = сервер работает
+    if (label) label.textContent = '✓ Сервер доступен (HTTP ' + res.status + ')';
+    setConnStatus('connected');
+  } catch (e) {
+    if (label) label.textContent = '✗ Нет соединения — ' + (e.message || 'timeout');
+    setConnStatus('offline');
   }
-  setTimeout(() => { if (label) label.textContent = 'Проверить соединение'; }, 3000);
+  setTimeout(() => { if (label) label.textContent = 'Проверить соединение'; }, 4000);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

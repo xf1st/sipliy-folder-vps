@@ -41,7 +41,12 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
-    icon: path.join(__dirname, 'assets', 'icon.ico'),
+    // icon.ico — опционально; если нет, Electron использует дефолтный
+    ...(fs.existsSync(path.join(__dirname, 'assets', 'icon.ico'))
+      ? { icon: path.join(__dirname, 'assets', 'icon.ico') }
+      : fs.existsSync(path.join(__dirname, 'assets', 'icon.png'))
+        ? { icon: path.join(__dirname, 'assets', 'icon.png') }
+        : {}),
     show: false,
   });
 
@@ -63,8 +68,13 @@ function createWindow() {
 // ─── Tray ──────────────────────────────────────────────────────────────────
 function createTray() {
   // Используем пустую иконку если файл не найден
-  const iconPath = path.join(__dirname, 'assets', 'tray.png');
-  const img = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
+  // Пробуем найти иконку для трея (svg → png → ico → пустая)
+  const tryPaths = ['tray.png', 'icon.png', 'icon.ico', 'icon.svg'];
+  let img = nativeImage.createEmpty();
+  for (const f of tryPaths) {
+    const p = path.join(__dirname, 'assets', f);
+    if (fs.existsSync(p)) { img = nativeImage.createFromPath(p); break; }
+  }
   tray = new Tray(img);
   tray.setToolTip('VPS Sync Manager');
 

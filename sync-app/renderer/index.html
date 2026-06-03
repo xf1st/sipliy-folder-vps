@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>VPS Sync Manager</title>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script src="https://cdn.tailwindcss.com"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
 <style>
@@ -69,16 +69,47 @@
   }
   [data-tooltip] { position: relative; }
 
-  .inp-field {
-    width: 100%; background: #1c1b1b; border: 1px solid #4a4455;
-    border-radius: 8px; padding: 10px 14px; color: #e5e2e1;
-    font-family: Inter, sans-serif; font-size: 14px; outline: none;
-    transition: border-color 0.2s;
+  /* ── Global form reset (убираем белый фон Chromium/Tailwind) ─────────── */
+  input, select, textarea, button {
+    font-family: Inter, sans-serif;
+    box-sizing: border-box;
   }
-  .inp-field:focus { border-color: #7c3aed; }
-  .inp-field::placeholder { color: #635d72; }
+  input:not([type="checkbox"]):not([type="radio"]),
+  select, textarea {
+    background: #1c1b1b !important;
+    color: #e5e2e1 !important;
+    border: 1px solid #4a4455 !important;
+    border-radius: 8px !important;
+    padding: 10px 14px !important;
+    font-size: 14px !important;
+    outline: none !important;
+    -webkit-appearance: none !important;
+    appearance: none !important;
+    transition: border-color 0.2s !important;
+    width: 100%;
+  }
+  input:not([type="checkbox"]):not([type="radio"]):focus,
+  select:focus, textarea:focus {
+    border-color: #7c3aed !important;
+    box-shadow: 0 0 0 2px rgba(124,58,237,0.15) !important;
+  }
+  input::placeholder, textarea::placeholder { color: #635d72 !important; }
+  select option { background: #1c1b1b !important; color: #e5e2e1; }
 
-  select.inp-field option { background: #1c1b1b; }
+  /* ── Number input — убрать стрелки ──────────────────────────────────── */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+  /* ── Checkbox / radio — оставляем accent-color ───────────────────────── */
+  input[type="checkbox"], input[type="radio"] {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    width: auto !important;
+  }
+
+  .inp-field { /* Оставляем класс для совместимости */ }
+  .inp-field::placeholder { color: #635d72 !important; }
 </style>
 <script>
   tailwind.config = {
