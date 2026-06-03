@@ -6827,17 +6827,18 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   /* ── UPLOAD ── */
   'function uploadFiles(files,folderPath){' +
   '  if(!files||!files.length)return;' +
-  '  var names=[];' +
-  '  for(var i=0;i<files.length;i++)names.push(files[i].name);' +
+  '  var arr=Array.from(files);' + // FileList — живой объект, копируем до async
+  '  if(!arr.length)return;' +
+  '  var names=arr.map(function(f){return f.name;});' +
   '  fetch("/api/fm/check-conflicts?path="+encodeURIComponent(folderPath||""),{' +
   '    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filenames:names})' +
   '  }).then(function(r){return r.json();}).then(function(d){' +
   '    if(d.conflicts&&d.conflicts.length){' +
-  '      openConflictModal(files,folderPath,d.conflicts);' +
+  '      openConflictModal(arr,folderPath,d.conflicts);' +
   '    }else{' +
-  '      doUploadFiles(files,folderPath,"replace");' +
+  '      doUploadFiles(arr,folderPath,"replace");' +
   '    }' +
-  '  }).catch(function(){doUploadFiles(files,folderPath,"replace");});' +
+  '  }).catch(function(){doUploadFiles(arr,folderPath,"replace");});' +
   '}' +
   'function doUploadFiles(files,folderPath,conflictMode){' +
   '  if(!files||!files.length)return;' +
