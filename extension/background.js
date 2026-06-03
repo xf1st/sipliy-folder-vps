@@ -87,6 +87,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch(e => sendResponse({ ok: false, error: e.message || 'Ошибка' }));
     return true;
   }
+  if (msg.type === 'get-media-job') {
+    getConfig().then(async cfg => {
+      if (!cfg.serverUrl || !cfg.token) return sendResponse({ ok: false });
+      try {
+        const res = await fetchExt(cfg, '/api/ext/media-jobs/' + encodeURIComponent(msg.jobId));
+        const data = await res.json().catch(() => ({}));
+        sendResponse({ ok: true, job: data.job || null });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+    });
+    return true;
+  }
   if (msg.type === 'capture-next-download') {
     startDownloadCapture(msg.timeoutMs || 90000, msg.mode || 'direct')
       .then(data => sendResponse({ ok: true, ...(data || {}) }))

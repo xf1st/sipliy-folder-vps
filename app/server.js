@@ -769,7 +769,11 @@ app.post('/login', (req, res) => {
 app.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
-app.get('/', auth, (req, res) => res.redirect('/cloud'));
+app.get('/', (req, res) => {
+  if (req.session && req.session.user) return res.redirect('/cloud');
+  res.send(landingPage());
+});
+app.get('/privacy', (req, res) => res.send(privacyPage()));
 function fmtBytes(b) {
   const units = ['B','KB','MB','GB','TB'];
   let i = 0, v = b;
@@ -1232,6 +1236,14 @@ app.post('/api/ext/media', extCors, authToken, (req, res) => {
       res.status(500).json({ error: e.message });
     }
   });
+});
+// Статус медиа-задания для расширения
+app.options('/api/ext/media-jobs/:id', (req, res) => res.set(EXT_CORS).sendStatus(204));
+app.get('/api/ext/media-jobs/:id', extCors, authToken, (req, res) => {
+  const jobs = loadMediaJobs();
+  const job = jobs[req.params.id];
+  if (!job || job.user !== req.tokenUser) return res.json({ ok: true, job: null });
+  res.json({ ok: true, job: mediaJobPublic(job) });
 });
 // Файловый браузер для расширения (Bearer-auth)
 app.options('/api/ext/browse', (req, res) => res.set(EXT_CORS).sendStatus(204));
@@ -2917,6 +2929,298 @@ body,aside,main,.file-card{transition:background-color 0.25s,border-color 0.25s,
 .material-symbols-outlined{font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24;vertical-align:middle}
 ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgb(var(--c-outv));border-radius:9999px}
 </style>`;
+function landingPage() {
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sipliy Folder — VPS Downloader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0d0d12;--surf:#18171f;--surf2:#211f2a;--border:rgba(255,255,255,.08);--accent:#a78bfa;--accent2:#7c3aed;--text:#e8e3f4;--muted:#8b82a0;--green:#4ade80;--red:#f87171}
+html{scroll-behavior:smooth}
+body{font-family:Manrope,system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+/* nav */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:64px;border-bottom:1px solid var(--border);background:rgba(13,13,18,.85);backdrop-filter:blur(20px)}
+.nav-logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:17px}
+.nav-logo-icon{width:32px;height:32px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:900;color:#fff}
+.nav-links{display:flex;align-items:center;gap:6px}
+.btn-nav{padding:8px 18px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:.15s}
+.btn-ghost-nav{background:transparent;color:var(--muted);border:1px solid var(--border)}
+.btn-ghost-nav:hover{color:var(--text);background:rgba(255,255,255,.06)}
+.btn-primary-nav{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+.btn-primary-nav:hover{opacity:.9}
+/* hero */
+.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:100px 24px 80px;text-align:center;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:700px;height:700px;background:radial-gradient(circle,rgba(124,58,237,.22) 0%,transparent 70%);pointer-events:none}
+.hero::after{content:'';position:absolute;bottom:-100px;right:-100px;width:400px;height:400px;background:radial-gradient(circle,rgba(167,139,250,.1) 0%,transparent 70%);pointer-events:none}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:5px 14px;border-radius:20px;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.25);font-size:12px;font-weight:600;color:var(--accent);margin-bottom:28px;letter-spacing:.04em}
+.badge-dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(.85)}}
+h1{font-size:clamp(36px,6vw,72px);font-weight:800;line-height:1.1;letter-spacing:-.03em;margin-bottom:22px;background:linear-gradient(135deg,#fff 30%,var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero-sub{font-size:clamp(15px,2.5vw,20px);color:var(--muted);max-width:540px;line-height:1.6;margin-bottom:44px;font-weight:500}
+.hero-btns{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;margin-bottom:64px}
+.btn-hero-primary{padding:14px 30px;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:15px;font-weight:700;border:none;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:8px}
+.btn-hero-primary:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(124,58,237,.45)}
+.btn-hero-ghost{padding:14px 30px;border-radius:14px;background:transparent;color:var(--text);font-size:15px;font-weight:600;border:1.5px solid var(--border);cursor:pointer;transition:.15s}
+.btn-hero-ghost:hover{border-color:rgba(167,139,250,.4);background:rgba(167,139,250,.06)}
+/* feature grid */
+section{padding:80px 24px;max-width:1100px;margin:0 auto}
+.section-label{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:14px;text-align:center}
+.section-title{font-size:clamp(26px,4vw,40px);font-weight:800;letter-spacing:-.02em;text-align:center;margin-bottom:52px}
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}
+.feat-card{background:var(--surf);border:1px solid var(--border);border-radius:20px;padding:28px;transition:.2s}
+.feat-card:hover{border-color:rgba(167,139,250,.3);transform:translateY(-3px)}
+.feat-icon{width:46px;height:46px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;margin-bottom:18px}
+.feat-title{font-size:16px;font-weight:700;margin-bottom:8px}
+.feat-desc{font-size:14px;color:var(--muted);line-height:1.6}
+/* how it works */
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:24px;margin-top:48px}
+.step{text-align:center;padding:0 16px}
+.step-num{width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#fff;margin:0 auto 16px}
+.step-title{font-size:15px;font-weight:700;margin-bottom:6px}
+.step-desc{font-size:13px;color:var(--muted);line-height:1.55}
+/* ext preview */
+.preview-box{background:var(--surf);border:1px solid var(--border);border-radius:24px;padding:36px;text-align:center;margin-top:60px;position:relative;overflow:hidden}
+.preview-box::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent)}
+/* cta */
+.cta-section{padding:80px 24px;text-align:center}
+.cta-box{max-width:600px;margin:0 auto;background:var(--surf);border:1px solid rgba(167,139,250,.2);border-radius:28px;padding:52px 40px;position:relative;overflow:hidden}
+.cta-box::before{content:'';position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:400px;height:300px;background:radial-gradient(circle,rgba(124,58,237,.18) 0%,transparent 70%);pointer-events:none}
+.cta-title{font-size:clamp(22px,4vw,36px);font-weight:800;margin-bottom:14px;letter-spacing:-.02em}
+.cta-sub{color:var(--muted);font-size:15px;margin-bottom:36px;line-height:1.55}
+/* footer */
+footer{border-top:1px solid var(--border);padding:28px 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;font-size:13px;color:var(--muted)}
+footer a{color:var(--muted);transition:.15s}
+footer a:hover{color:var(--accent)}
+@media(max-width:600px){nav{padding:0 16px}.hero-btns{flex-direction:column;align-items:center}.cta-box{padding:36px 24px}footer{justify-content:center;text-align:center}}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-logo">
+    <div class="nav-logo-icon">S</div>
+    Sipliy Folder
+  </div>
+  <div class="nav-links">
+    <a href="/privacy" class="btn-nav btn-ghost-nav">Privacy</a>
+    <a href="/login" class="btn-nav btn-primary-nav">Войти</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="badge"><span class="badge-dot"></span>Self-hosted · Open &amp; Private</div>
+  <h1>Скачай всё<br>на свой VPS</h1>
+  <p class="hero-sub">Один клик — и файл уже на сервере. YouTube, Vimeo, прямые ссылки. Следи за прогрессом и забирай на ПК прямо из браузерного расширения.</p>
+  <div class="hero-btns">
+    <a href="/login" class="btn-hero-primary">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+      Открыть CloudSpace
+    </a>
+    <a href="#features" class="btn-hero-ghost">Что умеет →</a>
+  </div>
+</div>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="section-label">Возможности</div>
+  <div class="section-title">Всё что нужно для загрузок</div>
+  <div class="features">
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(167,139,250,.14)">📥</div>
+      <div class="feat-title">Загрузка по URL</div>
+      <div class="feat-desc">Вставь любую ссылку — прямой файл, YouTube, Vimeo и сотни других площадок. VPS скачает сам, пока ты занимаешься другим.</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(74,222,128,.1)">🎬</div>
+      <div class="feat-title">Медиа с выбором качества</div>
+      <div class="feat-desc">Видео до 4K, MP3-аудио, лучший доступный формат. Селекторы разрешения и контейнера (MP4/MKV) прямо в диалоге.</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(96,165,250,.1)">🗂</div>
+      <div class="feat-title">Файловый менеджер</div>
+      <div class="feat-desc">Папки, предпросмотр, публичные ссылки с паролями и лимитами скачиваний. Всё в браузере, без FTP.</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(251,191,36,.1)">⚡</div>
+      <div class="feat-title">Прогресс в реальном времени</div>
+      <div class="feat-desc">Видишь скорость, ETA и текущую фазу — «Загрузка видео», «Слияние файлов». Не нужно гадать завершилось ли.</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(248,113,113,.1)">🧩</div>
+      <div class="feat-title">Расширение для браузера</div>
+      <div class="feat-desc">Кнопка прямо на YouTube. Правый клик по любой ссылке → «Скачать на VPS». Прогресс загрузки прямо в попапе расширения.</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon" style="background:rgba(52,211,153,.1)">🔒</div>
+      <div class="feat-title">Приватно и самохостинг</div>
+      <div class="feat-desc">Данные хранятся только на твоём VPS. Никаких облаков третьих сторон, никакой аналитики, никаких логов.</div>
+    </div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section id="how">
+  <div class="section-label">Как это работает</div>
+  <div class="section-title">Три шага — и файл на месте</div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-title">Вставь ссылку</div>
+      <div class="step-desc">В CloudSpace, правым кликом через расширение или кнопкой прямо на YouTube</div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-title">VPS скачивает</div>
+      <div class="step-desc">Сервер тянет файл напрямую — со скоростью дата-центра, даже если ты закрыл браузер</div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-title">Забери на ПК</div>
+      <div class="step-desc">Один клик в файловом менеджере или прямо из попапа расширения — файл у тебя</div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<div class="cta-section">
+  <div class="cta-box">
+    <div class="cta-title">Готов попробовать?</div>
+    <p class="cta-sub">CloudSpace уже запущен. Войди в аккаунт или установи расширение для браузера.</p>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;justify-content:center">
+      <a href="/login" class="btn-hero-primary" style="padding:12px 26px;font-size:14px">Открыть CloudSpace</a>
+      <a href="/ext/update" class="btn-hero-ghost" style="padding:12px 26px;font-size:14px">Скачать расширение</a>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div style="display:flex;align-items:center;gap:8px">
+    <div class="nav-logo-icon" style="width:24px;height:24px;border-radius:7px;font-size:11px">S</div>
+    <span>Sipliy Folder VPS</span>
+  </div>
+  <div style="display:flex;gap:20px">
+    <a href="/privacy">Privacy Policy</a>
+    <a href="/ext/update">Extension</a>
+    <a href="/login">Login</a>
+  </div>
+</footer>
+
+</body>
+</html>`;
+}
+
+function privacyPage() {
+  const updated = 'June 3, 2025';
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Privacy Policy — Sipliy Folder VPS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0d0d12;--surf:#18171f;--border:rgba(255,255,255,.08);--accent:#a78bfa;--text:#e8e3f4;--muted:#8b82a0}
+body{font-family:Manrope,system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;font-size:15px}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+header{border-bottom:1px solid var(--border);padding:20px 32px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:16px}
+.logo-icon{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,#a78bfa,#7c3aed);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:900;color:#fff}
+.container{max-width:740px;margin:0 auto;padding:56px 24px 80px}
+.meta{font-size:13px;color:var(--muted);margin-bottom:48px}
+h1{font-size:32px;font-weight:800;letter-spacing:-.02em;margin-bottom:10px}
+h2{font-size:18px;font-weight:700;margin:40px 0 12px;color:var(--text)}
+p{color:#c4bdd6;margin-bottom:14px}
+ul{color:#c4bdd6;padding-left:22px;margin-bottom:14px}
+ul li{margin-bottom:6px}
+.highlight{background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.2);border-radius:12px;padding:18px 22px;margin:24px 0;font-size:14px;color:var(--text)}
+.highlight strong{color:var(--accent)}
+footer{border-top:1px solid var(--border);padding:24px 32px;text-align:center;font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body>
+
+<header>
+  <a href="/" style="text-decoration:none;color:inherit">
+    <div class="logo"><div class="logo-icon">S</div>Sipliy Folder VPS</div>
+  </a>
+  <a href="/" style="font-size:13px;color:var(--muted)">← Back</a>
+</header>
+
+<div class="container">
+  <h1>Privacy Policy</h1>
+  <p class="meta">Last updated: ${updated}</p>
+
+  <div class="highlight">
+    <strong>Short version:</strong> Sipliy Folder VPS is a self-hosted application. All your data stays on <strong>your own server</strong>. We do not collect, store, or transmit any personal information to third parties.
+  </div>
+
+  <h2>1. What is Sipliy Folder VPS?</h2>
+  <p>Sipliy Folder VPS is a self-hosted download manager consisting of a Node.js server application and a companion browser extension. You install and run this software on your own VPS (Virtual Private Server). We do not operate any shared servers or cloud services on your behalf.</p>
+
+  <h2>2. Data We Do Not Collect</h2>
+  <p>Because this is self-hosted software, <strong>we (the developers) collect no data whatsoever</strong>. Specifically:</p>
+  <ul>
+    <li>No usage analytics or telemetry</li>
+    <li>No crash reports sent to external servers</li>
+    <li>No account information shared with third parties</li>
+    <li>No download history or file metadata sent anywhere</li>
+  </ul>
+
+  <h2>3. Data Stored on Your Server</h2>
+  <p>The following data is stored <strong>only on your own VPS</strong>, under your full control:</p>
+  <ul>
+    <li><strong>Account credentials</strong> — usernames and bcrypt-hashed passwords in a local JSON file</li>
+    <li><strong>Session tokens</strong> — stored in memory or on disk, used to keep you logged in</li>
+    <li><strong>Download history</strong> — URLs you submitted and job status, stored locally</li>
+    <li><strong>Files</strong> — files downloaded to your VPS are stored in your designated downloads folder</li>
+    <li><strong>Extension settings</strong> — server URL and bearer token, stored in <code>chrome.storage.sync</code> (synced via your own Google account, subject to Google's privacy policy)</li>
+  </ul>
+
+  <h2>4. Browser Extension — Permissions</h2>
+  <p>The Sipliy Folder VPS browser extension requests the following permissions:</p>
+  <ul>
+    <li><strong>contextMenus</strong> — to add a "Download to VPS" right-click menu item</li>
+    <li><strong>storage</strong> — to save your server URL, token, and preferences locally</li>
+    <li><strong>notifications</strong> — to show download completion notifications</li>
+    <li><strong>downloads</strong> — to download completed files from your VPS to your PC</li>
+    <li><strong>cookies</strong> — to read YouTube authentication cookies and pass them to your VPS server, enabling yt-dlp to download age-restricted or member-only videos on your behalf. Cookies are sent <strong>only to your own VPS server</strong> and nowhere else.</li>
+    <li><strong>alarms</strong> — to periodically refresh the download status badge</li>
+  </ul>
+  <p>The extension communicates <strong>exclusively</strong> with the server URL you configure. No data is sent to any other destination.</p>
+
+  <h2>5. Third-Party Services</h2>
+  <p>The server application uses <strong>yt-dlp</strong> to download media from platforms such as YouTube. When you request a download, your VPS sends a network request to the target platform directly. This is subject to that platform's own terms of service and privacy policy.</p>
+  <p>The landing page loads fonts from Google Fonts. This request is made by your browser directly to Google's servers and is subject to <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google's Privacy Policy</a>.</p>
+
+  <h2>6. Data Retention &amp; Deletion</h2>
+  <p>Since all data lives on your own server, you have complete control over retention and deletion. You can delete accounts, download history, and files at any time through the application interface or directly on the server filesystem.</p>
+
+  <h2>7. Children's Privacy</h2>
+  <p>This software is not directed at children under 13. We do not knowingly collect any information from children.</p>
+
+  <h2>8. Changes to This Policy</h2>
+  <p>We may update this Privacy Policy occasionally. The "Last updated" date at the top of this page reflects the most recent revision. Continued use of the software after changes constitutes acceptance of the updated policy.</p>
+
+  <h2>9. Contact</h2>
+  <p>If you have questions about this Privacy Policy, you can open an issue on the project repository or contact the developer directly.</p>
+</div>
+
+<footer>© 2025 Sipliy Folder VPS · <a href="/">Home</a> · Self-hosted software</footer>
+
+</body>
+</html>`;
+}
+
 function loginPage(error) {
   return '<!DOCTYPE html><html lang="ru"><head><title>VPS Downloader</title>' + HEAD + '</head>' +
   '<body class="bg-background font-body text-on-surface min-h-screen flex items-center justify-center">' +
