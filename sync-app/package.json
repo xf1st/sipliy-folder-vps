@@ -1,0 +1,33 @@
+{
+  "name": "vps-sync-manager",
+  "version": "1.0.0",
+  "description": "VPS Sync Manager — desktop client for syncing folders with VPS",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64",
+    "dev": "electron . --dev"
+  },
+  "dependencies": {
+    "ssh2-sftp-client": "^10.0.3",
+    "chokidar": "^3.6.0",
+    "electron-store": "^8.2.0",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.vps.syncmanager",
+    "productName": "VPS Sync Manager",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

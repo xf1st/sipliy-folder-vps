@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html class="dark" lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>VPS Sync Manager</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<style>
+  .material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    display: inline-block; line-height: 1;
+    text-transform: none; letter-spacing: normal;
+    word-wrap: normal; white-space: nowrap; direction: ltr;
+  }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #1c1b1b; }
+  ::-webkit-scrollbar-thumb { background: #353534; border-radius: 10px; }
+  ::-webkit-scrollbar-thumb:hover { background: #4a4455; }
+
+  .mica-effect {
+    backdrop-filter: blur(20px) saturate(180%);
+    background-color: rgba(37,37,37,0.7);
+    border-top: 1px solid rgba(255,255,255,0.1);
+  }
+  @keyframes pulse-soft { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .animate-pulse-soft { animation: pulse-soft 2s cubic-bezier(0.4,0,0.6,1) infinite; }
+
+  /* Перетаскивание окна */
+  .drag-region { -webkit-app-region: drag; }
+  .no-drag     { -webkit-app-region: no-drag; }
+
+  /* Страницы */
+  .page { display: none; }
+  .page.active { display: flex; }
+
+  /* Fade-in при смене страницы */
+  @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
+  .page.active > * { animation: fadeIn 0.18s ease; }
+
+  /* Активный nav-item */
+  .nav-item.active {
+    color: #d2bbff !important;
+    font-weight: 700;
+    border-left: 3px solid #7c3aed;
+    background: rgba(57,57,57,0.5);
+    border-radius: 0 8px 8px 0;
+  }
+  .nav-item.active .nav-icon { font-variation-settings: 'FILL' 1; }
+
+  /* Conflict modal */
+  #conflict-modal { display: none; }
+  #conflict-modal.open { display: flex; }
+
+  /* Add folder modal */
+  #add-folder-modal { display: none; }
+  #add-folder-modal.open { display: flex; }
+
+  /* Tooltip */
+  [data-tooltip]:hover::after {
+    content: attr(data-tooltip);
+    position: absolute; bottom: calc(100% + 4px); left: 50%;
+    transform: translateX(-50%);
+    background: #2a2a2a; color: #e5e2e1;
+    font-size: 11px; padding: 4px 8px; border-radius: 6px;
+    white-space: nowrap; pointer-events: none;
+    border: 1px solid rgba(255,255,255,0.1); z-index: 999;
+  }
+  [data-tooltip] { position: relative; }
+
+  .inp-field {
+    width: 100%; background: #1c1b1b; border: 1px solid #4a4455;
+    border-radius: 8px; padding: 10px 14px; color: #e5e2e1;
+    font-family: Inter, sans-serif; font-size: 14px; outline: none;
+    transition: border-color 0.2s;
+  }
+  .inp-field:focus { border-color: #7c3aed; }
+  .inp-field::placeholder { color: #635d72; }
+
+  select.inp-field option { background: #1c1b1b; }
+</style>
+<script>
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "primary-fixed":"#eaddff","on-primary":"#3f008e","surface-tint":"#d2bbff",
+          "on-error":"#690005","surface-container-low":"#1c1b1b","surface":"#131313",
+          "primary-container":"#7c3aed","surface-bright":"#393939","tertiary-fixed":"#6ffbbe",
+          "secondary-container":"#0566d9","on-primary-container":"#ede0ff",
+          "on-secondary-fixed-variant":"#004395","inverse-on-surface":"#313030",
+          "surface-variant":"#353534","on-tertiary-container":"#76ffc2",
+          "secondary":"#adc6ff","secondary-fixed-dim":"#adc6ff","outline-variant":"#4a4455",
+          "on-surface":"#e5e2e1","tertiary-fixed-dim":"#4edea3","on-primary-fixed":"#25005a",
+          "outline":"#958da1","on-secondary-container":"#e6ecff","on-primary-fixed-variant":"#5a00c6",
+          "on-tertiary-fixed-variant":"#005236","on-tertiary":"#003824","error-container":"#93000a",
+          "on-tertiary-fixed":"#002113","inverse-primary":"#732ee4","tertiary-container":"#007650",
+          "on-secondary-fixed":"#001a42","on-secondary":"#002e6a","on-background":"#e5e2e1",
+          "surface-container-lowest":"#0e0e0e","surface-dim":"#131313","tertiary":"#4edea3",
+          "background":"#131313","on-surface-variant":"#ccc3d8","on-error-container":"#ffdad6",
+          "surface-container-highest":"#353534","surface-container":"#201f1f",
+          "surface-container-high":"#2a2a2a","inverse-surface":"#e5e2e1",
+          "primary-fixed-dim":"#d2bbff","secondary-fixed":"#d8e2ff",
+          "error":"#ffb4ab","primary":"#d2bbff"
+        },
+        borderRadius: { "DEFAULT":"0.25rem","lg":"0.5rem","xl":"0.75rem","full":"9999px" },
+        spacing: { "lg":"24px","xl":"32px","sm":"8px","gutter":"20px","base":"4px","md":"16px","xs":"4px","sidebar-width":"260px" },
+        fontFamily: {
+          "body-lg":["Inter"],"label-sm":["Inter"],"headline-lg":["Inter"],
+          "headline-sm":["Inter"],"label-md":["JetBrains Mono"],"headline-md":["Inter"],"body-md":["Inter"]
+        },
+        fontSize: {
+          "body-lg":["16px",{lineHeight:"24px",fontWeight:"400"}],
+          "label-sm":["11px",{lineHeight:"16px",fontWeight:"600"}],
+          "headline-lg":["32px",{lineHeight:"40px",letterSpacing:"-0.02em",fontWeight:"700"}],
+          "headline-sm":["20px",{lineHeight:"28px",fontWeight:"600"}],
+          "label-md":["12px",{lineHeight:"16px",letterSpacing:"0.05em",fontWeight:"500"}],
+          "headline-md":["24px",{lineHeight:"32px",letterSpacing:"-0.01em",fontWeight:"600"}],
+          "body-md":["14px",{lineHeight:"20px",fontWeight:"400"}]
+        }
+      }
+    }
+  }
+</script>
+</head>
+<body class="bg-background text-on-surface font-body-md text-body-md overflow-hidden h-screen flex flex-col">
+
+<!-- ── TITLEBAR ──────────────────────────────────────────────────────────── -->
+<div class="drag-region flex items-center justify-between h-9 px-4 bg-surface-container-low border-b border-white/5 flex-shrink-0">
+  <div class="flex items-center gap-2 no-drag">
+    <span class="material-symbols-outlined text-primary text-[16px]" style="font-variation-settings:'FILL' 1">cloud_sync</span>
+    <span class="text-[12px] font-semibold text-on-surface-variant">VPS Sync Manager</span>
+  </div>
+  <div class="flex items-center no-drag">
+    <button onclick="window.api.minimize()" class="w-8 h-8 flex items-center justify-center text-on-surface-variant hover:bg-surface-bright transition-colors rounded">
+      <span class="material-symbols-outlined text-[16px]">remove</span>
+    </button>
+    <button onclick="window.api.maximize()" class="w-8 h-8 flex items-center justify-center text-on-surface-variant hover:bg-surface-bright transition-colors rounded">
+      <span class="material-symbols-outlined text-[16px]">crop_square</span>
+    </button>
+    <button onclick="window.api.close()" class="w-8 h-8 flex items-center justify-center text-on-surface-variant hover:bg-error hover:text-white transition-colors rounded">
+      <span class="material-symbols-outlined text-[16px]">close</span>
+    </button>
+  </div>
+</div>
+
+<!-- ── BODY ──────────────────────────────────────────────────────────────── -->
+<div class="flex flex-1 overflow-hidden">
+
+  <!-- ── SIDEBAR ─────────────────────────────────────────────────────────── -->
+  <aside class="w-[260px] bg-surface-container-low flex flex-col border-r border-white/10 flex-shrink-0">
+    <div class="p-xl flex-1 overflow-y-auto">
+      <div class="flex items-center gap-sm mb-xl">
+        <span class="material-symbols-outlined text-primary text-headline-sm" style="font-variation-settings:'FILL' 1">cloud_sync</span>
+        <div>
+          <div class="font-bold text-primary text-[13px] leading-tight">VPS Sync</div>
+          <div class="text-[10px] text-on-surface-variant font-mono">Manager</div>
+        </div>
+      </div>
+
+      <nav class="space-y-xs">
+        <a class="nav-item flex items-center gap-md px-md py-sm text-on-surface-variant hover:bg-surface-bright hover:text-on-surface transition-colors rounded-lg cursor-pointer" data-page="dashboard">
+          <span class="material-symbols-outlined nav-icon">dashboard</span>
+          <span class="font-label-md text-label-md">Dashboard</span>
+        </a>
+        <a class="nav-item flex items-center gap-md px-md py-sm text-on-surface-variant hover:bg-surface-bright hover:text-on-surface transition-colors rounded-lg cursor-pointer" data-page="sync-folders">
+          <span class="material-symbols-outlined nav-icon">folder_shared</span>
+          <span class="font-label-md text-label-md">Sync Folders</span>
+        </a>
+        <a class="nav-item flex items-center gap-md px-md py-sm text-on-surface-variant hover:bg-surface-bright hover:text-on-surface transition-colors rounded-lg cursor-pointer" data-page="file-browser">
+          <span class="material-symbols-outlined nav-icon">folder_open</span>
+          <span class="font-label-md text-label-md">File Browser</span>
+        </a>
+        <a class="nav-item flex items-center gap-md px-md py-sm text-on-surface-variant hover:bg-surface-bright hover:text-on-surface transition-colors rounded-lg cursor-pointer" data-page="activity">
+          <span class="material-symbols-outlined nav-icon">history</span>
+          <span class="font-label-md text-label-md">Activity Log</span>
+        </a>
+        <a class="nav-item flex items-center gap-md px-md py-sm text-on-surface-variant hover:bg-surface-bright hover:text-on-surface transition-colors rounded-lg cursor-pointer" data-page="settings">
+          <span class="material-symbols-outlined nav-icon">settings</span>
+          <span class="font-label-md text-label-md">Settings</span>
+        </a>
+      </nav>
+    </div>
+
+    <!-- Connection status -->
+    <div class="p-xl border-t border-white/5 space-y-md">
+      <div class="flex items-center gap-xs">
+        <span id="conn-dot" class="w-2 h-2 rounded-full bg-tertiary shadow-[0_0_8px_rgba(78,222,163,0.5)]"></span>
+        <span id="conn-label" class="font-label-md text-label-md text-tertiary">Connected</span>
+      </div>
+      <div class="flex items-center gap-sm text-on-surface-variant overflow-hidden">
+        <span class="material-symbols-outlined text-sm flex-shrink-0">dns</span>
+        <span id="server-url-label" class="font-label-md text-label-md truncate">—</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── MAIN ─────────────────────────────────────────────────────────────── -->
+  <main class="flex-1 flex flex-col h-full bg-background overflow-hidden">
+
+    <!-- ━━ PAGE: DASHBOARD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+    <div id="page-dashboard" class="page active flex-col flex-1 overflow-hidden">
+      <header class="flex justify-between items-center px-xl py-lg bg-surface border-b border-white/5 flex-shrink-0">
+        <h1 class="font-headline-md text-headline-md font-bold">Dashboard</h1>
+      </header>
+      <div class="flex-1 overflow-y-auto p-xl">
+        <div class="grid grid-cols-3 gap-lg mb-xl">
+          <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+            <div class="text-on-surface-variant text-[11px] font-mono uppercase tracking-wider mb-sm">Синхронизировано сегодня</div>
+            <div class="font-headline-md text-headline-md font-bold text-primary" id="dash-synced">—</div>
+          </div>
+          <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+            <div class="text-on-surface-variant text-[11px] font-mono uppercase tracking-wider mb-sm">Активных папок</div>
+            <div class="font-headline-md text-headline-md font-bold text-on-surface" id="dash-pairs">0</div>
+          </div>
+          <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+            <div class="text-on-surface-variant text-[11px] font-mono uppercase tracking-wider mb-sm">Ошибок</div>
+            <div class="font-headline-md text-headline-md font-bold text-tertiary" id="dash-errors">0</div>
+          </div>
+        </div>
+        <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+          <div class="text-on-surface-variant text-[11px] font-mono uppercase tracking-wider mb-md">Последняя активность</div>
+          <div id="dash-activity-list" class="space-y-xs text-on-surface-variant text-sm text-center py-8">
+            Ещё нет активности
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ━━ PAGE: SYNC FOLDERS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+    <div id="page-sync-folders" class="page flex-col flex-1 overflow-hidden">
+      <header class="flex justify-between items-center px-xl py-lg bg-surface border-b border-white/5 flex-shrink-0">
+        <h1 class="font-headline-md text-headline-md font-bold">Sync Folders</h1>
+        <div class="flex items-center gap-md">
+          <button onclick="openAddFolderModal()" class="bg-primary-container text-on-primary-container px-lg py-sm rounded-lg font-label-md text-label-md font-bold flex items-center gap-sm hover:opacity-90 active:scale-95 transition-all">
+            <span class="material-symbols-outlined text-[18px]">add</span>Add folder
+          </button>
+          <button class="p-sm text-on-surface-variant hover:bg-surface-container-highest rounded-lg transition-colors">
+            <span class="material-symbols-outlined">notifications</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="flex-1 flex overflow-hidden p-xl gap-xl">
+        <!-- Cards -->
+        <section class="flex-1 space-y-md overflow-y-auto pr-sm" id="sync-pairs-list">
+          <!-- populated by JS -->
+          <div id="sync-empty" class="flex flex-col items-center justify-center h-full text-on-surface-variant gap-md">
+            <span class="material-symbols-outlined text-[48px] opacity-30">folder_off</span>
+            <div class="text-center">
+              <div class="font-semibold">Нет папок для синхронизации</div>
+              <div class="text-sm opacity-70 mt-1">Нажмите «Add folder» чтобы добавить первую</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Right panel -->
+        <aside class="w-[300px] space-y-lg overflow-y-auto flex-shrink-0">
+          <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+            <div class="flex items-center gap-sm text-on-surface-variant font-label-md mb-md">
+              <span class="material-symbols-outlined text-sm">schedule</span>
+              <span>Global Status</span>
+            </div>
+            <p id="status-time" class="font-headline-sm text-headline-sm text-on-surface">—</p>
+            <div class="mt-lg space-y-md">
+              <div class="flex justify-between items-center">
+                <span class="text-on-surface-variant font-body-md">Files synced today</span>
+                <span class="font-label-md font-bold text-primary" id="stat-synced">0</span>
+              </div>
+              <div class="flex justify-between items-center">
+                <span class="text-on-surface-variant font-body-md">Active tasks</span>
+                <span class="font-label-md font-bold text-on-surface" id="stat-tasks">0</span>
+              </div>
+              <div class="flex justify-between items-center">
+                <span class="text-on-surface-variant font-body-md">Errors</span>
+                <span class="font-label-md font-bold text-tertiary" id="stat-errors">0</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-md">
+            <h4 class="font-label-md text-label-md text-on-surface-variant px-sm uppercase tracking-wider">Live Activity</h4>
+            <div id="live-activity" class="space-y-xs">
+              <div class="text-on-surface-variant text-sm text-center py-4 opacity-50">Нет активности</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <!-- Status bar -->
+      <footer id="status-bar" class="h-10 bg-surface-container flex items-center justify-between px-xl border-t border-white/5 flex-shrink-0" style="display:none!important">
+        <div class="flex items-center gap-lg flex-1">
+          <div class="flex items-center gap-sm text-secondary min-w-[110px]">
+            <span class="material-symbols-outlined text-[16px] animate-spin" style="animation-duration:3s">sync</span>
+            <span class="font-label-md text-label-md" id="sb-speed">↑ 0 KB/s</span>
+          </div>
+          <div class="flex-1 max-w-md flex items-center gap-md">
+            <div class="flex-1 bg-surface-container-highest h-1.5 rounded-full overflow-hidden">
+              <div id="sb-bar" class="bg-secondary-container h-full rounded-full transition-all" style="width:0%">
+                <div class="w-full h-full bg-white/20 animate-pulse-soft"></div>
+              </div>
+            </div>
+            <span class="font-label-md text-label-md text-on-surface-variant whitespace-nowrap" id="sb-label">—</span>
+          </div>
+        </div>
+        <button onclick="cancelSync()" class="text-error font-bold font-label-md text-label-md px-md py-xs hover:opacity-80 transition-opacity">Cancel Sync</button>
+      </footer>
+    </div>
+
+    <!-- ━━ PAGE: FILE BROWSER (placeholder) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+    <div id="page-file-browser" class="page flex-col flex-1 overflow-hidden">
+      <header class="flex justify-between items-center px-xl py-lg bg-surface border-b border-white/5 flex-shrink-0">
+        <h1 class="font-headline-md text-headline-md font-bold">File Browser</h1>
+      </header>
+      <div class="flex-1 flex items-center justify-center text-on-surface-variant flex-col gap-md">
+        <span class="material-symbols-outlined text-[48px] opacity-30">folder_open</span>
+        <div class="text-center">
+          <div class="font-semibold">File Browser</div>
+          <div class="text-sm opacity-60 mt-1">Откроется сайт с файловым менеджером</div>
+        </div>
+        <button id="open-fm-btn" onclick="openFileBrowser()" class="bg-primary-container text-on-primary-container px-lg py-sm rounded-lg font-label-md text-label-md font-bold flex items-center gap-sm hover:opacity-90 transition-all mt-md">
+          <span class="material-symbols-outlined text-[18px]">open_in_new</span>Открыть в браузере
+        </button>
+      </div>
+    </div>
+
+    <!-- ━━ PAGE: ACTIVITY LOG ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+    <div id="page-activity" class="page flex-col flex-1 overflow-hidden">
+      <header class="flex justify-between items-center px-xl py-lg bg-surface border-b border-white/5 flex-shrink-0">
+        <h1 class="font-headline-md text-headline-md font-bold">Activity Log</h1>
+        <button onclick="clearActivity()" class="text-on-surface-variant text-sm hover:text-on-surface transition-colors">Очистить</button>
+      </header>
+      <div class="flex-1 overflow-y-auto p-xl">
+        <div id="activity-log-list" class="space-y-xs text-on-surface-variant text-sm text-center py-8">
+          Лог пуст
+        </div>
+      </div>
+    </div>
+
+    <!-- ━━ PAGE: SETTINGS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+    <div id="page-settings" class="page flex-col flex-1 overflow-hidden">
+      <header class="flex justify-between items-center px-xl py-lg bg-surface border-b border-white/5 flex-shrink-0">
+        <h1 class="font-headline-md text-headline-md font-bold">Settings</h1>
+        <button onclick="saveSettings()" class="bg-primary-container text-on-primary-container px-lg py-sm rounded-lg font-label-md text-label-md font-bold hover:opacity-90 active:scale-95 transition-all">
+          Сохранить
+        </button>
+      </header>
+      <div class="flex-1 overflow-y-auto p-xl space-y-xl">
+
+        <!-- Server connection -->
+        <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+          <h3 class="font-headline-sm text-headline-sm mb-lg">Подключение к серверу</h3>
+          <div class="space-y-md">
+            <div>
+              <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">URL сервера</label>
+              <input id="cfg-server-url" class="inp-field" placeholder="http://77.73.135.98:3000" type="text"/>
+            </div>
+            <div class="grid grid-cols-2 gap-md">
+              <div>
+                <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Логин</label>
+                <input id="cfg-username" class="inp-field" placeholder="username" type="text"/>
+              </div>
+              <div>
+                <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Пароль</label>
+                <input id="cfg-password" class="inp-field" placeholder="••••••" type="password"/>
+              </div>
+            </div>
+            <button onclick="testConnection()" class="flex items-center gap-sm text-sm text-primary hover:opacity-80 transition-opacity">
+              <span class="material-symbols-outlined text-[16px]">cable</span>
+              <span id="test-conn-label">Проверить соединение</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Sync defaults -->
+        <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+          <h3 class="font-headline-sm text-headline-sm mb-lg">Параметры синхронизации по умолчанию</h3>
+          <div class="space-y-md">
+            <div>
+              <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Конфликты файлов</label>
+              <select id="cfg-conflict-mode" class="inp-field">
+                <option value="ask">Спросить каждый раз</option>
+                <option value="replace">Всегда заменять</option>
+                <option value="skip">Всегда пропускать</option>
+                <option value="rename">Всегда сохранять оба</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Максимальный размер файла</label>
+              <div class="flex gap-sm">
+                <input id="cfg-max-size" class="inp-field" placeholder="500" type="number" style="width:120px"/>
+                <select id="cfg-max-size-unit" class="inp-field" style="width:90px">
+                  <option value="mb">МБ</option>
+                  <option value="gb">ГБ</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Исключить типы файлов (через запятую)</label>
+              <input id="cfg-exclude-ext" class="inp-field" placeholder=".tmp, .log, .DS_Store" type="text"/>
+            </div>
+          </div>
+        </div>
+
+        <!-- App -->
+        <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+          <h3 class="font-headline-sm text-headline-sm mb-lg">Приложение</h3>
+          <div class="space-y-md">
+            <label class="flex items-center gap-md cursor-pointer">
+              <div class="relative">
+                <input id="cfg-tray" type="checkbox" class="sr-only peer"/>
+                <div class="w-10 h-5 bg-surface-bright rounded-full peer-checked:bg-primary-container transition-colors"></div>
+                <div class="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
+              </div>
+              <span class="text-sm text-on-surface">Сворачивать в трей при закрытии</span>
+            </label>
+            <label class="flex items-center gap-md cursor-pointer">
+              <div class="relative">
+                <input id="cfg-autostart" type="checkbox" class="sr-only peer"/>
+                <div class="w-10 h-5 bg-surface-bright rounded-full peer-checked:bg-primary-container transition-colors"></div>
+                <div class="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
+              </div>
+              <span class="text-sm text-on-surface">Запускать вместе с Windows</span>
+            </label>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ── MODAL: ADD FOLDER ─────────────────────────────────────────────────── -->
+<div id="add-folder-modal" class="fixed inset-0 z-50 items-center justify-center p-xl">
+  <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="closeAddFolderModal()"></div>
+  <div class="relative w-full max-w-[520px] bg-surface-container-high rounded-xl border border-white/10 shadow-2xl p-xl">
+    <div class="flex items-center gap-md mb-xl">
+      <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
+        <span class="material-symbols-outlined text-2xl" style="font-variation-settings:'FILL' 1">create_new_folder</span>
+      </div>
+      <div>
+        <h2 class="font-headline-sm text-headline-sm">Добавить папку</h2>
+        <p class="text-on-surface-variant font-body-md">Настройте пару для синхронизации</p>
+      </div>
+    </div>
+
+    <div class="space-y-md mb-xl">
+      <div>
+        <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Локальная папка</label>
+        <div class="flex gap-sm">
+          <input id="af-local" class="inp-field flex-1" placeholder="C:/Users/you/Documents" type="text" readonly/>
+          <button onclick="pickLocalFolder()" class="bg-surface-bright px-md py-sm rounded-lg text-on-surface hover:bg-surface-container-highest transition-colors flex items-center gap-xs text-sm flex-shrink-0">
+            <span class="material-symbols-outlined text-[16px]">folder_open</span>Выбрать
+          </button>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Папка на VPS</label>
+        <input id="af-remote" class="inp-field" placeholder="/var/downloads/username/MyFolder" type="text"/>
+      </div>
+
+      <div class="grid grid-cols-2 gap-md">
+        <div>
+          <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Направление</label>
+          <select id="af-direction" class="inp-field">
+            <option value="upload">→ Только загрузка (PC→VPS)</option>
+            <option value="download">← Только скачивание (VPS→PC)</option>
+            <option value="both">↔ Двусторонняя</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Расписание</label>
+          <select id="af-schedule" class="inp-field">
+            <option value="manual">Вручную</option>
+            <option value="5m">Каждые 5 минут</option>
+            <option value="15m">Каждые 15 минут</option>
+            <option value="1h">Каждый час</option>
+            <option value="daily">Раз в день</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-[11px] font-mono text-on-surface-variant mb-xs uppercase tracking-wider">Название (опционально)</label>
+        <input id="af-name" class="inp-field" placeholder="Мои проекты" type="text"/>
+      </div>
+    </div>
+
+    <div class="flex justify-end gap-md">
+      <button onclick="closeAddFolderModal()" class="px-xl py-md text-on-surface-variant hover:text-on-surface font-label-md transition-colors">Отмена</button>
+      <button onclick="confirmAddFolder()" class="bg-primary-container text-on-primary-container px-xl py-md rounded-lg font-label-md font-bold hover:brightness-110 active:scale-95 transition-all">Добавить</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── MODAL: CONFLICT ───────────────────────────────────────────────────── -->
+<div id="conflict-modal" class="fixed inset-0 z-50 items-center justify-center p-xl">
+  <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="closeConflictModal()"></div>
+  <div class="relative w-full max-w-[480px] bg-surface-container-high rounded-xl border border-white/10 shadow-2xl p-xl">
+    <div class="flex items-center gap-md mb-lg">
+      <div class="w-12 h-12 rounded-full bg-error/15 flex items-center justify-center text-error">
+        <span class="material-symbols-outlined text-2xl">warning</span>
+      </div>
+      <div>
+        <h2 class="font-headline-sm text-headline-sm">File Conflict</h2>
+        <p class="text-on-surface-variant font-body-md" id="cm-desc">Файл уже существует на сервере.</p>
+      </div>
+    </div>
+
+    <div class="bg-surface-dim rounded-lg p-md border border-white/5 mb-xl">
+      <div class="flex items-center gap-sm">
+        <span class="material-symbols-outlined text-secondary">description</span>
+        <span class="font-label-md text-label-md text-on-surface" id="cm-filename">—</span>
+      </div>
+    </div>
+
+    <div class="space-y-sm mb-xl" id="cm-options">
+      <label class="flex items-center gap-md p-md rounded-lg border border-white/5 hover:bg-surface-bright cursor-pointer transition-colors">
+        <input class="w-4 h-4 accent-[#7c3aed]" name="cm-choice" type="radio" value="replace"/>
+        <div class="flex-1">
+          <p class="font-label-md text-label-md text-on-surface">Replace existing file</p>
+          <p class="text-[11px] text-on-surface-variant">Overwrite the version on the server.</p>
+        </div>
+      </label>
+      <label class="flex items-center gap-md p-md rounded-lg border border-white/5 hover:bg-surface-bright cursor-pointer transition-colors">
+        <input class="w-4 h-4 accent-[#7c3aed]" name="cm-choice" type="radio" value="skip"/>
+        <div class="flex-1">
+          <p class="font-label-md text-label-md text-on-surface">Skip this file</p>
+          <p class="text-[11px] text-on-surface-variant">Leave the server version untouched.</p>
+        </div>
+      </label>
+      <label class="flex items-center gap-md p-md rounded-lg border border-primary/40 bg-primary/5 cursor-pointer transition-colors">
+        <input checked class="w-4 h-4 accent-[#7c3aed]" name="cm-choice" type="radio" value="rename"/>
+        <div class="flex-1">
+          <p class="font-label-md text-label-md text-primary">Keep both versions</p>
+          <p class="text-[11px] text-on-surface-variant">Rename as <span class="font-mono text-on-surface" id="cm-freename">—</span></p>
+        </div>
+      </label>
+    </div>
+
+    <div class="flex justify-end gap-md">
+      <button onclick="closeConflictModal()" class="px-xl py-md text-on-surface-variant hover:text-on-surface font-label-md transition-colors">Cancel</button>
+      <button onclick="confirmConflict()" class="bg-primary-container text-on-primary-container px-xl py-md rounded-lg font-label-md font-bold hover:brightness-110 active:scale-95 transition-all">Confirm Action</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
