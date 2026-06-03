@@ -81,6 +81,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch(e => sendResponse({ ok: false, error: e.message || 'Ошибка' }));
     return true;
   }
+  if (msg.type === 'yt-download') {
+    sendMediaDownload(msg.url, msg.mode || 'video', '', msg.quality || '')
+      .then(data => sendResponse({ ok: true, ...(data || {}) }))
+      .catch(e => sendResponse({ ok: false, error: e.message || 'Ошибка' }));
+    return true;
+  }
   if (msg.type === 'capture-next-download') {
     startDownloadCapture(msg.timeoutMs || 90000, msg.mode || 'direct')
       .then(data => sendResponse({ ok: true, ...(data || {}) }))
@@ -639,7 +645,7 @@ async function sendDownload(url, opts = {}) {
 }
 
 // ─── Медиа-загрузка на VPS через yt-dlp ──────────────────
-async function sendMediaDownload(url, mode, filename = '') {
+async function sendMediaDownload(url, mode, filename = '', quality = '') {
   const cfg = await getConfig();
   if (!cfg.serverUrl || !cfg.token) { notify('Настройте расширение — кликните на иконку'); return; }
   flashBadge('↑', '#a083d1');
@@ -648,6 +654,7 @@ async function sendMediaDownload(url, mode, filename = '') {
     setTimeout(() => ctrl.abort(), 12000);
     const body = new URLSearchParams({ url, mode: mode || 'video' });
     if (filename) body.set('filename', filename);
+    if (quality) body.set('quality', quality);
     const res = await fetchExt(cfg, '/api/ext/media', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
