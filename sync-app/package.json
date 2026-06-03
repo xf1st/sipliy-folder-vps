@@ -9,13 +9,13 @@
     "dev": "electron . --dev"
   },
   "dependencies": {
-    "ssh2-sftp-client": "^10.0.3",
     "chokidar": "^3.6.0",
     "electron-store": "^8.2.0",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "ssh2-sftp-client": "^10.0.3"
   },
   "devDependencies": {
-    "electron": "^31.0.0",
+    "electron": "^31.7.7",
     "electron-builder": "^24.13.3"
   },
   "build": {
