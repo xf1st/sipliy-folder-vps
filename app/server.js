@@ -2722,7 +2722,34 @@ app.patch('/api/fm/share/:token', auth, (req, res) => {
     hasPassword: !!share.passwordHash,
   });
 });
-// POST /api/fm/upload?path=
+// Найти свободное имя файла в папке (1.png → 1 (2).png → 1 (3).png …)
+function resolveFreeName(dir, filename) {
+  const ext  = path.extname(filename);
+  const base = path.basename(filename, ext);
+  let candidate = filename;
+  let i = 2;
+  while (fs.existsSync(path.join(dir, candidate))) {
+    candidate = base + ' (' + i + ')' + ext;
+    i++;
+  }
+  return candidate;
+}
+// POST /api/fm/check-conflicts?path=  body: { filenames: ["a.png","b.mp4"] }
+app.post('/api/fm/check-conflicts', auth, (req, res) => {
+  const dir = fmResolve(req.session.user, req.query.path || '');
+  if (!dir) return res.status(400).json({ error: 'Invalid path' });
+  const { filenames } = req.body;
+  if (!Array.isArray(filenames)) return res.status(400).json({ error: 'filenames required' });
+  const conflicts = filenames
+    .map(name => {
+      const safe = path.basename(Buffer.from(name, 'latin1').toString('utf8')).replace(/[/\\]/g, '_');
+      if (!fs.existsSync(path.join(dir, safe))) return null;
+      return { name: safe, freeName: resolveFreeName(dir, safe) };
+    })
+    .filter(Boolean);
+  res.json({ conflicts });
+});
+// POST /api/fm/upload?path=&conflictMode=replace|skip|rename
 const fmUploader = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
@@ -2731,10 +2758,29 @@ const fmUploader = multer({
       if (!fs.existsSync(fp)) fs.mkdirSync(fp, { recursive: true });
       cb(null, fp);
     },
-    filename: (req, file, cb) => cb(null, path.basename(Buffer.from(file.originalname, 'latin1').toString('utf8')).replace(/[/\\]/g, '_')),
+    filename: (req, file, cb) => {
+      const origName = path.basename(Buffer.from(file.originalname, 'latin1').toString('utf8')).replace(/[/\\]/g, '_');
+      const mode = req.query.conflictMode || 'replace';
+      if (mode === 'rename') {
+        const dir = fmResolve(req.session.user, req.query.path || '');
+        return cb(null, dir ? resolveFreeName(dir, origName) : origName);
+      }
+      cb(null, origName);
+    },
   }),
   limits: { fileSize: 500 * 1024 * 1024 },
-  fileFilter: multerFileFilter,
+  fileFilter: (req, file, cb) => {
+    // Базовая проверка расширения
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (FORBIDDEN_UPLOAD_EXT.has(ext)) return cb(new Error('Расширение ' + ext + ' запрещено'));
+    // Режим skip — не принимать файлы, которые уже существуют
+    if (req.query.conflictMode === 'skip') {
+      const dir = fmResolve(req.session.user, req.query.path || '');
+      const origName = path.basename(Buffer.from(file.originalname, 'latin1').toString('utf8')).replace(/[/\\]/g, '_');
+      if (dir && fs.existsSync(path.join(dir, origName))) return cb(null, false);
+    }
+    cb(null, true);
+  },
 });
 app.post('/api/fm/upload', auth, (req, res) => {
   fmUploader.array('files', 50)(req, res, (err) => {
@@ -5195,6 +5241,36 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<button class="btn-ghost" data-action="close-rename">Отмена</button>' +
   '<button class="btn-primary" data-action="confirm-rename">Сохранить</button>' +
   '</div></div></div>' +
+  /* ── CONFLICT MODAL ── */
+  '<div id="modal-conflict" class="modal-backdrop" style="display:none">' +
+  '<div class="modal" style="width:460px">' +
+  '<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">' +
+  '<div style="width:40px;height:40px;border-radius:12px;background:rgba(255,180,0,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+  '<span class="material-symbols-outlined" style="color:#ffb400;font-size:22px">warning</span></div>' +
+  '<div style="font-weight:700;font-size:17px">Файл уже существует</div>' +
+  '</div>' +
+  '<div id="conflict-desc" style="color:var(--on-surface-variant,#958ea0);font-size:13px;margin-bottom:18px;line-height:1.5"></div>' +
+  '<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px">' +
+  /* radio: replace */
+  '<label style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;cursor:pointer;border:1.5px solid transparent" id="copt-replace-lbl">' +
+  '<input type="radio" name="conflict-opt" value="replace" style="accent-color:var(--primary,#a78bfa);width:16px;height:16px">' +
+  '<div><div style="font-size:14px;font-weight:600">Заменить</div><div style="font-size:12px;color:var(--on-surface-variant,#958ea0)">Существующий файл будет перезаписан</div></div>' +
+  '</label>' +
+  /* radio: skip */
+  '<label style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;cursor:pointer;border:1.5px solid transparent" id="copt-skip-lbl">' +
+  '<input type="radio" name="conflict-opt" value="skip" style="accent-color:var(--primary,#a78bfa);width:16px;height:16px">' +
+  '<div><div style="font-size:14px;font-weight:600">Пропустить</div><div style="font-size:12px;color:var(--on-surface-variant,#958ea0)">Конфликтующие файлы не будут загружены</div></div>' +
+  '</label>' +
+  /* radio: rename */
+  '<label style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;cursor:pointer;border:1.5px solid transparent" id="copt-rename-lbl">' +
+  '<input type="radio" name="conflict-opt" value="rename" style="accent-color:var(--primary,#a78bfa);width:16px;height:16px">' +
+  '<div><div style="font-size:14px;font-weight:600">Сохранить оба</div><div id="conflict-freename-hint" style="font-size:12px;color:var(--on-surface-variant,#958ea0)">Загрузить с новым именем</div></div>' +
+  '</label>' +
+  '</div>' +
+  '<div style="display:flex;gap:10px;justify-content:flex-end">' +
+  '<button class="btn-ghost" data-action="close-conflict">Отмена</button>' +
+  '<button class="btn-primary" id="conflict-confirm-btn" data-action="confirm-conflict">Продолжить</button>' +
+  '</div></div></div>' +
   '<div id="modal-url" class="modal-backdrop" style="display:none">' +
   '<div class="modal" style="width:520px">' +
   /* header */
@@ -6709,7 +6785,61 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  .then(function(results){var failed=results.filter(function(x){return !x.ok;});clearSelection(false);refreshCurrent();if(failed.length)alert("Не удалось удалить: "+failed.length);})' +
   '  .catch(function(){alert("Ошибка удаления");});' +
   '}' +
+  /* ── CONFLICT MODAL LOGIC ── */
+  'var _conflictPendingFiles=null,_conflictPendingFolder=null;' +
+  'function openConflictModal(files,folderPath,conflicts){' +
+  '  _conflictPendingFiles=files;_conflictPendingFolder=folderPath;' +
+  '  var desc=document.getElementById("conflict-desc");' +
+  '  var hint=document.getElementById("conflict-freename-hint");' +
+  '  var n=conflicts.length;' +
+  '  if(n===1){' +
+  '    desc.innerHTML=\'Файл <b>\'+H(conflicts[0].name)+\'</b> уже есть в этой папке. Что сделать?\';' +
+  '    hint.textContent=\'Сохранить как "\'+conflicts[0].freeName+\'"\';' +
+  '  }else{' +
+  '    desc.innerHTML=\'<b>\'+n+\' файла(ов)</b> уже существуют в этой папке. Что сделать с конфликтующими файлами?\';' +
+  '    hint.textContent="Загрузить с новыми именами (добавить номер)";' +
+  '  }' +
+  '  var radios=document.querySelectorAll(\'input[name="conflict-opt"]\');' +
+  '  radios.forEach(function(r){r.checked=false;});' +
+  '  radios[0].checked=true;' +
+  '  updateConflictHighlight();' +
+  '  document.getElementById("modal-conflict").style.display="flex";' +
+  '}' +
+  'function closeConflictModal(){document.getElementById("modal-conflict").style.display="none";}' +
+  'function updateConflictHighlight(){' +
+  '  var val=getConflictChoice();' +
+  '  ["replace","skip","rename"].forEach(function(v){' +
+  '    var lbl=document.getElementById("copt-"+v+"-lbl");' +
+  '    if(lbl)lbl.style.borderColor=val===v?"var(--primary,#a78bfa)":"transparent";' +
+  '  });' +
+  '}' +
+  'function getConflictChoice(){' +
+  '  var radios=document.querySelectorAll(\'input[name="conflict-opt"]\');' +
+  '  for(var i=0;i<radios.length;i++){if(radios[i].checked)return radios[i].value;}' +
+  '  return "replace";' +
+  '}' +
+  'document.addEventListener("change",function(e){if(e.target&&e.target.name==="conflict-opt")updateConflictHighlight();});' +
+  'function confirmConflict(){' +
+  '  var mode=getConflictChoice();' +
+  '  closeConflictModal();' +
+  '  doUploadFiles(_conflictPendingFiles,_conflictPendingFolder,mode);' +
+  '}' +
+  /* ── UPLOAD ── */
   'function uploadFiles(files,folderPath){' +
+  '  if(!files||!files.length)return;' +
+  '  var names=[];' +
+  '  for(var i=0;i<files.length;i++)names.push(files[i].name);' +
+  '  fetch("/api/fm/check-conflicts?path="+encodeURIComponent(folderPath||""),{' +
+  '    method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filenames:names})' +
+  '  }).then(function(r){return r.json();}).then(function(d){' +
+  '    if(d.conflicts&&d.conflicts.length){' +
+  '      openConflictModal(files,folderPath,d.conflicts);' +
+  '    }else{' +
+  '      doUploadFiles(files,folderPath,"replace");' +
+  '    }' +
+  '  }).catch(function(){doUploadFiles(files,folderPath,"replace");});' +
+  '}' +
+  'function doUploadFiles(files,folderPath,conflictMode){' +
   '  if(!files||!files.length)return;' +
   '  var panel=document.getElementById("upload-panel");' +
   '  var fill=document.getElementById("upload-fill");' +
@@ -6722,15 +6852,15 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  panel.style.display="block";fill.classList.remove("done");fill.style.width="0%";' +
   '  status.textContent="0%";title.textContent="Загрузка файлов";' +
   '  if(speedEl)speedEl.textContent="";if(etaEl)etaEl.textContent="";if(bytesEl)bytesEl.textContent="";' +
-  '  var names=[];for(var n=0;n<Math.min(files.length,4);n++)names.push(\'<div class="upload-file">\'+H(files[n].name)+\'</div>\');' +
-  '  if(files.length>4)names.push(\'<div class="upload-file">+ \'+(files.length-4)+\' more</div>\');' +
-  '  list.innerHTML=names.join("");' +
+  '  var dispNames=[];for(var n=0;n<Math.min(files.length,4);n++)dispNames.push(\'<div class="upload-file">\'+H(files[n].name)+\'</div>\');' +
+  '  if(files.length>4)dispNames.push(\'<div class="upload-file">+ \'+(files.length-4)+\' more</div>\');' +
+  '  list.innerHTML=dispNames.join("");' +
   '  var fd=new FormData();' +
   '  var totalBytes=0;for(var i=0;i<files.length;i++){fd.append("files",files[i]);totalBytes+=files[i].size;}' +
   '  var xhr=new XMLHttpRequest();' +
   '  var startTime=Date.now();var lastLoaded=0;var lastTime=Date.now();' +
   '  uploadBusy=true;' +
-  '  xhr.open("POST","/api/fm/upload?path="+encodeURIComponent(folderPath||""));' +
+  '  xhr.open("POST","/api/fm/upload?path="+encodeURIComponent(folderPath||"")+"&conflictMode="+encodeURIComponent(conflictMode||"replace"));' +
   '  xhr.upload.onprogress=function(e){' +
   '    if(!e.lengthComputable)return;' +
   '    var pct=Math.round(e.loaded/e.total*100);' +
@@ -6946,6 +7076,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="rename")openRenameModal(el.dataset.fp,el.dataset.name,el.dataset.dir==="true");' +
   '  else if(action==="close-rename")closeRenameModal();' +
   '  else if(action==="confirm-rename")doRename();' +
+  '  else if(action==="close-conflict")closeConflictModal();' +
+  '  else if(action==="confirm-conflict")confirmConflict();' +
   '  else if(action==="delete")deleteItem(el.dataset.fp,el.dataset.name,el.dataset.dir==="true");' +
   '  else if(action==="upload-btn")document.getElementById("upload-input").click();' +
   '});' +
@@ -7055,10 +7187,11 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '});' +
   /* ── KEYBOARD ── */
   'document.addEventListener("keydown",function(e){' +
-  '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeUrlModal();closeShareModal();closeShareManager();closeQrModal();closeMediaViewer();closePreview();}  var mv=document.getElementById("media-viewer");  var isMvOpen=mv&&mv.classList.contains("open");  if(isMvOpen && previewKind==="image"){    if(e.key==="ArrowRight"){playSibling("next",true);}    else if(e.key==="ArrowLeft"){playSibling("prev",true);}  }' +
+  '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeConflictModal();closeUrlModal();closeShareModal();closeShareManager();closeQrModal();closeMediaViewer();closePreview();}  var mv=document.getElementById("media-viewer");  var isMvOpen=mv&&mv.classList.contains("open");  if(isMvOpen && previewKind==="image"){    if(e.key==="ArrowRight"){playSibling("next",true);}    else if(e.key==="ArrowLeft"){playSibling("prev",true);}  }' +
   '  if(e.key==="Enter"){' +
   '    if(document.getElementById("modal-mkdir").style.display!=="none")createFolder();' +
   '    else if(document.getElementById("modal-rename").style.display!=="none")doRename();' +
+  '    else if(document.getElementById("modal-conflict").style.display!=="none")confirmConflict();' +
   '    else if(document.getElementById("modal-url").style.display!=="none")addUrlDownload();' +
   '    else if(document.getElementById("modal-share").style.display!=="none")confirmShare();' +
   '  }' +
