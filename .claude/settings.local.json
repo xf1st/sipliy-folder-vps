@@ -41,7 +41,11 @@
       "Bash(node deploy_ext.js)",
       "Bash(node --check D:/sites/VPS_downloader/app/server.js)",
       "Bash(node -e ' *)",
-      "Bash(powershell -Command \"Compress-Archive -Path extension/* -DestinationPath 'extension-build/sipliyfolder-extension-v2.16.0.zip' -Force\")"
+      "Bash(powershell -Command \"Compress-Archive -Path extension/* -DestinationPath 'extension-build/sipliyfolder-extension-v2.16.0.zip' -Force\")",
+      "Bash(node --check app/server.js)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git commit -m 'chore: bump version to 2.16.8 *)"
     ]
   }
 }
