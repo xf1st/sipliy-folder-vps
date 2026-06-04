@@ -116,10 +116,25 @@ function getUserAccentHex(username) {
   if (val && typeof val === 'object') return val.accentHex || null;
   return null;
 }
+function getUserQuotaGb(username) {
+  const s = loadSettings();
+  const val = s[username];
+  if (val && typeof val === 'object') return val.quotaGb != null ? val.quotaGb : null;
+  return null;
+}
+function getUserDiskUsedBytes(username) {
+  try {
+    const dir = path.join(DOWNLOADS_ROOT, username);
+    if (!fs.existsSync(dir)) return 0;
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('du', ['-sb', dir], { timeout: 5000, encoding: 'utf8' });
+    return parseInt(out.split('\t')[0], 10) || 0;
+  } catch { return 0; }
+}
 const VT_API = 'https://www.virustotal.com/api/v3';
 const app = express();
 const PORT = 3000;
-const SITE_VERSION = '2.16.8';
+const SITE_VERSION = '2.17.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
@@ -1001,6 +1016,8 @@ app.get('/api/me', auth, (req, res) => {
     username: req.session.user,
     label: me.label || req.session.user,
     isAdmin: !!me.isAdmin,
+    quotaGb: getUserQuotaGb(req.session.user),
+    diskUsedBytes: getUserDiskUsedBytes(req.session.user),
   });
 });
 app.patch('/api/me', auth, (req, res) => {
@@ -1398,7 +1415,7 @@ app.post('/api/mytoken/reset', auth, (req, res) => {
 app.get('/api/users', auth, (req, res) => {
   if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
   const users = loadUsers();
-  res.json(Object.entries(users).map(([u, d]) => ({ username: u, label: d.label, isAdmin: !!d.isAdmin })));
+  res.json(Object.entries(users).map(([u, d]) => ({ username: u, label: d.label, isAdmin: !!d.isAdmin, quotaGb: getUserQuotaGb(u) })));
 });
 app.post('/api/users', auth, (req, res) => {
   if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
@@ -1455,6 +1472,26 @@ app.delete('/api/users/:username', auth, (req, res) => {
       fs.rmSync(userPath, { recursive: true, force: true });
     }
   } catch (e) { console.error('Failed to remove user dir:', e.message); }
+  res.json({ ok: true });
+});
+app.patch('/api/users/:username', auth, (req, res) => {
+  if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
+  const target = req.params.username;
+  const users = loadUsers();
+  if (!users[target]) return res.status(404).json({ error: 'Пользователь не найден' });
+  const s = loadSettings();
+  if (req.body.quotaGb !== undefined) {
+    const raw = req.body.quotaGb;
+    const v = (raw === null || raw === '' || raw === 0) ? null : parseFloat(raw);
+    if (v !== null && (isNaN(v) || v <= 0)) return res.status(400).json({ error: 'Неверное значение квоты' });
+    if (typeof s[target] !== 'object') s[target] = { retention: 7 };
+    s[target].quotaGb = v;
+    saveSettings(s);
+  }
+  if (req.body.label !== undefined) {
+    users[target].label = String(req.body.label || '').trim() || target;
+    saveUsers(users);
+  }
   res.json({ ok: true });
 });
 app.post('/api/change-password', auth, (req, res) => {
@@ -1603,6 +1640,15 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 2 * 1024 * 1024 * 1024 }, fileFilter: multerFileFilter });
 app.post('/api/upload', auth, upload.array('files', 50), (req, res) => {
   if (!req.files || !req.files.length) return res.status(400).json({ error: 'Нет файлов' });
+  const quotaGb = getUserQuotaGb(req.session.user);
+  if (quotaGb !== null) {
+    const usedBytes = getUserDiskUsedBytes(req.session.user);
+    const newSize = req.files.reduce((s, f) => s + f.size, 0);
+    if (usedBytes + newSize > quotaGb * 1024 * 1024 * 1024) {
+      req.files.forEach(f => { try { fs.unlinkSync(f.path); } catch {} });
+      return res.status(413).json({ error: `Превышена квота (${quotaGb} ГБ). Освободите место.` });
+    }
+  }
   req.files.forEach(f => registerUploadedFile(req.session.user, f.filename));
   res.json({ ok: true, files: req.files.map(f => ({ name: f.filename, size: f.size })) });
 });
@@ -2485,6 +2531,29 @@ app.get('/api/fm/doc-preview', auth, async (req, res) => {
     res.status(500).json({ error: e.message || 'Preview failed' });
   }
 });
+app.get('/api/fm/read-text', auth, (req, res) => {
+  const full = fmResolve(req.session.user, req.query.path || '');
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'Файл не найден' });
+  const stat = fs.statSync(full);
+  if (stat.isDirectory()) return res.status(400).json({ error: 'Это папка' });
+  if (stat.size > 512 * 1024) return res.status(413).json({ error: 'Файл слишком большой для редактирования (> 512 КБ)' });
+  try {
+    const text = fs.readFileSync(full, 'utf8');
+    res.json({ text });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/fm/write-text', auth, (req, res) => {
+  const full = fmResolve(req.session.user, req.body.path || '');
+  if (!full) return res.status(403).json({ error: 'Invalid path' });
+  if (!fs.existsSync(full)) return res.status(404).json({ error: 'Файл не найден' });
+  if (fs.statSync(full).isDirectory()) return res.status(400).json({ error: 'Это папка' });
+  if (typeof req.body.text !== 'string') return res.status(400).json({ error: 'Нет текста' });
+  try {
+    fs.writeFileSync(full, req.body.text, 'utf8');
+    logActivity(req.session.user, 'Редактирование', 'Отредактирован файл: ' + (req.body.path || ''));
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.get('/api/fm/archive/list', auth, (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
   if (!full || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return res.status(404).json({ error: 'Not found' });
@@ -2558,6 +2627,13 @@ app.post('/api/fm/add-url', auth, async (req, res) => {
   if (!isUriSafe(dlUrl)) return res.status(400).json({ error: 'URL заблокирован (приватный/локальный адрес или неподдерживаемая схема)' });
   const dir = fmResolve(req.session.user, relPath);
   if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return res.status(403).json({ error: 'Invalid path' });
+  const fmAddUrlQuota = getUserQuotaGb(req.session.user);
+  if (fmAddUrlQuota !== null) {
+    const usedBytes = getUserDiskUsedBytes(req.session.user);
+    if (usedBytes >= fmAddUrlQuota * 1024 * 1024 * 1024) {
+      return res.status(413).json({ error: `Превышена квота (${fmAddUrlQuota} ГБ). Освободите место.` });
+    }
+  }
   try {
     const opts = { dir };
     if (outName) opts.out = outName;
@@ -5169,6 +5245,21 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '<div id="mv-stage" class="mv-stage"></div>' +
   '<div id="mv-bottom" class="mv-bottom"></div>' +
   '</div>' +
+  '<div id="modal-text-editor" class="modal-backdrop" style="display:none">' +
+  '<div class="modal" style="width:min(700px,96vw);max-height:90vh;display:flex;flex-direction:column">' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-shrink:0">' +
+  '<div><div style="font-weight:700;font-size:17px" id="te-title">Редактор</div><div style="font-size:12px;color:var(--on-surf-var);margin-top:2px" id="te-path-label"></div></div>' +
+  '<button class="btn-ghost" data-action="close-text-editor" style="padding:6px 10px"><span class="material-symbols-outlined">close</span></button>' +
+  '</div>' +
+  '<div id="te-status" style="font-size:12px;min-height:18px;margin-bottom:8px;color:var(--on-surf-var);flex-shrink:0"></div>' +
+  '<textarea id="te-textarea" spellcheck="false" style="flex:1;min-height:340px;max-height:60vh;width:100%;background:var(--surf-hi);color:var(--on-surf);border:1.5px solid var(--outline-var);border-radius:14px;padding:14px 16px;font-size:13px;font-family:\'JetBrains Mono\',\'Fira Mono\',\'Cascadia Code\',Consolas,monospace;line-height:1.6;resize:vertical;outline:none;box-sizing:border-box;transition:border-color .2s" onfocus="this.style.borderColor=\'var(--accent-color)\'" onblur="this.style.borderColor=\'var(--outline-var)\'"></textarea>' +
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:14px;flex-shrink:0">' +
+  '<div style="font-size:11px;color:var(--outline)">Ctrl+S — сохранить</div>' +
+  '<div style="display:flex;gap:10px">' +
+  '<button class="btn-ghost" data-action="close-text-editor">Отмена</button>' +
+  '<button class="btn-primary" data-action="save-text-editor"><span class="material-symbols-outlined" style="font-size:17px">save</span> Сохранить</button>' +
+  '</div></div>' +
+  '</div></div>' +
   '<div id="ctx-menu"></div>' +
 '<div id="toast" style="display:none;flex-direction:column;gap:14px;box-sizing:border-box">' +
   '  <div style="display:flex;justify-content:space-between;align-items:center;width:100%">' +
@@ -5853,7 +5944,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function loadCloudProfile(){fetch("/api/me").then(function(r){return r.json();}).then(function(d){updateSidebarProfile(d);var inp=document.getElementById("cloud-profile-label");if(inp)inp.value=d.label||d.username||"";}).catch(function(){setCloudStatus("cloud-profile-status","\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u043e\u0444\u0438\u043b\u044f",false);});}\n' +
   'function saveCloudProfile(){var inp=document.getElementById("cloud-profile-label"),label=(inp&&inp.value||"").trim();fetch("/api/me",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({label:label})}).then(function(r){return r.json().then(function(d){d._ok=r.ok;return d;});}).then(function(d){setCloudStatus("cloud-profile-status",d._ok?"\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e":(d.error||"\u041e\u0448\u0438\u0431\u043a\u0430"),d._ok);if(d._ok)updateSidebarProfile(d);}).catch(function(){setCloudStatus("cloud-profile-status","\u041e\u0448\u0438\u0431\u043a\u0430",false);});}\n' +
   'function changeCloudPassword(){var currentPassword=document.getElementById("cloud-pass-current").value,newPassword=document.getElementById("cloud-pass-new").value;fetch("/api/change-password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({currentPassword:currentPassword,newPassword:newPassword})}).then(function(r){return r.json().then(function(d){d._ok=r.ok;return d;});}).then(function(d){setCloudStatus("cloud-pass-status",d._ok?"Пароль изменён":(d.error||"Ошибка"),d._ok);if(d._ok){document.getElementById("cloud-pass-current").value="";document.getElementById("cloud-pass-new").value="";}}).catch(function(){setCloudStatus("cloud-pass-status","Ошибка",false);});}' +
-  'function loadCloudUsers(){fetch("/api/users").then(function(r){if(!r.ok)throw new Error("not admin");return r.json();}).then(function(users){var sec=document.getElementById("cloud-users-section"),box=document.getElementById("cloud-users-list");if(!sec||!box)return;sec.style.display="block";box.innerHTML=users.map(function(u){return \'<div style="display:flex;align-items:center;gap:8px;border:1px solid #353437;border-radius:12px;padding:8px 10px"><div style="flex:1"><b>\'+H(u.username)+\'</b><div style="font-size:12px;color:#958ea0">\'+H(u.label||"")+\' \'+(u.isAdmin?"· admin":"")+\'</div></div><button class="btn-ghost" data-action="settings-delete-user" data-user="\'+H(u.username)+\'" style="color:#ffb4ab;border-color:#93000a">Удалить</button></div>\';}).join("");}).catch(function(){var sec=document.getElementById("cloud-users-section");if(sec)sec.style.display="none";});}' +
+  'function loadCloudUsers(){fetch("/api/users").then(function(r){if(!r.ok)throw new Error("not admin");return r.json();}).then(function(users){var sec=document.getElementById("cloud-users-section"),box=document.getElementById("cloud-users-list");if(!sec||!box)return;sec.style.display="block";box.innerHTML=users.map(function(u){var quotaLabel=u.quotaGb!=null?(u.quotaGb+" ГБ"):"без лимита";return \'<div style="border:1px solid #353437;border-radius:14px;padding:10px 12px;margin-bottom:2px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><div style="flex:1"><b>\'+H(u.username)+\'</b><div style="font-size:12px;color:#958ea0">\'+H(u.label||"")+\' \'+(u.isAdmin?"· admin":"")+\'</div></div><button class="btn-ghost" data-action="settings-delete-user" data-user="\'+H(u.username)+\'" style="color:#ffb4ab;border-color:#93000a;padding:4px 10px;font-size:12px">Удалить</button></div><div style="display:flex;align-items:center;gap:6px"><span style="font-size:12px;color:#958ea0;white-space:nowrap">Квота:</span><input id="quota-inp-\'+H(u.username)+\'" type="number" min="1" step="1" placeholder="∞ без лимита" value="\'+H(u.quotaGb!=null?String(u.quotaGb):"")+\'" style="width:100px;background:var(--surf-hi);color:var(--on-surf);border:1px solid var(--outline-var);border-radius:8px;padding:4px 8px;font-size:12px;outline:none"><span style="font-size:12px;color:#958ea0">ГБ</span><button class="btn-ghost" onclick="saveUserQuota(\\\'\'+H(u.username)+\'\\\')" style="padding:4px 10px;font-size:12px">Сохранить</button><span id="quota-status-\'+H(u.username)+\'" style="font-size:12px;color:var(--accent-light);min-width:60px">\'+quotaLabel+\'</span></div></div>\';}).join("");}).catch(function(){var sec=document.getElementById("cloud-users-section");if(sec)sec.style.display="none";});}' +
+  'function saveUserQuota(username){var inp=document.getElementById("quota-inp-"+username);var st=document.getElementById("quota-status-"+username);if(!inp)return;var raw=inp.value.trim();var v=raw===""?null:parseFloat(raw);fetch("/api/users/"+encodeURIComponent(username),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({quotaGb:v})}).then(function(r){return r.json();}).then(function(d){if(st)st.textContent=d.ok?(v!=null?v+" ГБ":"без лимита"):(d.error||"Ошибка");}).catch(function(){if(st)st.textContent="Ошибка";});}' +
   'function addCloudUser(){var username=document.getElementById("cloud-new-username").value.trim(),password=document.getElementById("cloud-new-password").value,label=document.getElementById("cloud-new-label").value.trim();fetch("/api/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:username,password:password,label:label})}).then(function(r){return r.json().then(function(d){d._ok=r.ok;return d;});}).then(function(d){setCloudStatus("cloud-users-status",d._ok?"Аккаунт добавлен":(d.error||"Ошибка"),d._ok);if(d._ok){document.getElementById("cloud-new-username").value="";document.getElementById("cloud-new-password").value="";document.getElementById("cloud-new-label").value="";loadCloudUsers();}}).catch(function(){setCloudStatus("cloud-users-status","Ошибка",false);});}' +
   'function deleteCloudUser(username){if(!confirm("Удалить аккаунт "+username+"?"))return;fetch("/api/users/"+encodeURIComponent(username),{method:"DELETE"}).then(function(r){return r.json().then(function(d){d._ok=r.ok;return d;});}).then(function(d){setCloudStatus("cloud-users-status",d._ok?"Аккаунт удалён":(d.error||"Ошибка"),d._ok);loadCloudUsers();}).catch(function(){setCloudStatus("cloud-users-status","Ошибка",false);});}' +
   'function getFilteredEntries(entries){' +
@@ -6904,6 +6996,9 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    h+=\'<div class="ctx-item" data-ctx="download">↓ Скачать</div>\';' +
   '  }' +
   '  if(!isDir)h+=\'<div class="ctx-item" data-ctx="preview">👁 Предпросмотр</div>\';' +
+  '  var _txtExts=new Set([".txt",".log",".md",".json",".csv",".js",".ts",".jsx",".tsx",".css",".xml",".yml",".yaml",".ini",".conf",".cfg",".sh",".py",".toml",".env",".htaccess",".sql"]);' +
+  '  var _nameExt=(name.lastIndexOf(".")>0?name.slice(name.lastIndexOf(".")):"")+""' +
+  '  if(!isDir&&_txtExts.has(_nameExt.toLowerCase()))h+=\'<div class="ctx-item" data-ctx="edit-text"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:-3px">edit_note</span> Редактировать</div>\';' +
   '  h+=\'<div class="ctx-sep"></div>\';' +
   '  h+=\'<div class="ctx-item" data-ctx="share">🔗 Публичная ссылка</div>\';' +
   '  if(!isDir)h+=\'<div class="ctx-item" data-ctx="share-manage"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-4px">admin_panel_settings</span> Управление ссылками</div>\';' +
@@ -6919,6 +7014,35 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  m.style.top=Math.max(8,(y+mh>wh?wh-mh-8:y))+"px";' +
   '}' +
   'function hideCtxMenu(){var m=document.getElementById("ctx-menu");m.style.display="none";m.classList.remove("open");}' +
+  'var _teFp="";' +
+  'function openTextEditor(fp,name){' +
+  '  _teFp=fp;' +
+  '  document.getElementById("te-title").textContent=name||fp;' +
+  '  document.getElementById("te-path-label").textContent=fp;' +
+  '  document.getElementById("te-status").textContent="Загрузка...";' +
+  '  document.getElementById("te-textarea").value="";' +
+  '  document.getElementById("modal-text-editor").style.display="flex";' +
+  '  fetch("/api/fm/read-text?path="+encodeURIComponent(fp))' +
+  '    .then(function(r){return r.json();})' +
+  '    .then(function(d){' +
+  '      if(d.error){document.getElementById("te-status").textContent=d.error;return;}' +
+  '      document.getElementById("te-textarea").value=d.text;' +
+  '      document.getElementById("te-status").textContent="";' +
+  '      document.getElementById("te-textarea").focus();' +
+  '    }).catch(function(){document.getElementById("te-status").textContent="Ошибка загрузки";});' +
+  '}' +
+  'function saveTextFile(){' +
+  '  if(!_teFp)return;' +
+  '  var text=document.getElementById("te-textarea").value;' +
+  '  var st=document.getElementById("te-status");' +
+  '  st.textContent="Сохранение...";' +
+  '  fetch("/api/fm/write-text",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:_teFp,text:text})})' +
+  '    .then(function(r){return r.json();})' +
+  '    .then(function(d){' +
+  '      if(d.ok){st.textContent="Сохранено";setTimeout(function(){st.textContent="";},2000);}' +
+  '      else{st.textContent=d.error||"Ошибка";}' +
+  '    }).catch(function(){st.textContent="Ошибка сохранения";});' +
+  '}' +
   /* ── DRAG & DROP ── */
   'function clearDragOver(){document.querySelectorAll(".drag-over,.drop-target").forEach(function(el){el.classList.remove("drag-over");el.classList.remove("drop-target");});}' +
   /* TRANSFERS */
@@ -6962,16 +7086,21 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  }).catch(function(){});' +
   '}' +
   'function loadDisk(){' +
-  '  fetch("/api/fm/list?path=").then(function(r){return r.json();})' +
-  '  .then(function(d){' +
-  '    if(d.diskUsed!=null&&d.diskTotal!=null){' +
-  '      var pct=Math.round(d.diskUsed/d.diskTotal*100);' +
-  '      document.getElementById("disk-fill").style.width=pct+"%";' +
-  '      document.getElementById("disk-label").textContent=fmtSize(d.diskUsed)+" / "+fmtSize(d.diskTotal);' +
-  '      var mf=document.getElementById("mobile-disk-fill"),ml=document.getElementById("mobile-disk-label");' +
-  '      if(mf)mf.style.width=pct+"%";' +
-  '      if(ml)ml.textContent=fmtSize(d.diskUsed)+" / "+fmtSize(d.diskTotal);' +
-  '    }' +
+  '  Promise.all([fetch("/api/fm/list?path=").then(function(r){return r.json();}).catch(function(){return{};}),fetch("/api/me").then(function(r){return r.json();}).catch(function(){return{};})])' +
+  '  .then(function(all){' +
+  '    var d=all[0],me=all[1];' +
+  '    var diskUsed,diskTotal,pct;' +
+  '    if(me.quotaGb!=null&&me.diskUsedBytes!=null){' +
+  '      diskUsed=me.diskUsedBytes;diskTotal=me.quotaGb*1024*1024*1024;' +
+  '    }else if(d.diskUsed!=null&&d.diskTotal!=null){' +
+  '      diskUsed=d.diskUsed;diskTotal=d.diskTotal;' +
+  '    }else{return;}' +
+  '    pct=Math.min(100,Math.round(diskUsed/diskTotal*100));' +
+  '    document.getElementById("disk-fill").style.width=pct+"%";' +
+  '    document.getElementById("disk-label").textContent=fmtSize(diskUsed)+" / "+fmtSize(diskTotal)+(me.quotaGb!=null?" (квота)":"");' +
+  '    var mf=document.getElementById("mobile-disk-fill"),ml=document.getElementById("mobile-disk-label");' +
+  '    if(mf)mf.style.width=pct+"%";' +
+  '    if(ml)ml.textContent=fmtSize(diskUsed)+" / "+fmtSize(diskTotal)+(me.quotaGb!=null?" (квота)":"");' +
   '  }).catch(function(){});' +
   '}' +
   /* ── CLICK DELEGATION ── */
@@ -6988,6 +7117,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '    else if(ca==="share-manage")openShareManager(ctxFp,ctxName);' +
   '    else if(ca==="rename")openRenameModal(ctxFp,ctxName,ctxIsDir);' +
   '    else if(ca==="delete")deleteItem(ctxFp,ctxName,ctxIsDir);' +
+  '    else if(ca==="edit-text")openTextEditor(ctxFp,ctxName);' +
   '    else if(ca==="copypath"){navigator.clipboard&&navigator.clipboard.writeText(ctxFp).catch(function(){});}' +
   '    return;' +
   '  }' +
@@ -7030,6 +7160,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  else if(action==="preview"){openPreview(el.dataset.fp,el.dataset.name,el.dataset.dir==="true");}' +
   '  else if(action==="open-url-modal"){openUrlModal();}' +
   '  else if(action==="dashboard-url-download"){addDashboardUrlDownload();}' +
+  '  else if(action==="close-text-editor"){document.getElementById("modal-text-editor").style.display="none";}' +
+  '  else if(action==="save-text-editor"){saveTextFile();}' +
   '  else if(action==="close-url-modal"){closeUrlModal();}' +
   '  else if(action==="confirm-url-download"){addUrlDownload();}' +
   '  else if(action==="close-share-modal"){closeShareModal();}' +
@@ -7188,7 +7320,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '});' +
   /* ── KEYBOARD ── */
   'document.addEventListener("keydown",function(e){' +
-  '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeConflictModal();closeUrlModal();closeShareModal();closeShareManager();closeQrModal();closeMediaViewer();closePreview();}  var mv=document.getElementById("media-viewer");  var isMvOpen=mv&&mv.classList.contains("open");  if(isMvOpen && previewKind==="image"){    if(e.key==="ArrowRight"){playSibling("next",true);}    else if(e.key==="ArrowLeft"){playSibling("prev",true);}  }' +
+  '  if(e.key==="Escape"){hideCtxMenu();closeMkdirModal();closeRenameModal();closeConflictModal();closeUrlModal();closeShareModal();closeShareManager();closeQrModal();closeMediaViewer();closePreview();document.getElementById("modal-text-editor").style.display="none";}  var mv=document.getElementById("media-viewer");  var isMvOpen=mv&&mv.classList.contains("open");  if(isMvOpen && previewKind==="image"){    if(e.key==="ArrowRight"){playSibling("next",true);}    else if(e.key==="ArrowLeft"){playSibling("prev",true);}  }' +
+  '  if(e.ctrlKey&&e.key==="s"&&document.getElementById("modal-text-editor").style.display!=="none"){e.preventDefault();saveTextFile();}' +
   '  if(e.key==="Enter"){' +
   '    if(document.getElementById("modal-mkdir").style.display!=="none")createFolder();' +
   '    else if(document.getElementById("modal-rename").style.display!=="none")doRename();' +
