@@ -2,52 +2,53 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-// 1. Read the server.js file
-let code = fs.readFileSync(path.join(__dirname, 'app', 'server.js'), 'utf8');
-
-// 2. Create the temp directory for mocks
+// 1. Create the temp directory for mocks (if needed)
 if (!fs.existsSync('./mock_opt')) {
   fs.mkdirSync('./mock_opt');
 }
 
-// 3. Patch the file system paths in code to use local directory
-code = code.replace(/\/opt\/vps-downloader/g, './mock_opt');
-code = code.replace(/\/var\/downloads/g, './mock_opt');
-code = code.replace(/app\.listen\(PORT,[\s\S]*?\);/, '/* app.listen skipped by syntax checker */');
+// 2. Read the templates.js file
+const templatesPath = path.join(__dirname, '..', 'app', 'templates.js');
+let code = fs.readFileSync(templatesPath, 'utf8');
 
-// 4. Mock global things
+// 3. Mock global things for VM context
 const sandbox = {
-  require: require,
+  require: (id) => {
+    if (id === './db') {
+      return {
+        loadUsers: () => ({
+          xf1st: { label: 'Admin', isAdmin: true }
+        })
+      };
+    }
+    if (id === './config') {
+      return require('../app/config');
+    }
+    if (id === './utils') {
+      return require('../app/utils');
+    }
+    if (id === 'path') {
+      return require('path');
+    }
+    return require(id);
+  },
   console: console,
   process: process,
   Buffer: Buffer,
-  setInterval: () => {},
-  clearInterval: () => {},
-  __dirname: path.join(__dirname, 'app'),
   module: { exports: {} },
   exports: {},
-  setTimeout: setTimeout,
-  clearTimeout: clearTimeout
+  __dirname: path.dirname(templatesPath),
 };
 
-const dummyApp = {
-  get: () => {},
-  post: () => {},
-  patch: () => {},
-  delete: () => {},
-  use: () => {},
-  set: () => {},
-};
-sandbox.app = dummyApp;
-
-// Create context and run the patched server.js
 const context = vm.createContext(sandbox);
+
 try {
-  vm.runInContext(code, context, { filename: 'app/server.js' });
+  vm.runInContext(code, context, { filename: 'app/templates.js' });
   
   // Call cloudPage to get the HTML
   console.log("Calling cloudPage('xf1st')...");
-  const html = sandbox.cloudPage('xf1st');
+  const templatesModule = sandbox.module.exports;
+  const html = templatesModule.cloudPage('xf1st');
   console.log("HTML generated successfully! Length:", html.length);
   
   // Extract <script> content
@@ -60,6 +61,7 @@ try {
   
   console.log(`Found ${scripts.length} script blocks.`);
   
+  let hasErrors = false;
   // Validate each script block using vm.Script
   scripts.forEach((scriptCode, index) => {
     console.log(`\n--- Validating Script Block #${index + 1} ---`);
@@ -73,6 +75,7 @@ try {
     } catch (err) {
       console.error(`✗ Syntax error in script block #${index + 1}:`);
       console.error(err);
+      hasErrors = true;
       
       // Print context around the error if line/column are available
       if (err.stack) {
@@ -91,6 +94,12 @@ try {
     }
   });
   
+  if (hasErrors) {
+    process.exit(1);
+  } else {
+    console.log("\nAll client script blocks checked. No syntax errors found!");
+  }
 } catch (err) {
-  console.error("Error running server.js in VM:", err);
+  console.error("Error running templates.js in VM:", err);
+  process.exit(1);
 }

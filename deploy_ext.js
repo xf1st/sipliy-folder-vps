@@ -34,9 +34,19 @@ async function deploy() {
     conn.sftp(async (err, sftp) => {
       if (err) { conn.end(); throw err; }
       console.log('==> Загружаем файлы...');
-      await uploadFile(sftp, path.join(__dirname, 'app/server.js'), `${APP_DIR}/server.js`);
-      console.log('==> server.js загружен');
-      await uploadFile(sftp, path.join(__dirname, 'extension-build/sipliyfolder-extension-v2.16.0.zip'), `${APP_DIR}/extension.zip`);
+      const filesToUpload = [
+        'config.js',
+        'db.js',
+        'utils.js',
+        'media.js',
+        'templates.js',
+        'server.js'
+      ];
+      for (const file of filesToUpload) {
+        await uploadFile(sftp, path.join(__dirname, 'app', file), `${APP_DIR}/${file}`);
+        console.log(`==> ${file} загружен`);
+      }
+      await uploadFile(sftp, path.join(__dirname, 'extension-build/sipliyfolder-extension-v2.16.1.zip'), `${APP_DIR}/extension.zip`);
       console.log('==> extension.zip загружен');
       sftp.end();
       await runCommand(conn, `pm2 restart ${SERVICE} || pm2 start ${APP_DIR}/server.js --name ${SERVICE}`);
