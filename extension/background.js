@@ -601,7 +601,7 @@ function setupContextMenus() {
   });
 }
 
-chrome.contextMenus.onClicked.addListener((info) => {
+chrome.contextMenus.onClicked.addListener(async (info) => {
   if (info.menuItemId === 'capture-next' || info.menuItemId === 'capture-relay') {
     startDownloadCapture(90000, info.menuItemId === 'capture-relay' ? 'relay' : 'direct').catch(e => notify('✕ ' + (e.message || 'Ошибка')));
     return;
@@ -610,7 +610,32 @@ chrome.contextMenus.onClicked.addListener((info) => {
   const url = urls[info.menuItemId];
   if (!url) return;
   if (!/^https?:\/\//i.test(url) && !/^magnet:/i.test(url)) { notify('✕ Неподдерживаемая ссылка'); return; }
-  sendDownload(url).catch(() => {});
+
+  let opts = {};
+  if (/^https?:\/\//i.test(url)) {
+    try {
+      const headers = [];
+      const ref = info.pageUrl || '';
+      if (ref) headers.push({ name: 'Referer', value: ref });
+      const ua = (self.navigator && self.navigator.userAgent) || 'Mozilla/5.0';
+      if (ua) headers.push({ name: 'User-Agent', value: ua });
+
+      const cookies = await new Promise(resolve => chrome.cookies.getAll({ url }, resolve));
+      const cookieHeader = (cookies || []).map(c => c.name + '=' + c.value).join('; ');
+      if (cookieHeader) headers.push({ name: 'Cookie', value: cookieHeader });
+
+      opts.headers = headers;
+
+      if (info.menuItemId === 'dl-link') {
+        const fn = getDownloadFilename({}, url);
+        if (fn) opts.filename = fn;
+      }
+    } catch (e) {
+      console.error('Failed to get cookies/headers for context menu click:', e);
+    }
+  }
+
+  sendDownload(url, opts).catch(() => {});
 });
 
 // ─── Отправка на VPS (активный аккаунт) ──────────────────
