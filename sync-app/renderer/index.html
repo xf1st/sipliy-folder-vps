@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html class="dark" lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VPS Sync Manager</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<style>
+  .material-symbols-outlined{font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24;display:inline-block;line-height:1;text-transform:none;letter-spacing:normal;word-wrap:normal;white-space:nowrap;direction:ltr}
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#1c1b1b}::-webkit-scrollbar-thumb{background:#353534;border-radius:10px}
+  .mica-effect{backdrop-filter:blur(20px) saturate(180%);background-color:rgba(37,37,37,.7);border-top:1px solid rgba(255,255,255,.1)}
+  .drag-region{-webkit-app-region:drag}.no-drag{-webkit-app-region:no-drag}
+  .page{display:none}.page.active{display:flex}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}.page.active>*{animation:fadeIn .18s ease}
+  .nav-item.active{color:#d2bbff!important;font-weight:700;border-left:3px solid #7c3aed;background:rgba(57,57,57,.5);border-radius:0 8px 8px 0}
+  .nav-item.active .nav-icon{font-variation-settings:'FILL' 1}
+  #add-folder-modal{display:none}#add-folder-modal.open{display:flex}
+  input,select,textarea{background:#1c1b1b!important;color:#e5e2e1!important;border:1px solid #4a4455!important;border-radius:8px!important;padding:10px 14px!important;font-size:14px!important;outline:none!important;-webkit-appearance:none!important;transition:border-color .2s!important;width:100%}
+  input:focus,select:focus{border-color:#7c3aed!important;box-shadow:0 0 0 2px rgba(124,58,237,.15)!important}
+  input::placeholder{color:#635d72!important}
+  input[type=checkbox],input[type=radio]{background:transparent!important;border:none!important;padding:0!important;width:auto!important}
+  select option{background:#1c1b1b}
+</style>
+<script>
+tailwind.config={darkMode:"class",theme:{extend:{colors:{"primary-container":"#7c3aed","on-primary-container":"#ede0ff","surface-container-low":"#1c1b1b","surface":"#131313","surface-bright":"#393939","surface-container":"#201f1f","surface-container-high":"#2a2a2a","on-surface":"#e5e2e1","on-surface-variant":"#ccc3d8","outline":"#958da1","outline-variant":"#4a4455","tertiary":"#4edea3","secondary":"#adc6ff","secondary-container":"#0566d9","error":"#ffb4ab","primary":"#d2bbff","background":"#131313"},fontFamily:{"label-md":["JetBrains Mono"]},fontSize:{"label-md":["12px",{lineHeight:"16px",letterSpacing:"0.05em",fontWeight:"500"}],"headline-sm":["20px",{lineHeight:"28px",fontWeight:"600"}]},spacing:{lg:"24px",xl:"32px",sm:"8px",md:"16px",xs:"4px"}}}}
+</script>
+</head>
+<body class="bg-background text-on-surface overflow-hidden h-screen flex flex-col" style="font-family:Inter,sans-serif;font-size:14px">
+
+<!-- Titlebar -->
+<div class="drag-region flex items-center justify-between h-9 px-4 bg-surface-container-low border-b border-white/5 flex-shrink-0">
+  <div class="flex items-center gap-2 no-drag">
+    <span class="material-symbols-outlined text-primary text-[16px]" style="font-variation-settings:'FILL' 1">cloud_sync</span>
+    <span class="text-[12px] font-semibold text-on-surface-variant">VPS Sync Manager</span>
+  </div>
+  <div class="flex no-drag">
+    <button onclick="window.api.minimize()" class="w-8 h-8 flex items-center justify-center text-on-surface-variant hover:bg-surface-bright rounded transition-colors"><span class="material-symbols-outlined text-[16px]">remove</span></button>
+    <button onclick="window.api.maximize()" class="w-8 h-8 flex items-center justify-center text-on-surface-variant hover:bg-surface-bright rounded transition-colors"><span class="material-symbols-outlined text-[16px]">crop_square</span></button>
+    <button onclick="window.api.close()"    class="w-8 h-8 flex items-center justify-center text-on-surface-variant hover:bg-error hover:text-white rounded transition-colors"><span class="material-symbols-outlined text-[16px]">close</span></button>
+  </div>
+</div>
+
+<div class="flex flex-1 overflow-hidden">
+  <!-- Sidebar -->
+  <aside class="w-[240px] bg-surface-container-low flex flex-col border-r border-white/10 flex-shrink-0">
+    <div class="p-xl flex-1 overflow-y-auto">
+      <div class="flex items-center gap-sm mb-xl">
+        <span class="material-symbols-outlined text-primary text-[22px]" style="font-variation-settings:'FILL' 1">cloud_sync</span>
+        <div><div class="font-bold text-primary text-[13px]">VPS Sync</div><div class="text-[10px] text-on-surface-variant" style="font-family:JetBrains Mono,monospace">Manager</div></div>
+      </div>
+      <nav class="space-y-xs">
+        <a class="nav-item flex items-center gap-md px-md py-sm text-on-surface-variant hover:bg-surface-bright hover:text-on-surface transition-colors rounded-lg cursor-pointer" data-page="sync-folders"><span class="material-symbols-outlined nav-icon">folder_shared</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;font-weight:500">Sync Folders</span></a>
+        <a class="nav-item flex items-center gap-md px-md py-sm text-on-surface-variant hover:bg-surface-bright hover:text-on-surface transition-colors rounded-lg cursor-pointer" data-page="activity"><span class="material-symbols-outlined nav-icon">history</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;font-weight:500">Activity Log</span></a>
+        <a class="nav-item flex items-center gap-md px-md py-sm text-on-surface-variant hover:bg-surface-bright hover:text-on-surface transition-colors rounded-lg cursor-pointer" data-page="settings"><span class="material-symbols-outlined nav-icon">settings</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;font-weight:500">Settings</span></a>
+      </nav>
+    </div>
+    <div class="p-xl border-t border-white/5 space-y-md">
+      <div class="flex items-center gap-xs">
+        <span id="conn-dot" class="w-2 h-2 rounded-full bg-outline"></span>
+        <span id="conn-label" style="font-family:JetBrains Mono,monospace;font-size:12px" class="text-on-surface-variant">Не подключено</span>
+      </div>
+      <div class="flex items-center gap-sm text-on-surface-variant overflow-hidden">
+        <span class="material-symbols-outlined text-sm flex-shrink-0">dns</span>
+        <span id="server-url-label" style="font-family:JetBrains Mono,monospace;font-size:11px" class="truncate">—</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="flex-1 flex flex-col h-full bg-background overflow-hidden">
+
+    <!-- PAGE: SYNC FOLDERS -->
+    <div id="page-sync-folders" class="page flex-col flex-1 overflow-hidden">
+      <header class="flex justify-between items-center px-xl py-lg bg-surface border-b border-white/5 flex-shrink-0">
+        <h1 class="font-bold" style="font-size:24px;letter-spacing:-.01em">Sync Folders</h1>
+        <div class="flex items-center gap-md">
+          <button onclick="syncAll()" class="bg-surface-bright text-on-surface-variant px-lg py-sm rounded-lg text-[12px] font-bold flex items-center gap-sm hover:opacity-90 transition-all" style="font-family:JetBrains Mono,monospace">
+            <span class="material-symbols-outlined text-[16px]">sync</span>Sync All
+          </button>
+          <button onclick="openAddFolderModal()" class="bg-primary-container text-on-primary-container px-lg py-sm rounded-lg text-[12px] font-bold flex items-center gap-sm hover:opacity-90 active:scale-95 transition-all" style="font-family:JetBrains Mono,monospace">
+            <span class="material-symbols-outlined text-[16px]">add</span>Add folder
+          </button>
+        </div>
+      </header>
+      <div class="flex-1 flex overflow-hidden p-xl gap-xl">
+        <section class="flex-1 space-y-md overflow-y-auto pr-sm" id="sync-pairs-list">
+          <div id="sync-empty" class="flex flex-col items-center justify-center h-full text-on-surface-variant gap-md">
+            <span class="material-symbols-outlined text-[48px] opacity-30">folder_off</span>
+            <div class="text-center"><div class="font-semibold">Нет папок для синхронизации</div><div class="text-sm opacity-70 mt-1">Нажмите «Add folder»</div></div>
+          </div>
+        </section>
+        <aside class="w-[260px] space-y-lg overflow-y-auto flex-shrink-0">
+          <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+            <div class="flex items-center gap-sm text-on-surface-variant mb-md" style="font-size:11px;font-family:JetBrains Mono,monospace;text-transform:uppercase;letter-spacing:.05em">
+              <span class="material-symbols-outlined text-sm">schedule</span>Status
+            </div>
+            <p id="status-time" class="font-bold text-on-surface" style="font-size:20px">—</p>
+            <div class="mt-lg space-y-md text-sm">
+              <div class="flex justify-between"><span class="text-on-surface-variant">Pairs</span><span id="stat-pairs" class="font-bold text-primary">0</span></div>
+              <div class="flex justify-between"><span class="text-on-surface-variant">Watching</span><span id="stat-watching" class="font-bold text-on-surface">0</span></div>
+            </div>
+          </div>
+          <div>
+            <h4 class="text-on-surface-variant px-sm mb-md" style="font-size:11px;font-family:JetBrains Mono,monospace;text-transform:uppercase;letter-spacing:.05em">Recent Activity</h4>
+            <div id="recent-activity" class="space-y-xs text-sm text-on-surface-variant text-center py-4 opacity-50">Нет активности</div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <!-- PAGE: ACTIVITY LOG -->
+    <div id="page-activity" class="page flex-col flex-1 overflow-hidden">
+      <header class="flex justify-between items-center px-xl py-lg bg-surface border-b border-white/5 flex-shrink-0">
+        <h1 class="font-bold" style="font-size:24px">Activity Log</h1>
+        <button onclick="clearLog()" class="text-on-surface-variant text-sm hover:text-on-surface transition-colors">Очистить</button>
+      </header>
+      <div class="flex-1 overflow-y-auto p-xl">
+        <div id="activity-log-list" class="text-on-surface-variant text-sm text-center py-8 opacity-50">Лог пуст</div>
+      </div>
+    </div>
+
+    <!-- PAGE: SETTINGS -->
+    <div id="page-settings" class="page flex-col flex-1 overflow-hidden">
+      <header class="flex justify-between items-center px-xl py-lg bg-surface border-b border-white/5 flex-shrink-0">
+        <h1 class="font-bold" style="font-size:24px">Settings</h1>
+        <button onclick="saveSettings()" class="bg-primary-container text-on-primary-container px-lg py-sm rounded-lg text-[12px] font-bold hover:opacity-90 active:scale-95 transition-all" style="font-family:JetBrains Mono,monospace">Сохранить</button>
+      </header>
+      <div class="flex-1 overflow-y-auto p-xl space-y-xl">
+        <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+          <h3 class="font-bold mb-lg" style="font-size:20px">Подключение к серверу</h3>
+          <div class="space-y-md">
+            <div><label class="block text-[11px] text-on-surface-variant mb-xs" style="font-family:JetBrains Mono,monospace;text-transform:uppercase;letter-spacing:.05em">URL сервера</label>
+              <input id="cfg-server-url" placeholder="http://77.73.135.98:3000" type="text"/></div>
+            <div class="grid grid-cols-2 gap-md">
+              <div><label class="block text-[11px] text-on-surface-variant mb-xs" style="font-family:JetBrains Mono,monospace;text-transform:uppercase;letter-spacing:.05em">Логин</label><input id="cfg-username" placeholder="username" type="text"/></div>
+              <div><label class="block text-[11px] text-on-surface-variant mb-xs" style="font-family:JetBrains Mono,monospace;text-transform:uppercase;letter-spacing:.05em">Пароль</label><input id="cfg-password" placeholder="••••••" type="password"/></div>
+            </div>
+            <button onclick="checkConnection()" class="flex items-center gap-sm text-sm text-primary hover:opacity-80 transition-opacity">
+              <span class="material-symbols-outlined text-[16px]">cable</span>Проверить соединение
+            </button>
+          </div>
+        </div>
+        <div class="bg-surface-container rounded-xl p-lg border border-white/5">
+          <h3 class="font-bold mb-lg" style="font-size:20px">Приложение</h3>
+          <label class="flex items-center gap-md cursor-pointer">
+            <div class="relative">
+              <input id="cfg-tray" type="checkbox" class="sr-only peer"/>
+              <div class="w-10 h-5 bg-surface-bright rounded-full peer-checked:bg-primary-container transition-colors"></div>
+              <div class="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
+            </div>
+            <span class="text-sm">Сворачивать в трей</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Modal: Add Folder -->
+<div id="add-folder-modal" class="fixed inset-0 z-50 items-center justify-center p-xl">
+  <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="closeAddFolderModal()"></div>
+  <div class="relative w-full max-w-[500px] bg-surface-container-high rounded-xl border border-white/10 shadow-2xl p-xl">
+    <div class="flex items-center gap-md mb-xl">
+      <div class="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
+        <span class="material-symbols-outlined text-2xl" style="font-variation-settings:'FILL' 1">create_new_folder</span>
+      </div>
+      <div><h2 class="font-bold" style="font-size:20px">Добавить папку</h2><p class="text-on-surface-variant text-sm">Настройте пару для синхронизации</p></div>
+    </div>
+    <div class="space-y-md mb-xl">
+      <div><label class="block text-[11px] text-on-surface-variant mb-xs" style="font-family:JetBrains Mono,monospace;text-transform:uppercase;letter-spacing:.05em">Локальная папка</label>
+        <div class="flex gap-sm">
+          <input id="af-local" placeholder="C:/Users/you/Documents" type="text" readonly style="flex:1"/>
+          <button onclick="pickLocalFolder()" class="bg-surface-bright px-md py-sm rounded-lg text-on-surface hover:bg-surface-container-high transition-colors flex items-center gap-xs text-sm flex-shrink-0" style="width:auto">
+            <span class="material-symbols-outlined text-[16px]">folder_open</span>Выбрать
+          </button>
+        </div>
+      </div>
+      <div><label class="block text-[11px] text-on-surface-variant mb-xs" style="font-family:JetBrains Mono,monospace;text-transform:uppercase;letter-spacing:.05em">Папка на VPS</label>
+        <input id="af-remote" placeholder="/var/downloads/username/MyFolder" type="text"/></div>
+      <div class="grid grid-cols-2 gap-md">
+        <div><label class="block text-[11px] text-on-surface-variant mb-xs" style="font-family:JetBrains Mono,monospace;text-transform:uppercase;letter-spacing:.05em">Направление</label>
+          <select id="af-direction">
+            <option value="upload">→ Upload (PC→VPS)</option>
+            <option value="download">← Download (VPS→PC)</option>
+            <option value="both">↔ Двусторонняя</option>
+          </select>
+        </div>
+        <div><label class="block text-[11px] text-on-surface-variant mb-xs" style="font-family:JetBrains Mono,monospace;text-transform:uppercase;letter-spacing:.05em">Название</label>
+          <input id="af-name" placeholder="Мои проекты" type="text"/></div>
+      </div>
+    </div>
+    <div class="flex justify-end gap-md">
+      <button onclick="closeAddFolderModal()" class="px-xl py-md text-on-surface-variant hover:text-on-surface text-sm transition-colors" style="background:none;border:none;cursor:pointer">Отмена</button>
+      <button onclick="confirmAddFolder()" class="bg-primary-container text-on-primary-container px-xl py-md rounded-lg text-sm font-bold hover:brightness-110 active:scale-95 transition-all">Добавить</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

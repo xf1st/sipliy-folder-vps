@@ -6,6 +6,7 @@ const axios = require('axios');
 const config = require('./config');
 const db = require('./db');
 const utils = require('./utils');
+const sse = require('./sse');
 
 const mediaProcesses = new Map();
 
@@ -87,7 +88,11 @@ async function syncAriaDownloadJobs(username) {
       changed = true;
     }
   });
-  if (changed) saveMediaJobs(jobs);
+  if (changed) {
+    saveMediaJobs(jobs);
+    // Уведомляем SSE-клиентов о изменениях
+    sse.emit(username, 'jobs', { ts: Date.now() });
+  }
   return { jobs, downloads: all };
 }
 
@@ -296,6 +301,10 @@ function startMediaJob({ username, url, dir, relPath, mode, filename, quality })
             doneJob.updatedAt = new Date().toISOString();
             latest[id] = doneJob;
             saveMediaJobs(latest);
+            // SSE: уведомить клиента + Web Push при завершении
+            sse.emit(doneJob.user, 'jobs', { ts: Date.now(), done: doneJob.id });
+            // sendPushToUser вызывается из server.js через хук (чтобы не создавать circular dep)
+            if (typeof global._pushJobDone === 'function') global._pushJobDone(doneJob);
           });
         } else if (!j.error) {
           j.status = 'error';
@@ -305,6 +314,7 @@ function startMediaJob({ username, url, dir, relPath, mode, filename, quality })
       j.updatedAt = new Date().toISOString();
       current[id] = j;
       saveMediaJobs(current);
+      if (j.status === 'error') sse.emit(j.user, 'jobs', { ts: Date.now(), error: j.id });
     }
     mediaProcesses.delete(id);
   });

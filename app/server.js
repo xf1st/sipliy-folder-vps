@@ -16,13 +16,14 @@ const db = require('./db');
 const utils = require('./utils');
 const media = require('./media');
 const templates = require('./templates');
+const sse = require('./sse');
 
 // Destructure from config
 const {
   PORT, SITE_VERSION, DOWNLOADS_ROOT, VT_API_KEY, VT_API, TG_TOKEN, TG_BOT_NAME,
   SHARES_FILE, MEDIA_JOBS_FILE, TOKENS_FILE, SETTINGS_FILE, YTDLP_COOKIES_FILE,
   TG_USERS_FILE, USERS_FILE, SECRET_FILE, UPLOADS_FILE, ACTIVITY_FILE,
-  FORBIDDEN_UPLOAD_EXT, getUserCookiesPath
+  VAPID_FILE, PUSH_SUBS_FILE, FORBIDDEN_UPLOAD_EXT, getUserCookiesPath
 } = config;
 
 // Destructure from db
@@ -305,6 +306,105 @@ app.post('/api/share', auth, (req, res) => {
   saveShares(shares);
   res.json({ token });
 });
+// ─── SSE: real-time job updates ──────────────────────────────────────────────
+app.get('/api/events', auth, (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering
+  res.flushHeaders();
+  res.write(': connected\n\n');
+  sse.addClient(req.session.user, res);
+  const keepalive = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch { clearInterval(keepalive); }
+  }, 25000);
+  req.on('close', () => {
+    clearInterval(keepalive);
+    sse.removeClient(req.session.user, res);
+  });
+});
+
+// ─── Web Push ────────────────────────────────────────────────────────────────
+let webpush = null;
+let vapidKeys = null;
+
+function initWebPush() {
+  try {
+    webpush = require('web-push');
+    try {
+      vapidKeys = JSON.parse(fs.readFileSync(VAPID_FILE, 'utf8'));
+    } catch {
+      vapidKeys = webpush.generateVAPIDKeys();
+      fs.writeFileSync(VAPID_FILE, JSON.stringify(vapidKeys));
+    }
+    webpush.setVapidDetails('mailto:admin@vps.local', vapidKeys.publicKey, vapidKeys.privateKey);
+    console.log('✓ Web Push инициализирован');
+  } catch (e) {
+    console.warn('web-push недоступен, Web Push отключён:', e.message);
+    webpush = null;
+  }
+}
+initWebPush();
+// Hook для media.js (избегаем circular dependency)
+global._pushJobDone = (job) => {
+  sendPushToUser(job.user, {
+    title: 'Загрузка завершена',
+    body: job.name || job.file || 'Файл готов',
+    tag: 'job-' + job.id,
+    url: '/',
+  }).catch(() => {});
+};
+
+function loadPushSubs() {
+  try { return JSON.parse(fs.readFileSync(PUSH_SUBS_FILE, 'utf8')); } catch { return {}; }
+}
+function savePushSubs(s) {
+  try { fs.writeFileSync(PUSH_SUBS_FILE, JSON.stringify(s)); } catch {}
+}
+
+async function sendPushToUser(username, payload) {
+  if (!webpush) return;
+  const subs = loadPushSubs();
+  const list = subs[username] || [];
+  const expired = [];
+  for (const sub of list) {
+    try {
+      await webpush.sendNotification(sub, JSON.stringify(payload));
+    } catch (e) {
+      if (e.statusCode === 410 || e.statusCode === 404) expired.push(sub.endpoint);
+    }
+  }
+  if (expired.length) {
+    subs[username] = list.filter(s => !expired.includes(s.endpoint));
+    savePushSubs(subs);
+  }
+}
+
+app.get('/api/push/vapid-key', auth, (req, res) => {
+  if (!vapidKeys) return res.json({ enabled: false });
+  res.json({ enabled: true, publicKey: vapidKeys.publicKey });
+});
+
+app.post('/api/push/subscribe', auth, (req, res) => {
+  const { subscription } = req.body;
+  if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Invalid' });
+  const subs = loadPushSubs();
+  if (!subs[req.session.user]) subs[req.session.user] = [];
+  if (!subs[req.session.user].some(s => s.endpoint === subscription.endpoint))
+    subs[req.session.user].push(subscription);
+  savePushSubs(subs);
+  res.json({ ok: true });
+});
+
+app.delete('/api/push/subscribe', auth, (req, res) => {
+  const { endpoint } = req.body || {};
+  const subs = loadPushSubs();
+  if (subs[req.session.user])
+    subs[req.session.user] = subs[req.session.user].filter(s => s.endpoint !== endpoint);
+  savePushSubs(subs);
+  res.json({ ok: true });
+});
+
 app.get('/api/me', auth, (req, res) => {
   const users = loadUsers();
   const me = users[req.session.user] || {};

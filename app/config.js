@@ -26,6 +26,8 @@ const USERS_FILE = path.join(BASE_DIR, 'users.json');
 const SECRET_FILE = path.join(BASE_DIR, 'session-secret.txt');
 const UPLOADS_FILE = path.join(BASE_DIR, 'uploads.json');
 const ACTIVITY_FILE = path.join(BASE_DIR, 'activity.json');
+const VAPID_FILE = path.join(BASE_DIR, 'vapid.json');
+const PUSH_SUBS_FILE = path.join(BASE_DIR, 'push-subs.json');
 
 // Upload permissions
 const FORBIDDEN_UPLOAD_EXT = new Set(['.html', '.htm', '.svg', '.xhtml', '.xml', '.js', '.mjs']);
@@ -56,6 +58,8 @@ module.exports = {
   SECRET_FILE,
   UPLOADS_FILE,
   ACTIVITY_FILE,
+  VAPID_FILE,
+  PUSH_SUBS_FILE,
   FORBIDDEN_UPLOAD_EXT,
   getUserCookiesPath,
 };
