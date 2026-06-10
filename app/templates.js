@@ -1894,7 +1894,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   '  p=p||"";' +
   '  var s=document.getElementById("search-inp");if(s)s.value="";' +
   '  activeFilter="all";' +
-  '  if(p!==currentPath)clearSelection(false);' +
+  '  if(p!==currentPath){clearSelection(false);closeConflictModal();}' +
   '  currentPath=p;' +
   '  savePath(p);' +
   '  loadDir();' +

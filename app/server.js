@@ -2042,8 +2042,9 @@ app.post('/api/fm/check-conflicts', auth, (req, res) => {
   if (!Array.isArray(filenames)) return res.status(400).json({ error: 'filenames required' });
   const conflicts = filenames
     .map(name => {
-      const safe = path.basename(Buffer.from(name, 'latin1').toString('utf8')).replace(/[/\\]/g, '_');
-      if (!fs.existsSync(path.join(dir, safe))) return null;
+      if (typeof name !== 'string') return null;
+      const safe = path.basename(name).replace(/[/\\]/g, '_');
+      if (!safe || !fs.existsSync(path.join(dir, safe))) return null;
       return { name: safe, freeName: resolveFreeName(dir, safe) };
     })
     .filter(Boolean);
@@ -2070,22 +2071,26 @@ const fmUploader = multer({
   }),
   limits: { fileSize: 500 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    // Базовая проверка расширения
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    if (FORBIDDEN_UPLOAD_EXT.has(ext)) return cb(new Error('Расширение ' + ext + ' запрещено'));
-    // Режим skip — не принимать файлы, которые уже существуют
-    if (req.query.conflictMode === 'skip') {
-      const dir = fmResolve(req.session.user, req.query.path || '');
-      const origName = path.basename(Buffer.from(file.originalname, 'latin1').toString('utf8')).replace(/[/\\]/g, '_');
-      if (dir && fs.existsSync(path.join(dir, origName))) return cb(null, false);
-    }
-    cb(null, true);
+    // Делегируем базовую проверку расширения в общий фильтр
+    multerFileFilter(req, file, (err, ok) => {
+      if (err) return cb(err);
+      if (ok === false) return cb(null, false);
+      // Режим skip — не принимать файлы, которые уже существуют
+      if (req.query.conflictMode === 'skip') {
+        const dir = fmResolve(req.session.user, req.query.path || '');
+        const origName = path.basename(Buffer.from(file.originalname, 'latin1').toString('utf8')).replace(/[/\\]/g, '_');
+        if (dir && fs.existsSync(path.join(dir, origName))) return cb(null, false);
+      }
+      cb(null, true);
+    });
   },
 });
 app.post('/api/fm/upload', auth, (req, res) => {
   fmUploader.array('files', 50)(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
-    if (!req.files || !req.files.length) return res.status(400).json({ error: 'Нет файлов' });
+    if (!req.files) return res.status(400).json({ error: 'Нет файлов' });
+    // conflictMode=skip может оставить req.files пустым — это не ошибка
+    if (!req.files.length) return res.json({ ok: true, files: [], skipped: true });
     req.files.forEach(f => registerUploadedFile(req.session.user, f.filename));
     const fileNames = req.files.map(f => f.filename).join(', ');
     logActivity(req.session.user, 'Загрузка с ПК', 'Загружено ' + req.files.length + ' файл(ов): ' + fileNames);
