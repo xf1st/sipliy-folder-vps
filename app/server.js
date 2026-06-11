@@ -1985,6 +1985,53 @@ app.post('/api/fm/add-url', auth, async (req, res) => {
     res.json({ ok: true, gid });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+// POST /api/fm/torrent-start  body: { path }  — запустить скачивание .torrent файла через aria2
+app.post('/api/fm/torrent-start', auth, async (req, res) => {
+  const relPath = (req.body.path || '').trim();
+  if (!relPath) return res.status(400).json({ error: 'path required' });
+  const full = fmResolve(req.session.user, relPath);
+  if (!full || !fs.existsSync(full) || !fs.statSync(full).isFile()) return res.status(404).json({ error: 'Файл не найден' });
+  if (path.extname(full).toLowerCase() !== '.torrent') return res.status(400).json({ error: 'Не .torrent файл' });
+  // Квота
+  const quota = getUserQuotaGb(req.session.user);
+  if (quota !== null) {
+    const usedBytes = getUserDiskUsedBytes(req.session.user);
+    if (usedBytes >= quota * 1024 * 1024 * 1024) {
+      return res.status(413).json({ error: `Превышена квота (${quota} ГБ). Освободите место.` });
+    }
+  }
+  // Папка назначения — рядом с .torrent файлом
+  const destRel = path.dirname(relPath) === '.' ? '' : path.dirname(relPath).replace(/\\/g, '/');
+  const destDir = fmResolve(req.session.user, destRel);
+  if (!destDir) return res.status(403).json({ error: 'Invalid path' });
+  try {
+    const torrentB64 = fs.readFileSync(full).toString('base64');
+    const gid = await aria2('aria2.addTorrent', [torrentB64, [], { dir: destDir }]);
+    const torrentName = path.basename(full, '.torrent');
+    const jobs = loadMediaJobs();
+    jobs[gid] = {
+      id: gid,
+      user: req.session.user,
+      url: 'torrent:' + path.basename(full),
+      mode: 'file',
+      status: 'active',
+      progress: 0,
+      speed: '',
+      eta: '',
+      name: torrentName,
+      file: '',
+      folder: destRel || '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      startedAtMs: Date.now(),
+      error: '',
+    };
+    saveMediaJobs(jobs);
+    logActivity(req.session.user, 'Торрент', 'Запущено скачивание торрента: ' + path.basename(full) + (destRel ? ' в ' + destRel : ''));
+    sse.emit(req.session.user, 'jobs', { ts: Date.now() });
+    res.json({ ok: true, gid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.get('/api/media/capabilities', auth, (req, res) => {
   ytDlpAvailable((available, version) => res.json({ ok: true, available, version }));
 });
