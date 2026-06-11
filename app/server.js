@@ -1464,15 +1464,19 @@ app.get('/api/fm/list', auth, (req, res) => {
       diskTotal = sf.blocks * sf.bsize;
       diskUsed  = (sf.blocks - sf.bfree) * sf.bsize;
     } catch {}
-    const entries = fs.readdirSync(full)
-      .filter(n => !n.startsWith('.'))
+    const rawNames = fs.readdirSync(full);
+    // .aria2 — служебные контрольные файлы aria2; файл с парным .aria2 ещё докачивается
+    const aria2Controls = new Set(rawNames.filter(n => n.endsWith('.aria2')));
+    const entries = rawNames
+      .filter(n => !n.startsWith('.') && !n.endsWith('.aria2'))
       .map(name => {
         const p = path.join(full, name);
         const stat = fs.statSync(p);
         const isDir = stat.isDirectory();
         let fileCount = 0;
         if (isDir) { try { fileCount = fs.readdirSync(p).filter(n => !n.startsWith('.')).length; } catch {} }
-        return { name, isDir, size: isDir ? 0 : stat.size, mtime: stat.mtime, fileCount };
+        const downloading = !isDir && aria2Controls.has(name + '.aria2');
+        return { name, isDir, size: isDir ? 0 : stat.size, mtime: stat.mtime, fileCount, downloading };
       })
       .sort((a, b) => { if (a.isDir !== b.isDir) return a.isDir ? -1 : 1; return a.name.localeCompare(b.name, 'ru'); });
     res.json({ entries, diskUsed, diskTotal });
@@ -1617,7 +1621,7 @@ app.get('/api/fm/recent', auth, (req, res) => {
   const results = [];
   function walk(dir, relDir) {
     try {
-      fs.readdirSync(dir).filter(n => !n.startsWith('.')).forEach(name => {
+      fs.readdirSync(dir).filter(n => !n.startsWith('.') && !n.endsWith('.aria2')).forEach(name => {
         const full = path.join(dir, name);
         const stat = fs.statSync(full);
         const rel = (relDir ? relDir + '/' : '') + name;
@@ -1648,7 +1652,7 @@ app.get('/api/fm/search', auth, (req, res) => {
   const results = [];
   function walk(dir, relDir) {
     try {
-      fs.readdirSync(dir).filter(n => !n.startsWith('.')).forEach(name => {
+      fs.readdirSync(dir).filter(n => !n.startsWith('.') && !n.endsWith('.aria2')).forEach(name => {
         const full = path.join(dir, name);
         const stat = fs.statSync(full);
         const rel = (relDir ? relDir + '/' : '') + name;
