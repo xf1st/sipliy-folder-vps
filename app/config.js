@@ -1,7 +1,7 @@
 const path = require('path');
 
 const PORT = 3000;
-const SITE_VERSION = '2.19.0';
+const SITE_VERSION = '2.20.0';
 const ARIA2_URL = 'http://localhost:6800/jsonrpc';
 const ARIA2_TOKEN = 'mySecretToken123';
 const DOWNLOADS_ROOT = '/var/downloads';
