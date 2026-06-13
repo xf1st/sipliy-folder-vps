@@ -45,7 +45,8 @@
       "Bash(node --check app/server.js)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git commit -m 'chore: bump version to 2.16.8 *)"
+      "Bash(git commit -m 'chore: bump version to 2.16.8 *)",
+      "Bash(timeout 20 bash *)"
     ]
   }
 }
