@@ -23,7 +23,7 @@ const {
   PORT, SITE_VERSION, DOWNLOADS_ROOT, VT_API_KEY, VT_API, TG_TOKEN, TG_BOT_NAME,
   SHARES_FILE, MEDIA_JOBS_FILE, TOKENS_FILE, SETTINGS_FILE, YTDLP_COOKIES_FILE,
   TG_USERS_FILE, USERS_FILE, SECRET_FILE, UPLOADS_FILE, ACTIVITY_FILE,
-  VAPID_FILE, PUSH_SUBS_FILE, FORBIDDEN_UPLOAD_EXT, getUserCookiesPath
+  VAPID_FILE, PUSH_SUBS_FILE, MEDIA_CACHE_DIR, FORBIDDEN_UPLOAD_EXT, getUserCookiesPath
 } = config;
 
 // Destructure from db
@@ -58,6 +58,10 @@ const {
 } = templates;
 
 const app = express();
+
+// Ensure persistent media cache dir exists
+if (!fs.existsSync(MEDIA_CACHE_DIR)) fs.mkdirSync(MEDIA_CACHE_DIR, { recursive: true });
+const _remuxPending = new Map(); // hash → [{ req, res }]
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -1690,6 +1694,43 @@ app.get('/api/fm/download', auth, (req, res) => {
     res.download(full, path.basename(full));
   }
 });
+// Check if MP4/MOV has moov atom at the start (faststart-optimized for web)
+function checkFastStart(filePath) {
+  try {
+    const buf = Buffer.alloc(8);
+    const fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, buf, 0, 8, 0);
+    fs.closeSync(fd);
+    const atom = buf.slice(4, 8).toString('ascii');
+    return atom === 'ftyp' || atom === 'moov';
+  } catch { return true; }
+}
+
+// Serve a file with Range/206 support
+function serveRangedFile(filePath, contentType, req, res) {
+  const stat = fs.statSync(filePath);
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.setHeader('Content-Type', contentType);
+  const range = req.headers.range;
+  if (range) {
+    const m = String(range).match(/bytes=(\d*)-(\d*)/);
+    if (m) {
+      const start = m[1] ? parseInt(m[1], 10) : 0;
+      const end = m[2] ? Math.min(parseInt(m[2], 10), stat.size - 1) : stat.size - 1;
+      if (start <= end && start < stat.size) {
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+        res.setHeader('Content-Length', end - start + 1);
+        fs.createReadStream(filePath, { start, end }).pipe(res);
+        return;
+      }
+    }
+  }
+  res.setHeader('Content-Length', stat.size);
+  fs.createReadStream(filePath).pipe(res);
+}
+
 // GET /api/fm/preview?path=
 app.get('/api/fm/preview', auth, (req, res) => {
   const full = fmResolve(req.session.user, req.query.path || '');
@@ -1717,9 +1758,8 @@ app.get('/api/fm/preview', auth, (req, res) => {
   }
   const mediaExt = new Set(['.mp4','.webm','.ogg','.mov','.mkv','.m4v','.avi','.flv', '.jpg','.jpeg','.png','.webp','.bmp']);
   if (mediaExt.has(ext) && req.query.thumb === '1') {
-    const os = require('os');
     const hash = crypto.createHash('md5').update(full).digest('hex');
-    const thumbPath = path.join(os.tmpdir(), `vps_thumb_${hash}.jpg`);
+    const thumbPath = path.join(MEDIA_CACHE_DIR, `thumb_${hash}.jpg`);
     if (fs.existsSync(thumbPath)) return res.sendFile(thumbPath, { headers: { 'Content-Type': 'image/jpeg' } });
     const isVideo = ['.mp4','.webm','.ogg','.mov','.mkv','.m4v','.avi','.flv'].includes(ext);
     if (!isVideo && fs.statSync(full).size < 1024 * 500) return res.sendFile(full);
@@ -1777,29 +1817,35 @@ app.get('/api/fm/preview', auth, (req, res) => {
       });
       return;
     }
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'private, max-age=3600');
     const typeMap = { '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.ogg': 'video/ogg', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska' };
-    const stat = fs.statSync(full);
-    const range = req.headers.range;
-    if (range) {
-      const m = String(range).match(/bytes=(\d*)-(\d*)/);
-      if (m) {
-        const start = m[1] ? parseInt(m[1], 10) : 0;
-        const end = m[2] ? Math.min(parseInt(m[2], 10), stat.size - 1) : stat.size - 1;
-        if (start <= end && start < stat.size) {
-          res.status(206);
-          res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
-          res.setHeader('Content-Length', end - start + 1);
-          res.setHeader('Content-Type', typeMap[ext] || 'application/octet-stream');
-          fs.createReadStream(full, { start, end }).pipe(res);
-          return;
-        }
+    const contentType = typeMap[ext] || 'video/mp4';
+    // For MP4/MOV: ensure moov atom is at the front (faststart) for instant duration in browser
+    if (['.mp4', '.m4v', '.mov'].includes(ext) && !checkFastStart(full)) {
+      const stat = fs.statSync(full);
+      const hash = crypto.createHash('md5').update(full + stat.size + stat.mtimeMs.toString()).digest('hex');
+      const cachedPath = path.join(MEDIA_CACHE_DIR, `remux_${hash}.mp4`);
+      if (fs.existsSync(cachedPath) && fs.statSync(cachedPath).size > 0) {
+        return serveRangedFile(cachedPath, 'video/mp4', req, res);
       }
+      if (_remuxPending.has(hash)) {
+        _remuxPending.get(hash).push({ req, res });
+        return;
+      }
+      _remuxPending.set(hash, []);
+      execFile('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', full, '-c', 'copy', '-movflags', '+faststart', cachedPath], { timeout: 300000 }, (err) => {
+        const waiting = _remuxPending.get(hash) || [];
+        _remuxPending.delete(hash);
+        const ok = !err && fs.existsSync(cachedPath) && fs.statSync(cachedPath).size > 0;
+        const servePath = ok ? cachedPath : full;
+        const serveStat = fs.statSync(servePath);
+        serveRangedFile(servePath, 'video/mp4', req, res);
+        waiting.forEach(w => {
+          if (!w.res.headersSent) serveRangedFile(servePath, 'video/mp4', w.req, w.res);
+        });
+      });
+      return;
     }
-    res.setHeader('Content-Length', stat.size);
-    res.setHeader('Content-Type', typeMap[ext] || 'application/octet-stream');
-    fs.createReadStream(full).pipe(res);
+    serveRangedFile(full, contentType, req, res);
     return;
   }
   const textExt = new Set(['.txt','.log','.md','.json','.csv','.js','.css','.html','.xml','.yml','.yaml','.ini','.conf']);

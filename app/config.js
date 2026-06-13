@@ -28,6 +28,7 @@ const UPLOADS_FILE = path.join(BASE_DIR, 'uploads.json');
 const ACTIVITY_FILE = path.join(BASE_DIR, 'activity.json');
 const VAPID_FILE = path.join(BASE_DIR, 'vapid.json');
 const PUSH_SUBS_FILE = path.join(BASE_DIR, 'push-subs.json');
+const MEDIA_CACHE_DIR = path.join(BASE_DIR, 'media-cache');
 
 // Upload permissions
 const FORBIDDEN_UPLOAD_EXT = new Set(['.html', '.htm', '.svg', '.xhtml', '.xml', '.js', '.mjs']);
@@ -60,6 +61,7 @@ module.exports = {
   ACTIVITY_FILE,
   VAPID_FILE,
   PUSH_SUBS_FILE,
+  MEDIA_CACHE_DIR,
   FORBIDDEN_UPLOAD_EXT,
   getUserCookiesPath,
 };
