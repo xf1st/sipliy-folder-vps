@@ -30,4 +30,9 @@ function count() {
   return n;
 }
 
-module.exports = { addClient, removeClient, emit, count };
+// Usernames with at least one active SSE connection
+function connectedUsers() {
+  return Array.from(clients.keys()).filter(u => clients.get(u)?.size > 0);
+}
+
+module.exports = { addClient, removeClient, emit, count, connectedUsers };

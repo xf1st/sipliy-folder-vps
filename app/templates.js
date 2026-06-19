@@ -1844,8 +1844,8 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'function playDoneSound(){try{var ac=new (window.AudioContext||window.webkitAudioContext)();var o=ac.createOscillator(),g=ac.createGain();o.type="sine";o.frequency.setValueAtTime(660,ac.currentTime);o.frequency.setValueAtTime(880,ac.currentTime+.12);g.gain.setValueAtTime(.0001,ac.currentTime);g.gain.exponentialRampToValueAtTime(.08,ac.currentTime+.02);g.gain.exponentialRampToValueAtTime(.0001,ac.currentTime+.34);o.connect(g);g.connect(ac.destination);o.start();o.stop(ac.currentTime+.36);}catch(e){}}' +
   'function notifyDone(name){playDoneSound();showToast("Загрузка завершена",name||"Файл готов","");if("Notification" in window){if(Notification.permission==="granted")new Notification("CloudSpace: загрузка завершена",{body:name||"Файл готов"});else if(Notification.permission==="default")Notification.requestPermission().then(function(p){if(p==="granted")new Notification("CloudSpace: загрузка завершена",{body:name||"Файл готов"});});}}' +
   'function notifyFail(name,error){showToast("Загрузка не удалась",(name||"Media download")+(error?": "+error:""),"");if("Notification" in window){if(Notification.permission==="granted")new Notification("CloudSpace: загрузка не удалась",{body:(name||"Media download")+(error?": "+error:"")});else if(Notification.permission==="default")Notification.requestPermission().then(function(p){if(p==="granted")new Notification("CloudSpace: загрузка не удалась",{body:(name||"Media download")+(error?": "+error:"")});});}}' +
-  'var connectionOnline=true,connectionHadDrop=false,connectionTimer=null;' +
-  'function setConnectionState(ok,checking){var pill=document.getElementById("connection-pill"),txt=document.getElementById("connection-text");if(!pill||!txt)return;clearTimeout(connectionTimer);pill.classList.remove("offline","checking");if(ok){connectionOnline=true;if(connectionHadDrop){showToast("\\u0421\\u043e\\u0435\\u0434\\u0438\\u043d\\u0435\\u043d\\u0438\\u0435 \\u0432\\u043e\\u0441\\u0441\\u0442\\u0430\\u043d\\u043e\\u0432\\u043b\\u0435\\u043d\\u043e","CloudSpace \\u0441\\u043d\\u043e\\u0432\\u0430 \\u043d\\u0430 \\u0441\\u0432\\u044f\\u0437\\u0438","");connectionHadDrop=false;}pill.style.display="none";return;}connectionOnline=false;connectionHadDrop=true;txt.textContent=checking?"\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0441\\u043e\\u0435\\u0434\\u0438\\u043d\\u0435\\u043d\\u0438\\u0435...":"\\u041d\\u0435\\u0442 \\u0441\\u0432\\u044f\\u0437\\u0438 \\u0441 VPS";pill.classList.add(checking?"checking":"offline");pill.style.display="flex";}' +
+  'var connectionOnline=true,connectionHadDrop=false,connectionDropAt=0,connectionTimer=null;' +
+  'function setConnectionState(ok,checking){var pill=document.getElementById("connection-pill"),txt=document.getElementById("connection-text");if(!pill||!txt)return;clearTimeout(connectionTimer);pill.classList.remove("offline","checking");if(ok){connectionOnline=true;if(connectionHadDrop&&(Date.now()-connectionDropAt>20000)){showToast("\\u0421\\u043e\\u0435\\u0434\\u0438\\u043d\\u0435\\u043d\\u0438\\u0435 \\u0432\\u043e\\u0441\\u0441\\u0442\\u0430\\u043d\\u043e\\u0432\\u043b\\u0435\\u043d\\u043e","CloudSpace \\u0441\\u043d\\u043e\\u0432\\u0430 \\u043d\\u0430 \\u0441\\u0432\\u044f\\u0437\\u0438","");}connectionHadDrop=false;connectionDropAt=0;pill.style.display="none";return;}if(!connectionHadDrop){connectionDropAt=Date.now();}connectionOnline=false;connectionHadDrop=true;txt.textContent=checking?"\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u044f\\u044e \\u0441\\u043e\\u0435\\u0434\\u0438\\u043d\\u0435\\u043d\\u0438\\u0435...":"\\u041d\\u0435\\u0442 \\u0441\\u0432\\u044f\\u0437\\u0438 \\u0441 VPS";pill.classList.add(checking?"checking":"offline");pill.style.display="flex";}' +
   'async function checkConnection(silent){if(!navigator.onLine){setConnectionState(false,false);return;}try{if(!silent)setConnectionState(false,true);var c=new AbortController();var tm=setTimeout(function(){c.abort();},4500);var r=await fetch("/api/speedtest/ping?health=1&x="+Date.now(),{cache:"no-store",signal:c.signal});clearTimeout(tm);setConnectionState(!!r.ok,false);}catch(e){setConnectionState(false,false);}}' +
   'window.addEventListener("offline",function(){setConnectionState(false,false);});' +
   'window.addEventListener("online",function(){checkConnection(false);});' +
@@ -3591,15 +3591,20 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'loadTransfers();' +
   'checkConnection(true);' +
   /* ── SSE: заменяем polling раз в 2 сек на push-события ── */
-  'var _sseConn=null,_sseRetry=0;' +
+  'var _sseConn=null,_sseRetry=0,_sseReconnTimer=null;' +
+  'var _ltDebounce=null,_ltLastRun=0;' +
+  'function loadTransfersDebounced(){var now=Date.now();if(now-_ltLastRun<1500){clearTimeout(_ltDebounce);_ltDebounce=setTimeout(function(){_ltLastRun=Date.now();loadTransfers();},1500-(now-_ltLastRun));return;}_ltLastRun=now;loadTransfers();}' +
   'function connectSSE(){' +
-  '  if(_sseConn){try{_sseConn.close();}catch{}}' +
+  '  clearTimeout(_sseReconnTimer);' +
+  '  if(_sseConn){_sseConn.onerror=null;try{_sseConn.close();}catch{}}' +
   '  _sseConn=new EventSource("/api/events");' +
-  '  _sseConn.addEventListener("jobs",function(){loadTransfers();_sseRetry=0;});' +
+  '  _sseConn.addEventListener("jobs",function(){loadTransfersDebounced();_sseRetry=0;});' +
   '  _sseConn.onerror=function(){' +
-  '    _sseRetry++;' +
-  '    var delay=Math.min(30000,2000*Math.pow(1.5,_sseRetry));' +
-  '    setTimeout(connectSSE,delay);' +
+  '    if(_sseConn.readyState===EventSource.CLOSED){' +
+  '      _sseRetry++;' +
+  '      var delay=Math.min(30000,2000*Math.pow(1.5,_sseRetry));' +
+  '      _sseReconnTimer=setTimeout(connectSSE,delay);' +
+  '    }' +
   '  };' +
   '}' +
   'connectSSE();' +

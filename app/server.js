@@ -176,7 +176,7 @@ app.get('/api/files', auth, (req, res) => {
 });
 app.get('/api/downloads', auth, async (req, res) => {
   try {
-    const synced = await syncAriaDownloadJobs(req.session.user);
+    const synced = await syncAriaDownloadJobs(req.session.user, true);
     const mine = synced.downloads
       .map(d => ({
         gid: d.gid,
@@ -2107,7 +2107,7 @@ app.post('/api/fm/media', auth, (req, res) => {
   });
 });
 app.get('/api/fm/media-jobs', auth, async (req, res) => {
-  const synced = await syncAriaDownloadJobs(req.session.user);
+  const synced = await syncAriaDownloadJobs(req.session.user, true);
   const jobs = synced.jobs;
   const activeStatuses = new Set(['starting', 'active', 'processing']);
   const scope = req.query.scope || 'all';
@@ -2332,4 +2332,12 @@ function runCleanup() {
   });
 }
 setInterval(runCleanup, 60 * 60 * 1000);
+
+// Background SSE push: sync aria2 jobs for users with active SSE connections
+setInterval(async () => {
+  const users = sse.connectedUsers();
+  for (const username of users) {
+    try { await syncAriaDownloadJobs(username, false); } catch {}
+  }
+}, 3000);
 runCleanup();

@@ -42,7 +42,7 @@ function mediaJobPublic(job) {
   };
 }
 
-async function syncAriaDownloadJobs(username) {
+async function syncAriaDownloadJobs(username, skipSse = false) {
   const dir = utils.userDir(username);
   const jobs = loadMediaJobs();
   let changed = false;
@@ -90,8 +90,7 @@ async function syncAriaDownloadJobs(username) {
   });
   if (changed) {
     saveMediaJobs(jobs);
-    // Уведомляем SSE-клиентов о изменениях
-    sse.emit(username, 'jobs', { ts: Date.now() });
+    if (!skipSse) sse.emit(username, 'jobs', { ts: Date.now() });
   }
   return { jobs, downloads: all };
 }
