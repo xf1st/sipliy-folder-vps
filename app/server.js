@@ -811,6 +811,131 @@ app.post('/api/mytoken/reset', auth, (req, res) => {
   saveTokens(tokens);
   res.json({ token });
 });
+// ─── Admin monitoring dashboard ─────────────────────────────
+let _monitorCache = { ts: 0, data: null };
+app.get('/api/admin/monitor', auth, async (req, res) => {
+  if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
+  // Cache 2s to avoid hammering aria2/du when polling
+  if (_monitorCache.data && Date.now() - _monitorCache.ts < 2000) {
+    return res.json(_monitorCache.data);
+  }
+  const os = require('os');
+
+  // Map an aria2 download dir to its owning username
+  const userOfDir = (dir) => {
+    if (!dir) return '?';
+    const rel = path.relative(DOWNLOADS_ROOT, dir);
+    if (rel.startsWith('..')) return '?';
+    return rel.split(path.sep)[0] || '?';
+  };
+
+  // System stats
+  const totalMem = os.totalmem(), freeMem = os.freemem();
+  const cpus = os.cpus() || [];
+  const load = os.loadavg ? os.loadavg() : [0, 0, 0];
+  const system = {
+    uptime: os.uptime(),
+    procUptime: process.uptime(),
+    loadAvg: load,
+    cpuCount: cpus.length,
+    cpuModel: cpus[0] ? cpus[0].model : 'unknown',
+    memTotal: totalMem,
+    memUsed: totalMem - freeMem,
+    memPercent: totalMem ? Math.round((totalMem - freeMem) / totalMem * 100) : 0,
+    procRss: process.memoryUsage().rss,
+    nodeVersion: process.version,
+    hostname: os.hostname(),
+  };
+
+  // Disk stats for downloads root
+  let disk = null;
+  try {
+    if (typeof fs.statfsSync === 'function') {
+      const sf = fs.statfsSync(fs.existsSync(DOWNLOADS_ROOT) ? DOWNLOADS_ROOT : '.');
+      const total = sf.blocks * sf.bsize;
+      const avail = sf.bfree * sf.bsize;
+      const used = total - avail;
+      disk = { total, used, avail, percent: total ? Math.round(used / total * 100) : 0 };
+    }
+  } catch {}
+
+  // aria2 global stat + active downloads across ALL users
+  let aria = null, downloads = [];
+  try {
+    const [gstat, active, waiting] = await Promise.all([
+      aria2('aria2.getGlobalStat'),
+      aria2('aria2.tellActive'),
+      aria2('aria2.tellWaiting', [0, 100]),
+    ]);
+    aria = {
+      numActive: parseInt(gstat.numActive || 0, 10),
+      numWaiting: parseInt(gstat.numWaiting || 0, 10),
+      numStopped: parseInt(gstat.numStopped || 0, 10),
+      downloadSpeed: parseInt(gstat.downloadSpeed || 0, 10),
+      uploadSpeed: parseInt(gstat.uploadSpeed || 0, 10),
+    };
+    downloads = [...active, ...waiting].map(d => {
+      const filePath = d.files && d.files[0] ? d.files[0].path : '';
+      const total = parseInt(d.totalLength || 0, 10);
+      const done = parseInt(d.completedLength || 0, 10);
+      return {
+        user: userOfDir(d.dir),
+        name: filePath ? path.basename(filePath) : (d.bittorrent && d.bittorrent.info ? d.bittorrent.info.name : '...'),
+        status: d.status,
+        progress: total > 0 ? Math.round(done / total * 100) : 0,
+        size: total,
+        downloaded: done,
+        speed: parseInt(d.downloadSpeed || 0, 10),
+        connections: parseInt(d.connections || 0, 10),
+        seeders: d.numSeeders ? parseInt(d.numSeeders, 10) : null,
+        isTorrent: !!d.bittorrent,
+      };
+    });
+  } catch (e) {
+    aria = { error: 'aria2 unreachable' };
+  }
+
+  // Active media jobs (yt-dlp etc.) across all users
+  const mediaJobs = loadMediaJobs();
+  const activeMedia = Object.values(mediaJobs)
+    .filter(j => ['starting', 'active', 'processing', 'waiting'].includes(j.status))
+    .map(j => ({
+      user: j.user || '?',
+      name: j.name || j.file || 'media',
+      mode: j.mode || '',
+      quality: j.quality || '',
+      status: j.status,
+      progress: Math.round(j.progress || 0),
+      speed: j.speed || '',
+      folder: j.folder || '',
+    }));
+
+  // Per-user disk usage + role
+  const allUsers = loadUsers();
+  const users = Object.keys(allUsers).map(u => ({
+    username: u,
+    label: allUsers[u].label || u,
+    isAdmin: !!allUsers[u].isAdmin,
+    quotaGb: getUserQuotaGb(u),
+    diskUsed: getUserDiskUsedBytes(u),
+  }));
+
+  // SSE connections
+  const sseInfo = { count: sse.count(), users: sse.connectedUsers() };
+
+  // Recent activity (last 20, newest first)
+  const activity = (loadActivity() || []).slice(0, 20).map(a => ({
+    user: a.username || '?',
+    action: a.action || '',
+    details: a.details || '',
+    ts: a.timestamp || null,
+  }));
+
+  const data = { now: Date.now(), system, disk, aria, downloads, activeMedia, users, sse: sseInfo, activity };
+  _monitorCache = { ts: Date.now(), data };
+  res.json(data);
+});
+
 // ─── User management ────────────────────────────────────────
 app.get('/api/users', auth, (req, res) => {
   if (!isAdmin(req.session.user)) return res.status(403).json({ error: 'Forbidden' });
