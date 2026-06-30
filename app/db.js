@@ -183,7 +183,11 @@ function registerUploadedFile(username, filename) {
   try {
     const u = loadUploads();
     if (!u[username]) u[username] = {};
-    u[username][filename] = true;
+    // Store registration timestamp so cleanup uses it as baseline instead of mtime alone.
+    const existing = u[username][filename];
+    if (!existing || existing === true) {
+      u[username][filename] = Date.now();
+    }
     saveUploads(u);
   } catch (e) {
     console.error('Error saving uploads:', e);
@@ -198,6 +202,16 @@ function isUploadedFile(username, filename) {
   } catch (e) {
     return false;
   }
+}
+
+function getUploadedFileTs(username, filename) {
+  if (!username || !filename) return 0;
+  try {
+    const u = loadUploads();
+    const val = u[username] && u[username][filename];
+    if (typeof val === 'number') return val;
+  } catch {}
+  return 0;
 }
 
 function removeUploadedFile(username, filename) {
@@ -263,6 +277,7 @@ module.exports = {
   saveUploads,
   registerUploadedFile,
   isUploadedFile,
+  getUploadedFileTs,
   removeUploadedFile,
   loadActivity,
   logActivity,

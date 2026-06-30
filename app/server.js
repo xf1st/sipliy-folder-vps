@@ -32,7 +32,7 @@ const {
   loadTgUsers, saveTgUsers, loadTokens, saveTokens, loadSettings, saveSettings,
   getUserRetention, getUserMaxTgSize, getUserAccentHex, getUserQuotaGb, getUserDiskUsedBytes,
   hashPassword, verifyPassword, getSessionSecret, loadUsers, saveUsers, isAdmin,
-  loadUploads, saveUploads, registerUploadedFile, isUploadedFile, removeUploadedFile,
+  loadUploads, saveUploads, registerUploadedFile, isUploadedFile, getUploadedFileTs, removeUploadedFile,
   loadActivity, logActivity
 } = db;
 
@@ -2443,9 +2443,14 @@ function runCleanup() {
               if (!left.length) fs.rmdirSync(full);
             } catch {}
           } else {
-            if (fs.statSync(full).mtimeMs < cutoff) {
+            const stat = fs.statSync(full);
+            const rel = path.relative(root, full).replace(/\\/g, '/');
+            const registeredAt = getUploadedFileTs(username, rel) || getUploadedFileTs(username, ent.name);
+            // Use the most recent of mtime and registeredAt so files don't get
+            // deleted early just because their filesystem timestamp is old.
+            const effectiveMs = Math.max(stat.mtimeMs, registeredAt);
+            if (effectiveMs < cutoff) {
               fs.unlinkSync(full);
-              const rel = path.relative(root, full).replace(/\\/g, '/');
               removeUploadedFile(username, rel);
               removeUploadedFile(username, ent.name);
             }
