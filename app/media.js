@@ -64,14 +64,19 @@ async function syncAriaDownloadJobs(username, skipSse = false) {
     if (!j || j.user !== username) return;
     const filePath = d.files?.[0]?.path || '';
     const fileName = filePath ? path.basename(filePath) : '';
-    if (fileName && fileName !== '...') { j.file = fileName; j.name = fileName; }
+    let jobChanged = false;
+    if (fileName && fileName !== '...' && fileName !== j.file) { j.file = fileName; j.name = fileName; jobChanged = true; }
     const progress = d.totalLength > 0 ? Math.round(d.completedLength / d.totalLength * 100) : (d.status === 'complete' ? 100 : (j.progress || 0));
-    if (d.status === 'complete') { j.status = 'complete'; j.progress = 100; }
-    else if (d.status === 'error') { j.status = 'error'; j.error = d.errorMessage || j.error || 'Download error'; j.progress = progress; }
-    else if (d.status === 'active' || d.status === 'waiting' || d.status === 'paused') { j.status = d.status; j.progress = progress; j.speed = utils.fmtBytes(parseInt(d.downloadSpeed || 0)) + '/s'; }
-    j.updatedAt = new Date().toISOString();
-    jobs[d.gid] = j;
-    changed = true;
+    if (d.status === 'complete' && j.status !== 'complete') { j.status = 'complete'; j.progress = 100; jobChanged = true; }
+    else if (d.status === 'error' && j.status !== 'error') { j.status = 'error'; j.error = d.errorMessage || j.error || 'Download error'; j.progress = progress; jobChanged = true; }
+    else if ((d.status === 'active' || d.status === 'waiting' || d.status === 'paused') && (j.status !== d.status || j.progress !== progress)) {
+      j.status = d.status; j.progress = progress; j.speed = utils.fmtBytes(parseInt(d.downloadSpeed || 0)) + '/s'; jobChanged = true;
+    }
+    if (jobChanged) {
+      j.updatedAt = new Date().toISOString();
+      jobs[d.gid] = j;
+      changed = true;
+    }
   });
   Object.values(jobs).forEach(j => {
     if (!j || j.user !== username || seen.has(j.id) || ['complete', 'error', 'cancelled'].includes(j.status)) return;
