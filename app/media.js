@@ -300,6 +300,11 @@ function startMediaJob({ username, url, dir, relPath, mode, filename, quality })
             doneJob.updatedAt = new Date().toISOString();
             latest[id] = doneJob;
             saveMediaJobs(latest);
+            if (!validationErr && doneJob.file) {
+              // Register download timestamp so cleanup treats it as "just added".
+              db.registerUploadedFile(doneJob.user, doneJob.file);
+              if (doneJob.folder) db.registerUploadedFile(doneJob.user, (doneJob.folder ? doneJob.folder + '/' : '') + doneJob.file);
+            }
             // SSE: уведомить клиента + Web Push при завершении
             sse.emit(doneJob.user, 'jobs', { ts: Date.now(), done: doneJob.id });
             // sendPushToUser вызывается из server.js через хук (чтобы не создавать circular dep)
