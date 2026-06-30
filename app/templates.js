@@ -1849,7 +1849,7 @@ function cloudPage(username) { // v3 — multiselect + upload progress + disk fi
   'async function checkConnection(silent){if(!navigator.onLine){setConnectionState(false,false);return;}try{if(!silent)setConnectionState(false,true);var c=new AbortController();var tm=setTimeout(function(){c.abort();},4500);var r=await fetch("/api/speedtest/ping?health=1&x="+Date.now(),{cache:"no-store",signal:c.signal});clearTimeout(tm);setConnectionState(!!r.ok,false);}catch(e){setConnectionState(false,false);}}' +
   'window.addEventListener("offline",function(){setConnectionState(false,false);});' +
   'window.addEventListener("online",function(){checkConnection(false);});' +
-  'function rememberNewFile(job){if(!job||!job.file)return;var ts=new Date(job.updatedAt||job.createdAt||Date.now()).getTime();if(Date.now()-ts>30*60*1000)return;var fp=(job.folder?job.folder+"/":"")+job.file;recentNewFiles[fp]=ts+30*60*1000;}' +
+  'function rememberNewFile(job){if(!job||!job.file)return;var ts=new Date(job.completedAt||job.updatedAt||job.createdAt||Date.now()).getTime();if(Date.now()-ts>30*60*1000)return;var fp=(job.folder?job.folder+"/":"")+job.file;recentNewFiles[fp]=ts+30*60*1000;}' +
   'function savePendingUrlJobs(){try{localStorage.setItem("pending-url-jobs",JSON.stringify(pendingUrlJobs));}catch(e){}}' +
   'function markPendingUrlJob(gid,folder){if(!gid)return;pendingUrlJobs[gid]={folder:folder||"",at:Date.now(),seen:false};savePendingUrlJobs();}' +
   'function clearPendingUrlJob(gid){if(!gid||!pendingUrlJobs[gid])return;delete pendingUrlJobs[gid];savePendingUrlJobs();}' +

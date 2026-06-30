@@ -47,7 +47,7 @@ const {
 
 // Destructure from media
 const {
-  mediaProcesses, loadMediaJobs, saveMediaJobs, mediaJobPublic, syncAriaDownloadJobs,
+  mediaProcesses, loadMediaJobs, saveMediaJobs, migrateMediaJobsCompletedAt, mediaJobPublic, syncAriaDownloadJobs,
   ytDlpAvailable, startMediaJob
 } = media;
 
@@ -2471,3 +2471,5 @@ setInterval(async () => {
   }
 }, 3000);
 runCleanup();
+// One-time backfill so historical completed downloads stop showing as NEW.
+try { migrateMediaJobsCompletedAt(); } catch {}

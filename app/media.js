@@ -19,6 +19,25 @@ function saveMediaJobs(jobs) {
   db.writeJsonAtomic(config.MEDIA_JOBS_FILE, jobs, { pretty: true });
 }
 
+// One-time migration: anchor the "NEW" badge to a stable completion time.
+// Old completed jobs lack completedAt, so the client would fall back to
+// updatedAt — which the previous polling bug kept refreshing. Backfill
+// completedAt from createdAt so historical downloads stop showing as NEW.
+function migrateMediaJobsCompletedAt() {
+  let jobs;
+  try { jobs = loadMediaJobs(); } catch { return; }
+  let changed = false;
+  Object.values(jobs).forEach(j => {
+    if (j && j.status === 'complete' && !j.completedAt) {
+      j.completedAt = j.createdAt || j.updatedAt || new Date(0).toISOString();
+      changed = true;
+    }
+  });
+  if (changed) {
+    try { saveMediaJobs(jobs); } catch {}
+  }
+}
+
 function mediaJobPublic(job) {
   const rawError = job.error || '';
   const isWarningOnly = /^WARNING:/i.test(rawError) && ['active', 'processing', 'complete'].includes(job.status);
@@ -67,7 +86,7 @@ async function syncAriaDownloadJobs(username, skipSse = false) {
     let jobChanged = false;
     if (fileName && fileName !== '...' && fileName !== j.file) { j.file = fileName; j.name = fileName; jobChanged = true; }
     const progress = d.totalLength > 0 ? Math.round(d.completedLength / d.totalLength * 100) : (d.status === 'complete' ? 100 : (j.progress || 0));
-    if (d.status === 'complete' && j.status !== 'complete') { j.status = 'complete'; j.progress = 100; jobChanged = true; }
+    if (d.status === 'complete' && j.status !== 'complete') { j.status = 'complete'; j.progress = 100; j.completedAt = new Date().toISOString(); jobChanged = true; }
     else if (d.status === 'error' && j.status !== 'error') { j.status = 'error'; j.error = d.errorMessage || j.error || 'Download error'; j.progress = progress; jobChanged = true; }
     else if ((d.status === 'active' || d.status === 'waiting' || d.status === 'paused') && (j.status !== d.status || j.progress !== progress)) {
       j.status = d.status; j.progress = progress; j.speed = utils.fmtBytes(parseInt(d.downloadSpeed || 0)) + '/s'; jobChanged = true;
@@ -88,6 +107,7 @@ async function syncAriaDownloadJobs(username, skipSse = false) {
       j.name = path.basename(expected);
       j.status = 'complete';
       j.progress = 100;
+      j.completedAt = new Date().toISOString();
       j.updatedAt = new Date().toISOString();
       jobs[j.id] = j;
       changed = true;
@@ -301,6 +321,7 @@ function startMediaJob({ username, url, dir, relPath, mode, filename, quality })
               doneJob.error = '';
               doneJob.file = path.basename(full);
               doneJob.name = doneJob.file;
+              doneJob.completedAt = new Date().toISOString();
             }
             doneJob.updatedAt = new Date().toISOString();
             latest[id] = doneJob;
@@ -334,6 +355,7 @@ module.exports = {
   mediaProcesses,
   loadMediaJobs,
   saveMediaJobs,
+  migrateMediaJobsCompletedAt,
   mediaJobPublic,
   syncAriaDownloadJobs,
   ytDlpAvailable,
