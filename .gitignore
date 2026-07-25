@@ -4,6 +4,9 @@ node_modules/
 # Конфиденциальные данные — НЕ коммитить
 info_about_vps.txt
 deploy.config.js
+.env
+.env.*
+
 
 # Сгенерированные артефакты / публичные файлы
 sipliyfolder-extension-*.zip

@@ -1,21 +1,27 @@
 const path = require('path');
 
-const PORT = 3000;
+try {
+  require('dotenv').config({ path: path.join(__dirname, '../.env') });
+} catch (e) {
+  // dotenv optional if process.env populated
+}
+
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const SITE_VERSION = '2.21.1';
-const ARIA2_URL = 'http://localhost:6800/jsonrpc';
-const ARIA2_TOKEN = 'mySecretToken123';
-const DOWNLOADS_ROOT = '/var/downloads';
+const ARIA2_URL = process.env.ARIA2_URL || 'http://localhost:6800/jsonrpc';
+const ARIA2_TOKEN = process.env.ARIA2_TOKEN || 'mySecretToken123';
+const DOWNLOADS_ROOT = process.env.DOWNLOADS_ROOT || '/var/downloads';
 
 // VirusTotal
-const VT_API = 'https://www.virustotal.com/api/v3';
-const VT_API_KEY = '93c0c934a298f0f35b0f95be051de5b4e4ea7340fa3c7bb8fd5c1f572a13c2b8';
+const VT_API = process.env.VT_API || 'https://www.virustotal.com/api/v3';
+const VT_API_KEY = process.env.VT_API_KEY || '93c0c934a298f0f35b0f95be051de5b4e4ea7340fa3c7bb8fd5c1f572a13c2b8';
 
 // Telegram
-const TG_TOKEN = '8981938565:AAGrVbZwhuuw_AEFauvwr4tWVVhOgUCHNQ4';
-const TG_BOT_NAME = 'SiplyiFolderUpload_bot';
+const TG_TOKEN = process.env.TG_TOKEN || '8981938565:AAGrVbZwhuuw_AEFauvwr4tWVVhOgUCHNQ4';
+const TG_BOT_NAME = process.env.TG_BOT_NAME || 'SiplyiFolderUpload_bot';
 
 // File Paths
-const BASE_DIR = '/opt/vps-downloader';
+const BASE_DIR = process.env.BASE_DIR || '/opt/vps-downloader';
 const SHARES_FILE = path.join(BASE_DIR, 'shares.json');
 const MEDIA_JOBS_FILE = path.join(BASE_DIR, 'media-jobs.json');
 const TOKENS_FILE = path.join(BASE_DIR, 'tokens.json');

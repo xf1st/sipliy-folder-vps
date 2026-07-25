@@ -127,12 +127,30 @@ async function deploy() {
       conn.sftp((err, s) => err ? reject(err) : resolve(s));
     });
 
-    console.log('==> Uploading server.js, package files, extension.zip');
-    await uploadBuffer(sftp, `${config.appDir}/server.js`, serverJs);
+    console.log('==> Uploading app files, package files, .env, extension.zip');
+    const appDirLocal = path.join(root, 'app');
+    const appFiles = fs.readdirSync(appDirLocal).filter(f => f.endsWith('.js'));
+    for (const file of appFiles) {
+      const content = fs.readFileSync(path.join(appDirLocal, file));
+      await uploadBuffer(sftp, `${config.appDir}/${file}`, content);
+      console.log(`    Uploaded ${file}`);
+    }
+
+    const localEnv = path.join(root, '.env');
+    const localEnvExample = path.join(root, '.env.example');
+    if (fs.existsSync(localEnv)) {
+      await uploadBuffer(sftp, `${config.appDir}/.env`, fs.readFileSync(localEnv));
+      console.log('    Uploaded .env');
+    } else if (fs.existsSync(localEnvExample)) {
+      await uploadBuffer(sftp, `${config.appDir}/.env`, fs.readFileSync(localEnvExample));
+      console.log('    Uploaded .env from .env.example');
+    }
+
     await uploadBuffer(sftp, `${config.appDir}/package.json`, packageJson);
     await uploadBuffer(sftp, `${config.appDir}/package-lock.json`, packageLock);
     await uploadFile(sftp, extensionZip, `${config.appDir}/extension.zip`);
 
+    await exec(conn, `chmod 600 ${config.appDir}/.env 2>/dev/null || true`);
     await exec(conn, `cd ${config.appDir} && npm ci --omit=dev`);
     await exec(conn, `cd ${config.appDir} && node --check server.js`);
 
